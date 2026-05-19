@@ -33,7 +33,7 @@ import glob
 import pandas as pd
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -65,8 +65,14 @@ class AlignmentMetadata:
 
     input_label_scheme: str     # "nnunet" or "labelfusion"
 
-    globe_centroid_world: list  # [x, y, z] in RAS mm
+    # Centroids are stored in the ORIGINAL scanner world frame (before the RAS
+    # reorient + OS→OD flip). They map back to the original NIfTI via
+    # `original_affine` and `crop_slices`.
+    globe_centroid_world: list      # dense globe CC centroid (for QC / OD-OS sanity)
+    crop_centroid_world: list       # whole-eye centroid actually used to position the crop
+
     patch_size_mm: float
+    search_size_mm: float           # search bbox for whole-eye centroid (≥ patch_size)
     crop_center_voxel: list
     crop_slices: list
 
@@ -80,9 +86,6 @@ class AlignmentMetadata:
     globe_volume_mm3: float
     on_volume_mm3: float
     num_structures_found: int
-
-    centroid_source: str          # "dense" or "sparse"  
-    sparsify_centroid_params: dict  # {"axis": 2, "step": 4, "offset": 0} or null
 
 
 # ── Label detection ───────────────────────────────────────────────
@@ -114,7 +117,9 @@ def detect_label_scheme(data: np.ndarray) -> Tuple[str, Dict[int, str]]:
         return "nnunet", NNUNET_MAP_CT
     if labels & {5, 7}:
         return "labelfusion", LABELFUSION_MAP_CT
-    return "labelfusion", LABELFUSION_MAP_CT
+    # No reliable signal — refuse to guess so downstream remapping doesn't
+    # silently produce garbage.
+    return "unknown", {}
 
 
 def remap_to_canonical(data: np.ndarray, input_map: Dict[int, str]) -> np.ndarray:
@@ -142,12 +147,15 @@ def separate_eyes(data, affine, globe_label, min_vox=50):
         c_world = (affine @ np.append(c_vox, 1.0))[:3]
         eyes.append({"centroid_voxel": c_vox, "centroid_world": c_world, "nvox": nvox})
 
+    if not eyes:
+        return []
+
     # Sort by L-R world coordinate, accounting for affine orientation
     axcodes = nib.aff2axcodes(affine)
     lr_axis = next((i for i, c in enumerate(axcodes) if c in ('R', 'L')), 0)
     sign = 1 if axcodes[lr_axis] == 'R' else -1
 
-    if len(eyes) < 2:
+    if len(eyes) == 1:
         eyes[0]["eye"] = "OD" if eyes[0]["centroid_world"][lr_axis] * sign > 0 else "OS"
         return eyes
 
@@ -159,6 +167,57 @@ def separate_eyes(data, affine, globe_label, min_vox=50):
     eyes[0]["eye"] = "OD"
     eyes[1]["eye"] = "OS"
     return eyes
+
+def _whole_eye_centroid(data, affine, this_globe_vox, other_globe_vox,
+                        search_size_mm, voxel_sizes):
+    """
+    Compute the dense centroid of ALL foreground voxels belonging to one eye.
+
+    Anatomy: the globe sits anteriorly while the optic nerve extends posteriorly
+    and orbital fat/recti wrap around both, so the geometric center of the full
+    eye is several mm posterior to the globe center. Cropping around this
+    "whole-eye centroid" gives a balanced 64 mm patch that fully covers globe
+    and ON without wasting volume.
+
+    Args:
+        this_globe_vox:    [3] globe CC centroid of THIS eye, voxel coords.
+        other_globe_vox:   [3] globe CC centroid of the contralateral eye, or
+                           None for single-eye cases. Used to clip the search
+                           bbox at the midplane so the contralateral eye does
+                           not pull the centroid toward midline.
+        search_size_mm:    Side length of the search bbox. Should be larger
+                           than patch_size_mm so the bbox catches the full ON.
+
+    Returns:
+        (centroid_voxel, centroid_world) or None if the bbox has no foreground.
+    """
+    half_vox = np.round((search_size_mm / 2.0) / voxel_sizes).astype(int)
+    center = np.round(this_globe_vox).astype(int)
+
+    bbox_lo = [int(max(0, center[ax] - half_vox[ax])) for ax in range(3)]
+    bbox_hi = [int(min(data.shape[ax], center[ax] + half_vox[ax])) for ax in range(3)]
+
+    # Clip on the L–R separation axis at the midplane between the two globes,
+    # so we don't accidentally pull in foreground from the other orbit.
+    if other_globe_vox is not None:
+        diff = np.asarray(other_globe_vox) - np.asarray(this_globe_vox)
+        sep_axis = int(np.argmax(np.abs(diff)))
+        midpoint = int(round((other_globe_vox[sep_axis] + this_globe_vox[sep_axis]) / 2.0))
+        if diff[sep_axis] > 0:
+            bbox_hi[sep_axis] = min(bbox_hi[sep_axis], midpoint)
+        else:
+            bbox_lo[sep_axis] = max(bbox_lo[sep_axis], midpoint)
+
+    sl = tuple(slice(bbox_lo[ax], bbox_hi[ax]) for ax in range(3))
+    mask = data[sl] > 0
+    if not mask.any():
+        return None
+
+    c_local = np.array(ndimage.center_of_mass(mask))
+    origin = np.array([s.start for s in sl], dtype=float)
+    c_vox = c_local + origin
+    c_world = (affine @ np.append(c_vox, 1.0))[:3]
+    return c_vox, c_world
 
 
 # ── Crop + reorient + validate ────────────────────────────────────
@@ -209,35 +268,77 @@ def flip_os_to_od(data, affine):
 
 # ── Single-case ───────────────────────────────────────────────────
 
-def align_single_case(seg_path, source_id, source="checklist", patch_size_mm=64.0, sparsify_for_centroid=True, sparsify_axis=2, sparsify_step=4, sparsify_offset=0):
+def align_single_case(seg_path, source_id, source="checklist",
+                      patch_size_mm=64.0, search_size_mm=None):
+    """
+    Crop one fully-aligned `patch_size_mm` cubic patch per eye, centered on the
+    **whole-eye centroid** (centroid of globe + ON + fat + recti combined).
+
+    Anatomy: the globe sits anteriorly while the optic nerve extends
+    posteriorly; cropping around the whole-eye centroid (rather than the globe
+    centroid) keeps the patch balanced and fully covers ON + globe in 64 mm.
+
+    The offline crop is intentionally sparsity-agnostic; downstream
+    sparsification (in dataset.py) only changes which voxels of this fixed
+    patch are observed, never the patch's location in physical space.
+
+    Args:
+        patch_size_mm:   Side length of the saved patch.
+        search_size_mm:  Side length of the bbox used to locate the whole-eye
+                         centroid. Should be larger than `patch_size_mm` so the
+                         posterior ON is captured; midplane-clipped between
+                         OD/OS so the contralateral eye is excluded. Defaults
+                         to 1.5 × patch_size_mm.
+    """
+    if search_size_mm is None:
+        search_size_mm = patch_size_mm * 1.5
+
     img = nib.load(seg_path)
-    data = np.asarray(img.dataobj, dtype=np.int32)
+    # int16 holds both the standard {0..255} labels and the atlas -1000 offset
+    # convention without doubling memory like int32 did.
+    data = np.asarray(img.dataobj).astype(np.int16, copy=False)
     affine = img.affine.copy()
 
     scheme_name, label_map = detect_label_scheme(data)
+    if not label_map:
+        raise ValueError(f"{source_id}: unrecognized label scheme")
 
-    globe_lbl = next((l for l, n in label_map.items() if n == "Globe"), None)
+    globe_lbl = next(l for l, n in label_map.items() if n == "Globe")
+
     eyes = separate_eyes(data, affine, globe_lbl)
+    if not eyes:
+        # Scheme was recognized but the data has no globe CC ≥ min_vox
+        # (e.g., segmenter dropped the globe label, or only noise voxels).
+        print(f"  SKIP {source_id}: no globe connected component found")
+        return []
 
     voxel_sizes = np.sqrt(np.sum(affine[:3, :3] ** 2, axis=0))
     results = []
 
-    for eye_info in eyes:
+    for idx, eye_info in enumerate(eyes):
         casename = f"{source_id}_{eye_info['eye']}"
+        other_globe_vox = eyes[1 - idx]["centroid_voxel"] if len(eyes) == 2 else None
 
-        if sparsify_for_centroid:
-            sparse_c = _sparse_globe_centroid(
-                data, affine, globe_lbl,
-                eye_info["centroid_voxel"],  # dense centroid as search anchor
-                patch_size_mm, voxel_sizes,
-                sparsify_axis, sparsify_step, sparsify_offset,
-            )
-            if sparse_c is not None:
-                eye_info["centroid_voxel"] = sparse_c[0]
-                eye_info["centroid_world"] = sparse_c[1]
+        globe_centroid_world = eye_info["centroid_world"].copy()
+        crop_centroid_vox = eye_info["centroid_voxel"].copy()
+        crop_centroid_world = eye_info["centroid_world"].copy()
+
+        eye_c = _whole_eye_centroid(
+            data, affine,
+            eye_info["centroid_voxel"], other_globe_vox,
+            search_size_mm, voxel_sizes,
+        )
+        if eye_c is not None:
+            crop_centroid_vox, crop_centroid_world = eye_c
+        else:
+            # Defensive: separate_eyes already ensured a globe CC exists in
+            # this neighborhood, so the search bbox should always contain
+            # foreground.
+            print(f"  WARN {casename}: whole-eye search returned no foreground; "
+                  f"falling back to globe centroid")
 
         crop_sl = compute_crop_slices(
-            eye_info["centroid_voxel"], data.shape, patch_size_mm, voxel_sizes
+            crop_centroid_vox, data.shape, patch_size_mm, voxel_sizes
         )
         patch = data[
             crop_sl[0][0]:crop_sl[0][1],
@@ -257,10 +358,16 @@ def align_single_case(seg_path, source_id, source="checklist", patch_size_mm=64.
         if was_flipped:
             patch, pa = flip_os_to_od(patch, pa)
 
-        sp = np.abs(np.diagonal(pa)[:3])  # spacing from diagonal affine
+        # Column norms instead of np.diagonal — gives sensible spacing even if
+        # validate_diagonal_affine warned about residual off-diagonal terms.
+        sp = np.sqrt(np.sum(pa[:3, :3] ** 2, axis=0))
         vv = float(np.prod(sp))
 
-        used_sparse = (sparsify_for_centroid and sparse_c is not None)
+        # Single pass over the patch covers all label-count metadata.
+        counts = np.bincount(patch.ravel(), minlength=NUM_CLASSES)
+        globe_vol = float(counts[CANONICAL_LABELS["Globe"]]) * vv
+        on_vol = float(counts[CANONICAL_LABELS["ON"]]) * vv
+        n_structs = int(np.sum(counts[1:NUM_CLASSES] > 0))
 
         meta = AlignmentMetadata(
             source=source, source_id=str(source_id),
@@ -269,25 +376,21 @@ def align_single_case(seg_path, source_id, source="checklist", patch_size_mm=64.
             original_affine=affine.tolist(),
             original_shape=list(data.shape),
             input_label_scheme=scheme_name,
-            globe_centroid_world=eye_info["centroid_world"].tolist(),
+            globe_centroid_world=globe_centroid_world.tolist(),
+            crop_centroid_world=crop_centroid_world.tolist(),
             patch_size_mm=patch_size_mm,
-            crop_center_voxel=np.round(eye_info["centroid_voxel"]).astype(int).tolist(),
+            search_size_mm=search_size_mm,
+            crop_center_voxel=np.round(crop_centroid_vox).astype(int).tolist(),
             crop_slices=crop_sl,
             original_ornt=orig_ornt, target_ornt="RAS",
             was_flipped=was_flipped,
             patch_spacing=sp.tolist(),
             patch_voxel_shape=list(patch.shape),
-            globe_volume_mm3=float(np.sum(patch == CANONICAL_LABELS["Globe"])) * vv,
-            on_volume_mm3=float(np.sum(patch == CANONICAL_LABELS["ON"])) * vv,
-            centroid_source="sparse" if used_sparse else "dense",
-            sparsify_centroid_params=(
-                {"axis": sparsify_axis, "step": sparsify_step, "offset": sparsify_offset}
-                if used_sparse else None
-            ),
-            num_structures_found=sum(
-                1 for lbl in range(1, NUM_CLASSES) if np.any(patch == lbl)
-            ),
+            globe_volume_mm3=globe_vol,
+            on_volume_mm3=on_vol,
+            num_structures_found=n_structs,
         )
+
         results.append((patch, pa, meta))
 
     return results
@@ -302,7 +405,16 @@ def _collect_scan_list(checklist_csv=None, atlas_label_dir=None):
     if checklist_csv and Path(checklist_csv).exists():
         df = pd.read_csv(checklist_csv)
         if "keep" in df.columns:
-            df = df[df["keep"] == True]  # noqa
+            keep_col = df["keep"]
+            if keep_col.dtype == bool:
+                mask = keep_col.fillna(False)
+            else:
+                # Tolerate "True"/"true"/1/"1"/"yes" and treat anything else as drop.
+                mask = (
+                    keep_col.astype(str).str.strip().str.lower()
+                    .isin({"true", "1", "yes", "y"})
+                )
+            df = df[mask]
         if "subject" in df.columns and "session" in df.columns:
             df = df.sort_values(["subject", "session"]).drop_duplicates(
                 subset="subject", keep="first"
@@ -338,7 +450,8 @@ def _collect_scan_list(checklist_csv=None, atlas_label_dir=None):
 
 
 def align_dataset(checklist_csv=None, atlas_label_dir=None,
-                  output_dir="aligned_patches", patch_size_mm=64.0):
+                  output_dir="aligned_patches", patch_size_mm=64.0,
+                  search_size_mm=None):
     out_labels = Path(output_dir) / "labels"
     out_meta = Path(output_dir) / "metadata"
     out_labels.mkdir(parents=True, exist_ok=True)
@@ -346,6 +459,7 @@ def align_dataset(checklist_csv=None, atlas_label_dir=None,
 
     scans = _collect_scan_list(checklist_csv, atlas_label_dir)
     all_meta = []
+    n_failed = 0
 
     for scan in scans:
         if not Path(scan["seg_path"]).exists():
@@ -353,9 +467,17 @@ def align_dataset(checklist_csv=None, atlas_label_dir=None,
             continue
 
         print(f"Processing {scan['source_id']}...")
-        results = align_single_case(
-            scan["seg_path"], scan["source_id"], scan["source"], patch_size_mm
-        )
+        try:
+            results = align_single_case(
+                scan["seg_path"], scan["source_id"], scan["source"],
+                patch_size_mm=patch_size_mm,
+                search_size_mm=search_size_mm,
+            )
+        except Exception as e:  # noqa: BLE001 — keep batch going on per-case failure
+            n_failed += 1
+            print(f"  FAIL {scan['source_id']}: {type(e).__name__}: {e}")
+            continue
+
         for patch, pa, meta in results:
             nib.save(
                 nib.Nifti1Image(patch.astype(np.uint8), pa),
@@ -368,45 +490,4 @@ def align_dataset(checklist_csv=None, atlas_label_dir=None,
                   f"spacing={[f'{s:.2f}' for s in meta.patch_spacing]}mm "
                   f"structs={meta.num_structures_found}/4")
 
-    print(f"\nTotal patches: {len(all_meta)}")
-
-def _sparse_globe_centroid(data, affine, globe_lbl, dense_centroid_vox,
-                           patch_size_mm, voxel_sizes, axis, step, offset):
-    """
-    Compute globe centroid from sparsified data within one eye's neighborhood.
-    
-    Strategy: use dense centroid to define a search region (the patch_size_mm 
-    bounding box around this eye), then zero out non-observed slices within 
-    that region and compute center_of_mass from surviving globe voxels.
-    
-    The zeroing-out approach is mathematically equivalent to extracting sparse 
-    slices and mapping back: non-observed slices contribute 0 to both 
-    numerator and denominator of center_of_mass.
-    """
-    # Generous bounding box around this eye (same size as the patch crop)
-    half_vox = np.round((patch_size_mm / 2.0) / voxel_sizes).astype(int)
-    center = np.round(dense_centroid_vox).astype(int)
-    sl = tuple(
-        slice(max(0, center[ax] - half_vox[ax]),
-              min(data.shape[ax], center[ax] + half_vox[ax]))
-        for ax in range(3)
-    )
-    
-    # Globe mask restricted to this eye's region
-    globe_in_eye = np.zeros_like(data, dtype=bool)
-    globe_in_eye[sl] = (data[sl] == globe_lbl)
-    
-    # Zero out non-observed slices (simulate sparsification)
-    sparse_globe = np.zeros_like(globe_in_eye)
-    slc = [slice(None)] * 3
-    for sid in range(offset, data.shape[axis], step):
-        slc_copy = list(slc)
-        slc_copy[axis] = sid
-        sparse_globe[tuple(slc_copy)] = globe_in_eye[tuple(slc_copy)]
-    
-    if sparse_globe.sum() == 0:
-        return None
-    
-    c_vox = np.array(ndimage.center_of_mass(sparse_globe))
-    c_world = (affine @ np.append(c_vox, 1.0))[:3]
-    return c_vox, c_world
+    print(f"\nTotal patches: {len(all_meta)} (failed scans: {n_failed})")

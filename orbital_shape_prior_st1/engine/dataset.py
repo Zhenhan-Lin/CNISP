@@ -58,10 +58,28 @@ def load_orbital_volumes(labels_dir: Path, casenames: List[str]):
         img = nib.load(str(nii_path))
         vol = np.asarray(img.dataobj, dtype=np.float32)
         aff = img.affine
-        spacing = np.abs(np.diagonal(aff)[:3]).astype(np.float32)
+        # Column norms over diagonal: robust to residual off-diagonal terms;
+        # equals the diagonal magnitude when the affine is properly axis-aligned.
+        spacing = np.sqrt((aff[:3, :3] ** 2).sum(axis=0)).astype(np.float32)
         volumes.append(torch.from_numpy(vol))
         spacings.append(torch.from_numpy(spacing))
     return volumes, spacings
+
+
+def compute_centroid_mm(volume: torch.Tensor, spacing: torch.Tensor,
+                        offset: torch.Tensor) -> torch.Tensor:
+    """
+    Center of mass of foreground voxels (volume > 0) in physical (mm)
+    coordinates of the patch-local frame: `coord = voxel_idx * spacing + offset`.
+
+    Cheap: O(N_fg) on the sparse volume's foreground voxels.
+    Returns a [3] tensor; NaN per axis if no foreground exists.
+    """
+    fg = (volume > 0).nonzero(as_tuple=False)  # [N_fg, 3], voxel indices
+    if fg.numel() == 0:
+        return torch.full((3,), float("nan"), dtype=torch.float32)
+    centroid_voxel = fg.to(torch.float32).mean(dim=0)
+    return centroid_voxel * spacing + offset
 
 
 class OrbitalImplicitDataset(data.Dataset):
@@ -74,6 +92,11 @@ class OrbitalImplicitDataset(data.Dataset):
         casenames: str
         caseids:  int     (unique per training item, indexes into latent table)
         scan_ids: int     (shared across offsets of the same scan)
+        observed_centroid_mm: [3]
+            Center of mass of the sparse-observed foreground, in the same
+            patch-local mm frame as `coords`. Drifts up to step*spacing/2 with
+            slice_start_id; the true (dense) centroid sits at ≈ patch_size/2
+            because canonical_align centers each crop on the whole-eye centroid.
     Plus (INF only): labels_hr, spacings_hr, offsets_hr
     """
 
@@ -188,6 +211,8 @@ class OrbitalImplicitDataset(data.Dataset):
             self.scan_ids = list(range(n))
             self.sparsify_offsets_used = starts
 
+        self._cache_observed_centroids()
+
     # ── Strategy B init (multi-offset) ────────────────────────────
 
     def _init_multi_offset(self, labels_dense, spacings_dense, offsets_dense,
@@ -225,7 +250,29 @@ class OrbitalImplicitDataset(data.Dataset):
                 self.sparsify_offsets_used.append(off)
                 latent_idx += 1
 
+        self._cache_observed_centroids()
+
     # ── Helpers ───────────────────────────────────────────────────
+
+    def _cache_observed_centroids(self):
+        """
+        Precompute per-item centroid of the OBSERVED (sparsified) foreground
+        in patch-local physical (mm) coordinates.
+
+        The true eye centroid is fixed in physical space, but the centroid
+        computed from sparse observations drifts by up to step*spacing/2 along
+        the sparsified axis depending on `slice_start_id`. Exposing this
+        observed centroid lets downstream code (e.g. model conditioning on the
+        observed center) encode that drift explicitly.
+        """
+        self.observed_centroids_mm = [
+            compute_centroid_mm(
+                self.labels_sparse[i],
+                self.spacings_sparse[i],
+                self.offsets_sparse[i],
+            )
+            for i in range(len(self.labels_sparse))
+        ]
 
     @staticmethod
     def _split_ids(n, val_fraction):
@@ -285,6 +332,11 @@ class OrbitalImplicitDataset(data.Dataset):
             "casenames": self.casenames[item],
             "caseids": self.caseids[item],
             "scan_ids": self.scan_ids[item],
+            # Centroid of observed sparse foreground in patch-local mm. Drifts
+            # with sparsify offset; the dense true centroid sits at roughly
+            # `patch_size_mm / 2` since canonical_align centers each crop on
+            # the whole-eye centroid.
+            "observed_centroid_mm": self.observed_centroids_mm[item],
         }
         if self.yield_full_res:
             scan_id = self.scan_ids[item]
