@@ -1,0 +1,62 @@
+# --- Training configuration ---
+
+# Model identification (set to None for debug runs that don't save)
+model_name: orbital_ad_v2
+
+# --- Architecture ---
+task_type: 0              # 0 = AutoDecoder (only option for Stage 1)
+num_classes: 5            # BG + ON + Globe + Fat + Recti
+latent_dim: 128
+op_num_layers: 8
+op_coord_layers: [0, 4]   # layers where coordinates are injected
+
+# --- Data ---
+labels_dirname: labels     # subdirectory name under aligned_dir
+train_casefile: train_cases.txt
+val_fraction: 0.15
+
+num_sparsify_offsets: 4
+val_casefile: val_cases.txt
+
+test_fraction: 0.2
+
+# --- Sparsification (synthetic anisotropy for training) ---
+# Keep every Nth slice along this axis to simulate thick-slice acquisition
+slice_step_size: 4
+# 0=sagittal, 1=coronal, 2=axial (in LPS after canonical alignment)
+slice_step_axis: 2
+use_thick_slices: false
+
+# --- Sampling ---
+# Points per example per dim for training (64^3 = 262144 points total)
+num_points_per_example_per_dim_train: 80
+batch_size_train: 8
+batch_size_val: 1
+
+# --- Class-balanced sampling ---
+# ON and Recti are small structures; boost their sampling weight
+# Weight per class: [BG, ON, Globe, Fat, Recti]
+# null = uniform sampling (original Amiranashvili behavior)
+class_sample_weights: null
+# Alternative: [0.1, 0.3, 0.15, 0.15, 0.3]
+# ^ would oversample ON and Recti voxels during training
+
+# --- Loss ---
+# Multi-class CE + Dice, following Jansen et al.
+loss_ce_weight: 1.0
+loss_dice_weight: 1.0
+# Per-class Dice weights (null = equal weight)
+# Can upweight ON and Recti if needed
+dice_class_weights: null
+
+# --- Optimization ---
+learning_rate: 1.0e-4      # for network params, scaled by batch_size
+learning_rate_lat: 1.0e-3   # for latent codes, NOT scaled by batch_size
+lat_reg_lambda: 1.0e-4      # L2 regularization on latent codes
+num_epochs: 2000
+
+# --- Logging & checkpointing ---
+log_epoch_count: 1
+checkpoint_epoch_count: 100
+max_num_checkpoints: 5
+num_workers: 2

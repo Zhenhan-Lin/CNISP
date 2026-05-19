@@ -1,0 +1,24 @@
+# --- Paths configuration ---
+# Two data sources, both CT-only:
+
+# Source 1: QA-kept nnUNet predictions
+# CSV with columns: subject, session, image_label, keep, reviewed, pred_path
+checklist_csv: /home-local/linz18/eye_segmentation/QA_nnUNet_CT/check_list/nnUNetTrainer_resampling_results/review_checklist.csv
+
+# Source 2: CTONS_atlas_TBI manual GT labels ({1,3,5,7} scheme)
+atlas_label_dir: /home-local/linz18/atlas_megadocker_export/CTONS_atlas_TBI/atlas_labels
+
+# Output directory for canonical-aligned patches
+aligned_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/aligned_patches
+
+# Model storage
+model_basedir: /home-local/linz18/CNISP/orbital_shape_prior_st1/models
+
+# Reconstruction output
+output_basedir: /home-local/linz18/CNISP/orbital_shape_prior_st1/reconstructions
+
+# Casename files (train_cases.txt, test_cases.txt)
+casefiles_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/casename_files
+
+# Subdirectory name for labels inside aligned_dir
+labels_dirname: labels

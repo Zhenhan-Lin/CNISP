@@ -1,0 +1,42 @@
+# ── Test A configuration ──────────────────────────────────────────
+# Controls how test cases are sparsified and how latent is optimized.
+#
+# Test A (controlled reconstruction):
+#   Takes full-resolution aligned GT → synthetically sparsifies → 
+#   optimizes latent → dense reconstruction → compare with GT.
+#
+# This measures the shape prior's CEILING performance.
+
+# Which cases to test on
+test_casefile: test_cases.txt
+
+# ── Synthetic sparsification ──────────────────────────────────────
+# Simulates anisotropic acquisition by keeping every Nth slice.
+# Should match or be more aggressive than training sparsification.
+# slice_step_size: 4
+test_step_sizes: [1, 3, 5, 7]
+slice_step_axis: 2         # 0=sagittal, 1=coronal, 2=axial (in RAS)
+use_thick_slices: false    # Must be false for multi-class labels
+
+# ── Checkpoint selection ──────────────────────────────────────────
+# "best" = best_checkpoint.pth (best val dice during training)
+# "latest" = most recent periodic checkpoint
+# Can also be overridden via --checkpoint CLI flag
+# checkpoint: best
+checkpoint: latest
+
+# ── Test-time latent optimization ─────────────────────────────────
+# For each test case, optimize a fresh latent z against the sparse
+# observation while keeping MLP weights frozen.
+latent_num_iters: 3000     # max optimization steps
+latent_lr: 1.0e-2          # Adam learning rate for latent
+# Early stopping: stop if dice doesn't improve for N consecutive
+# 10-step evaluation blocks. Set to -1 to disable.
+max_num_const_train_dsc: 10
+
+# ── Output ────────────────────────────────────────────────────────
+export_predictions: true   # save *_pred.nii.gz per case
+evaluate_predictions: true
+
+# ── Batch size (must be 1 for test — each case has different shape) ─
+batch_size_val: 1
