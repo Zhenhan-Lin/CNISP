@@ -369,7 +369,6 @@ def align_dataset(checklist_csv=None, atlas_label_dir=None,
                   f"structs={meta.num_structures_found}/4")
 
     print(f"\nTotal patches: {len(all_meta)}")
-    return all_meta
 
 def _sparse_globe_centroid(data, affine, globe_lbl, dense_centroid_vox,
                            patch_size_mm, voxel_sizes, axis, step, offset):

@@ -39,7 +39,7 @@ def main():
     print("=" * 60)
     print("STEP 1: Canonical alignment")
     print("=" * 60)
-    all_meta = align_dataset(
+    align_dataset(
         checklist_csv=paths.get("checklist_csv"),
         atlas_label_dir=paths.get("atlas_label_dir"),
         output_dir=paths["aligned_dir"],
