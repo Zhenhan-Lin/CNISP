@@ -10,7 +10,7 @@ Follows Amiranashvili et al. + Jansen et al.:
 
 import math
 import sys
-import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -19,9 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from models.multiclass_ad import MultiClassAutoDecoder
 from models.losses import MultiClassShapeLoss, MultiClassDiceMetric
-from engine.dataset import (
-    OrbitalImplicitDataset, PhaseType, create_data_loader
-)
+from engine.dataset import create_data_loader, PhaseType
 from engine.io_utils import RollingCheckpointWriter, Logger
 from diagnostics.multiview_qc import compute_multiview_metrics
 
@@ -36,6 +34,18 @@ def create_model(params: dict, image_size: torch.Tensor) -> MultiClassAutoDecode
         layers_with_coords=params.get("op_coord_layers", [0, 4]),
     )
 
+def assign_model_name(model_basedir: Path) -> str:
+    date_str = datetime.now().strftime("%Y%m%d")
+    # Find the next available index for orbital_ad_v
+    idx = 1
+    while True:
+        candidate = f"orbital_ad_v{date_str}_{idx}"
+        candidate_dir = model_basedir / candidate
+        if not candidate_dir.exists():
+            model_name = candidate
+            break
+        idx += 1
+    return model_name
 
 def train_one_epoch(
     dl: torch.utils.data.DataLoader,
@@ -148,7 +158,15 @@ def train_model(params: dict):
     """Main training entry point."""
     model_basedir = Path(params["model_basedir"])
     model_name = params.get("model_name")
-    model_dir = model_basedir / model_name if model_name else None
+
+    if model_name is None:
+        model_name = assign_model_name(model_basedir)
+
+    model_dir = model_basedir / model_name
+    if model_dir.exists():
+        print(f"WARNING: Model dir already exists: {model_dir}")
+        print(f"  Existing checkpoints will be kept; new ones may overwrite.")
+    model_dir.mkdir(parents=True, exist_ok=True)
 
     num_epochs = params["num_epochs"]
     log_every = params["log_epoch_count"]
@@ -158,19 +176,12 @@ def train_model(params: dict):
     lr_lat = params["learning_rate_lat"]
 
     # Setup output directory
-    writer = None
-    ckpt_writer = None
-    if model_dir:
-        if model_dir.exists():
-            print(f"WARNING: Model dir already exists: {model_dir}")
-            print(f"  Existing checkpoints will be kept; new ones may overwrite.")
-        model_dir.mkdir(parents=True, exist_ok=True)
-        sys.stdout = Logger(model_dir / "log.txt", "a")
-        writer = SummaryWriter(log_dir=str(model_dir))
-        ckpt_writer = RollingCheckpointWriter(
-            model_dir, "checkpoint",
-            params.get("max_num_checkpoints", 5), "pth"
-        )
+    sys.stdout = Logger(model_dir / "log.txt", "a")
+    writer = SummaryWriter(log_dir=str(model_dir))
+    ckpt_writer = RollingCheckpointWriter(
+        model_dir, "checkpoint",
+        params.get("max_num_checkpoints", 5), "pth"
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -216,7 +227,7 @@ def train_model(params: dict):
         with open(csv_path, "w") as f:
             f.write("epoch,train_loss,train_dice,val_loss,val_dice,lat_norm2\n")
 
-    # best_val_dice = -1.0
+    best_val_dice = -1.0
 
     for epoch in range(num_epochs):
         log_this = (epoch % log_every == 0)
@@ -240,7 +251,6 @@ def train_model(params: dict):
                     net, dl_train.dataset, latents_train, device,
                     params["num_classes"], max_scans=8,
                 )
-                # print_multiview_report(mv_metrics)
                 md = mv_metrics.get("merged_dice_mean")
                 ma = mv_metrics.get("multiview_acc_mean")
                 if md is not None:
@@ -248,21 +258,21 @@ def train_model(params: dict):
                     writer.add_scalar("diag/merged_dice", mv_metrics["merged_dice_mean"], global_step=epoch + 1)
                     writer.add_scalar("diag/multiview_acc", mv_metrics["multiview_acc_mean"], global_step=epoch + 1)
 
-        # # Save best val checkpoint
-        # if log_this and val_metrics and model_dir:
-        #     current_val_dice = val_metrics["val_dice"]
-        #     if current_val_dice > best_val_dice:
-        #         best_val_dice = current_val_dice
-        #         best_path = model_dir / "best_checkpoint.pth"
-        #         torch.save({
-        #             "model_state": {"net": net.state_dict(),
-        #                             "latents_train": latents_train},
-        #             "optimizer_state": optimizer.state_dict(),
-        #             "num_steps_trained": int(global_step.item()),
-        #             "num_epochs_trained": epoch + 1,
-        #             "best_val_dice": best_val_dice,
-        #         }, best_path)
-        #         print(f"  ★ New best val dice: {best_val_dice:.4f} (epoch {epoch+1})")
+        # Save best val checkpoint
+        if log_this and val_metrics and model_dir:
+            current_val_dice = val_metrics["val_dice"]
+            if current_val_dice > best_val_dice:
+                best_val_dice = current_val_dice
+                best_path = model_dir / "best_checkpoint.pth"
+                torch.save({
+                    "model_state": {"net": net.state_dict(),
+                                    "latents_train": latents_train},
+                    "optimizer_state": optimizer.state_dict(),
+                    "num_steps_trained": int(global_step.item()),
+                    "num_epochs_trained": epoch + 1,
+                    "best_val_dice": best_val_dice,
+                }, best_path)
+                print(f"  ★ New best val dice: {best_val_dice:.4f} (epoch {epoch+1})")
 
         # Write CSV row on log epochs
         if log_this and csv_path:

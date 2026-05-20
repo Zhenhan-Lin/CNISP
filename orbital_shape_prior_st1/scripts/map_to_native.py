@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-Map predictions to native image space (standalone).
+Map per-case primary predictions to native image space (standalone).
 
-Generates both native-spacing and isotropic versions.
+Reads ``inference_results.pkl`` (primary picks; one row per case) written
+by ``infer_test_set`` and inverts the canonical alignment back into the
+original full-head NIfTI grid.
+
+Patch-level isotropic predictions are already saved on disk by inference
+at ``output_basedir/<model>/step_XX/iso_space/``. This script does not
+re-emit them; if you need an isotropic full-head merge, call
+``engine.native_mapping.map_iso_results_to_native`` from a custom driver
+with a results list that includes ``pred_class_map_iso``.
 
 Usage:
     PYTHONPATH=. python3 scripts/map_to_native.py -p configs/paths.yaml -m orbital_ad_v1
@@ -30,30 +38,19 @@ def main():
     results_path = pred_dir / "inference_results.pkl"
 
     if not results_path.exists():
-        raise FileNotFoundError(f"Run inference first: {results_path}")
+        raise FileNotFoundError(
+            f"Run inference first: {results_path}"
+        )
 
     with open(results_path, "rb") as f:
         results = pickle.load(f)
 
     meta_dir = Path(paths["aligned_dir"]) / "metadata"
-
-    # Native spacing
     native_dir = pred_dir / "native_space"
-    print(f"Mapping {len(results)} predictions to native space...")
-    native_paths = map_results_to_native(results, meta_dir, native_dir)
-    print(f"  {len(native_paths)} volumes → {native_dir}\n")
 
-    # Isotropic
-    iso_results = [r for r in results if "pred_class_map_iso" in r]
-    if iso_results:
-        from engine.native_mapping import map_iso_results_to_native
-        iso_dir = pred_dir / "iso_space"
-        print(f"Mapping {len(iso_results)} isotropic predictions to native space...")
-        iso_paths = map_iso_results_to_native(iso_results, meta_dir, iso_dir)
-        print(f"  {len(iso_paths)} files → {iso_dir}\n")
-    else:
-        print("No isotropic predictions found in inference_results.pkl.")
-        print("Re-run inference with updated infer.py to generate them.")
+    print(f"Mapping {len(results)} primary predictions to native space...")
+    native_paths = map_results_to_native(results, meta_dir, native_dir)
+    print(f"  {len(native_paths)} volumes → {native_dir}")
 
     print("Done.")
 

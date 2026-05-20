@@ -105,12 +105,22 @@ def _compute_multiview_accuracy(net, dataset, latents, device, num_classes,
     Per-scan multi-view accuracy: for each foreground voxel observed by
     one offset, how accurately do the other offsets reconstruct it?
 
+    Correctness note
+    ----------------
+    A voxel at slice index `idx` is observed by item k (with
+    slice_start_id `off_k`) iff `idx % step == off_k` -- this holds for
+    ANY `off_k ∈ [0, step)`, regardless of whether the offsets came from
+    Strategy B's fixed grid or Strategy A's random starts. We therefore
+    compare `idx % step` to each item's recorded `off_k`. If an offset
+    landed outside `[0, step)` the formula silently aliases, so we
+    assert.
+
     Broadcasting layout:
-        observed_by[z]          = z % step_size          → [1, 1, D3]
-        offset_ids[k]           = offset of item k       → [K, 1, 1, 1]
-        not_observed[k, ...]    = (observed_by != off_k)  → [K, D1, D2, D3]
-        correct[k, ...]         = (pred_k == gt)          → [K, D1, D2, D3]
-        mask                    = not_observed & fg        → [K, D1, D2, D3]
+        observed_by[z]          = z % step_size           [1, 1, D3]
+        offset_ids[k]           = off_k of item k         [K, 1, 1, 1]
+        not_observed[k, ...]    = (observed_by != off_k)  [K, D1, D2, D3]
+        correct[k, ...]         = (pred_k == gt)          [K, D1, D2, D3]
+        mask                    = not_observed & fg       [K, D1, D2, D3]
         accuracy                = correct[mask].mean()
     """
     net.eval()
@@ -126,6 +136,10 @@ def _compute_multiview_accuracy(net, dataset, latents, device, num_classes,
         offsets_used = []
         preds = []
         for item_idx, off in items:
+            assert 0 <= off < step, (
+                f"slice_start_id={off} out of [0, {step}) for item "
+                f"{item_idx}; observed_by mask would alias."
+            )
             latent = latents[dataset.caseids[item_idx]].unsqueeze(0).to(device)
             pred = net.predict_dense(latent, target_shape.to(device),
                                      spacing.to(device))

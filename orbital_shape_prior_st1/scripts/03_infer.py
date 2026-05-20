@@ -13,12 +13,21 @@ Usage:
 
     # Use latest periodic checkpoint instead of best:
     python scripts/03_infer.py ... --checkpoint latest
+
+Outputs (under output_basedir/<model_name>/):
+    inference_results.pkl   per-case primary picks (one row per case,
+                            picked by adaptive_step_sweep.primary_eff_res_mm)
+                            -> consumed by 04_diagnose Sections 1/2 and
+                            by map_to_native.py
+    sweep_results.pkl       full per-(case, step) sweep
+    step_XX/                NIfTI predictions, latents, viz, metadata
+    test_results.csv        per-row sweep metrics
+    test_summary.csv        eff_res-bucket aggregated metrics
 """
 
 import argparse
-import pickle
+
 import yaml
-from pathlib import Path
 
 from engine.infer import infer_test_set
 
@@ -30,7 +39,7 @@ def main():
     parser.add_argument("-t", "--train_config", required=True,
                         help="Training config (architecture params: latent_dim, num_classes, etc.)")
     parser.add_argument("-c", "--config", required=True,
-                        help="Test config (inference params: latent_num_iters, slice_step_size, etc.)")
+                        help="Test config (latent_num_iters, adaptive_step_sweep, etc.)")
     parser.add_argument("-m", "--model_name", required=True,
                         help="Model directory name under model_basedir")
     parser.add_argument("--checkpoint", default="latest", choices=["best", "latest"],
@@ -48,15 +57,8 @@ def main():
     params["model_name"] = args.model_name
     params["checkpoint"] = args.checkpoint
 
-    # Run inference
-    results = infer_test_set(params)
-
-    # Save results for Step 4 (diagnostics)
-    out_path = Path(params["output_basedir"]) / args.model_name / "inference_results.pkl"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "wb") as f:
-        pickle.dump(results, f)
-    print(f"\nResults saved to {out_path}")
+    # infer_test_set writes inference_results.pkl + sweep_results.pkl itself
+    infer_test_set(params)
 
 
 if __name__ == "__main__":

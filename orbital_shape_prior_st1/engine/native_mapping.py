@@ -15,6 +15,7 @@ Usage from other modules:
 """
 
 import json
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -77,6 +78,16 @@ def remap_canonical_to_original(data: np.ndarray, meta: dict) -> np.ndarray:
                 remap = {0: min_label, 1: min_label+1, 2: min_label+5,
                          3: min_label+7, 4: min_label+3}
     else:
+        # Unknown scheme: identity remap. canonical_align labels detection
+        # should always have set one of the known schemes; an "unknown"
+        # value here means the original scheme could not be inferred,
+        # so the output will not be label-compatible with the source GT.
+        warnings.warn(
+            f"native_mapping: unknown input_label_scheme={scheme!r} for "
+            f"{meta.get('casename', '?')}; passing canonical labels through "
+            f"unchanged (output will NOT match the original label scheme).",
+            stacklevel=2,
+        )
         remap = {i: i for i in range(5)}
 
     out = np.zeros_like(data)

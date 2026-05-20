@@ -9,27 +9,32 @@ For each test case:
     5. Export NIfTI + compute metrics
 """
 
+import json
+import pickle
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List
 
 import nibabel as nib
 import numpy as np
 import torch
-import json
-from collections import defaultdict
 
-from models.multiclass_ad import MultiClassAutoDecoder
-from models.losses import MultiClassShapeLoss, MultiClassDiceMetric
-from engine.dataset import PhaseType, create_data_loader, load_casenames, load_orbital_volumes
-from diagnostics.resolution_sweep import run_sweep, print_sweep_summary, save_sweep_csvs
-from data_prep.sparsify import sparsen_volume
+from models.losses import MultiClassDiceMetric, MultiClassShapeLoss
+from engine.dataset import load_casenames, load_orbital_volumes
+from diagnostics.resolution_sweep import (
+    DEFAULT_BUCKET_EDGES_MM,
+    print_sweep_summary,
+    run_sweep,
+    save_sweep_csvs,
+)
 from engine.train import create_model
 from engine.io_utils import load_latest_checkpoint
 from engine.native_mapping import map_results_to_native
 
 
 MAX_POINTS_PER_CHUNK = 3_000_000
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def _flatten_spatial(tensor):
     """Flatten spatial dims: [1, D1, D2, D3, ...] → [1, N, 1, 1, ...]"""
@@ -186,20 +191,6 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
     return latent.detach()
 
 
-# ── Dice computation ─────────────────────────────────────────────
-
-def compute_hard_dice(pred_map, gt_map, num_classes):
-    """Compute per-class and mean hard Dice between integer label maps."""
-    per_class = []
-    for c in range(1, num_classes):  # skip BG
-        p = (pred_map == c)
-        g = (gt_map == c)
-        inter = np.sum(p & g)
-        total = np.sum(p) + np.sum(g)
-        dice = 2.0 * inter / (total + 1e-5)
-        per_class.append(float(dice))
-    return {"mean": float(np.mean(per_class)), "per_class": per_class}
-
 # ── Average shape ────────────────────────────────────────────────
 
 def generate_average_shape(
@@ -250,7 +241,6 @@ def generate_average_shape(
 
 def create_obs_vs_recon_map(
     pred_map: np.ndarray,
-    sparse_shape: tuple,
     slice_step_size: int,
     slice_start_id: int,
     slice_axis: int,
@@ -266,7 +256,6 @@ def create_obs_vs_recon_map(
 
     Args:
         pred_map: [D1, D2, D3] dense reconstruction (integer labels)
-        sparse_shape: shape of the sparsified volume (to infer which slices were kept)
         slice_step_size: keep every Nth slice
         slice_start_id: starting slice index for sparsification
         slice_axis: which axis was sparsified (0/1/2)
@@ -304,142 +293,86 @@ def create_obs_vs_recon_map(
 
     return viz_map
 
-# ── Single-case inference ────────────────────────────────────────
-
-def infer_single_case(net, batch, params, device):
-    labels_sparse = batch["labels"].to(device)
-    coords = batch["coords"].to(device)
-    casename = batch["casenames"]
-    if isinstance(casename, (list, tuple)):
-        casename = casename[0]
-
-    print(f"\nCase: {casename}")
-
-    latent = optimize_latent(
-        net, labels_sparse, coords,
-        latent_dim=params["latent_dim"],
-        lr=params.get("latent_lr", 1e-2),
-        lat_reg_lambda=params["lat_reg_lambda"],
-        num_iters=params.get("latent_num_iters", 1200),
-        max_num_const_dsc=params.get("max_num_const_train_dsc", -1),
-        device=device,
-    )
-
-    # Dense reconstruction at NATIVE spacing (for dice computation)
-    if "labels_hr" in batch:
-        gt = batch["labels_hr"]
-        target_shape = torch.tensor(
-            gt.shape[1:] if gt.dim() == 4 else gt.shape
-        )
-        spacing = batch.get("spacings_hr", batch["spacings"])[0]
-    else:
-        target_shape = torch.tensor(labels_sparse.shape[1:])
-        spacing = batch["spacings"][0]
-
-    pred_map = net.predict_dense(latent, target_shape.to(device), spacing.to(device))
-    pred_np = pred_map.numpy()
-
-    result = {
-        "casename": casename,
-        "pred_class_map": pred_np,
-        "spacing": spacing.numpy(),
-        "latent": latent.cpu().squeeze(0).numpy(),
-    }
-
-    # Dice against full-resolution GT (same grid, same spacing)
-    if "labels_hr" in batch:
-        gt_np = gt.squeeze(0).numpy() if gt.dim() == 4 else gt.numpy()
-        result["gt_class_map"] = gt_np
-        dice = compute_hard_dice(pred_np, gt_np, net.num_classes)
-        result["dice"] = dice
-        print(f"  dice={dice['mean']:.3f} per-class={[f'{d:.3f}' for d in dice['per_class']]}")
-
-    # Create observed-vs-reconstructed visualization map
-    result["pred_obs_vs_recon"] = create_obs_vs_recon_map(
-        pred_np,
-        sparse_shape=tuple(labels_sparse.shape[1:]),
-        slice_step_size=params["slice_step_size"],
-        slice_start_id=0,  # determined by seed, but 0 is approximate
-        slice_axis=params["slice_step_axis"],
-    )
-
-    # Isotropic reconstruction for visualization (separate from dice)
-    iso_sp = spacing.min().repeat(3)
-    if not torch.allclose(iso_sp, spacing, atol=0.01):
-        iso_target = (net.image_size.cpu() / iso_sp).round().long()
-        iso_map = net.predict_dense(latent, iso_target.to(device), iso_sp.to(device))
-        result["pred_class_map_iso"] = iso_map.numpy()
-        result["spacing_iso"] = iso_sp.numpy()
-
-    return result
-
-
 # ── Full test set inference ──────────────────────────────────────
-# Replace everything from this line to the end of infer.py.
-#
-# Also add this import at the top of infer.py:
-#   from engine.dataset import ..., load_casenames, load_orbital_volumes
- 
+
+def _pick_primary_per_case(all_results: List[Dict],
+                           primary_eff_res_mm: float) -> List[Dict]:
+    """For each case pick the result whose eff_res is closest to the target."""
+    by_case = defaultdict(list)
+    for r in all_results:
+        by_case[r["casename"]].append(r)
+    picked = []
+    for _, results in by_case.items():
+        best = min(
+            results,
+            key=lambda r: abs(r["effective_resolution_mm"] - primary_eff_res_mm),
+        )
+        picked.append(best)
+    return picked
+
+
 def infer_test_set(params):
     """
-    Run controlled reconstruction on the test set.
- 
-    Supports resolution sweep: evaluates at multiple effective through-plane
-    resolutions when test_step_sizes has multiple values.
- 
+    Run controlled reconstruction on the test set with a per-case adaptive
+    resolution sweep.
+
     Config (test yaml):
-        test_step_sizes: [1, 3, 5, 7, 9]   # resolution sweep
-        test_step_sizes: [4]                 # single resolution
-        # Omit → defaults to [slice_step_size]
- 
+        adaptive_step_sweep:
+          target_eff_res_increment_mm: 1.0
+          max_num_steps_per_case: 5
+          max_eff_resolution_mm: 12.0
+          primary_eff_res_mm: 3.0
+          summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+        slice_step_axis: 2
+
     Output structure:
         output_dir/
-        ├── test_results.csv
-        ├── test_summary.csv
+        ├── test_results.csv       (per (case, step), with eff_res bucket)
+        ├── test_summary.csv       (grouped by eff_res bucket)
         ├── average_shape_z0.nii.gz
         ├── step_01/
         │   ├── pred/
+        │   ├── latents/           one .npy per case (for cache resume)
         │   ├── obs_vs_recon/
         │   ├── iso_space/
-        │   └── metadata.json      per-case spacing + effective resolution
+        │   └── metadata.json      per-case spacing + eff_res
         ├── step_03/
         │   └── ...
-        └── native_space/   (primary step only)
+        └── native_space/          per-case primary step (closest to target eff_res)
     """
- 
+
     model_dir = Path(params["model_basedir"]) / params["model_name"]
     output_dir = Path(params["output_basedir"]) / params["model_name"]
     output_dir.mkdir(parents=True, exist_ok=True)
- 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     print(f"Device: {device}")
- 
+
     # ── Load model ────────────────────────────────────────────────
     which_ckpt = params.get("checkpoint", "best")
     model_state, ckpt_meta = load_model_checkpoint(model_dir, which_ckpt, verbose=True)
- 
+
     net = create_model(params, torch.ones(3))
     net.load_state_dict(model_state["net"], strict=True)
     net = net.to(device).eval()
- 
+
     # ── Load test data (dense) ────────────────────────────────────
     labels_dir = Path(params["aligned_dir"]) / params.get("labels_dirname", "labels")
     casefiles_dir = Path(params["casefiles_dir"])
     casenames = load_casenames(casefiles_dir / params["test_casefile"])
     labels_dense, spacings_dense = load_orbital_volumes(labels_dir, casenames)
- 
-    # ── Step sizes ────────────────────────────────────────────────
+
+    # ── Sweep configuration (per-case adaptive) ───────────────────
     step_axis = params["slice_step_axis"]
-    step_sizes = params.get("test_step_sizes", [params["slice_step_size"]])
-    if isinstance(step_sizes, int):
-        step_sizes = [step_sizes]
-    primary_step = params["slice_step_size"]
- 
-    effective_res = [float(spacings_dense[0][step_axis]) * s for s in step_sizes]
+    sweep_cfg = dict(params.get("adaptive_step_sweep", {}))
+    primary_eff_res = float(sweep_cfg.get("primary_eff_res_mm", 3.0))
+    bucket_edges = tuple(sweep_cfg.get(
+        "summary_bucket_edges_mm", DEFAULT_BUCKET_EDGES_MM
+    ))
+
     print(f"\nTest cases: {len(casenames)}")
-    print(f"Step sizes: {step_sizes}")
-    print(f"Effective resolutions (mm): {[f'{r:.1f}' for r in effective_res]}")
- 
+    print(f"Sweep cfg: {sweep_cfg}")
+    print(f"Primary eff_res target: {primary_eff_res} mm")
+
     # ── Average shape ─────────────────────────────────────────────
     median_spacing = torch.stack(spacings_dense).median(dim=0)[0]
     print("\nGenerating average shape (z=0)...")
@@ -447,7 +380,7 @@ def infer_test_set(params):
         net, params["latent_dim"], median_spacing,
         output_dir / "average_shape_z0.nii.gz", device,
     )
- 
+
     # ── Run sweep ─────────────────────────────────────────────────
     all_results = run_sweep(
         net=net,
@@ -455,36 +388,31 @@ def infer_test_set(params):
         casenames=casenames,
         labels_dense=labels_dense,
         spacings_dense=spacings_dense,
-        step_sizes=step_sizes,
         step_axis=step_axis,
         params=params,
         device=device,
-        output_dir=output_dir
+        sweep_cfg=sweep_cfg,
+        output_dir=output_dir,
     )
- 
+
     # ── Export predictions per step subdirectory ──────────────────
-    #   step_XX/
-    #   ├── pred/                  dense prediction at native spacing
-    #   ├── obs_vs_recon/          observed vs reconstructed visualization
-    #   ├── iso_space/             isotropic resampled prediction
-    #   └── metadata.json          per-case spacing + resolution info
     if params.get("export_predictions", True):
         step_metadata = defaultdict(list)
- 
+
         for result in all_results:
             step = result["step_size"]
             step_dir = output_dir / f"step_{step:02d}"
             pred_dir = step_dir / "pred"
+            lat_dir = step_dir / "latents"
             ovr_dir = step_dir / "obs_vs_recon"
             iso_dir = step_dir / "iso_space"
-            for d in [pred_dir, ovr_dir, iso_dir]:
+            for d in [pred_dir, lat_dir, ovr_dir, iso_dir]:
                 d.mkdir(parents=True, exist_ok=True)
- 
+
             sp = result["spacing"]
             aff = np.diag([*sp, 1.0])
             casename = result["casename"]
- 
-            # Collect per-case metadata for this step
+
             step_metadata[step].append({
                 "casename": casename,
                 "spacing_xyz_mm": [float(s) for s in sp],
@@ -496,22 +424,22 @@ def infer_test_set(params):
                 "dice_dense_mean": round(result["dice"]["mean"], 4),
                 "dice_observed_mean": round(result["dice_observed"]["mean"], 4),
             })
- 
-            # pred/
+
+            # pred/  (always re-saved; tolerant of cache hits)
             nib.save(
                 nib.Nifti1Image(result["pred_class_map"].astype(np.uint8), aff),
                 str(pred_dir / f"{casename}_pred.nii.gz"),
             )
- 
+
+            # latents/  (sidecar so cache resume keeps iso reconstruction working)
+            if not result.get("latent_missing", False) and result["latent"].size > 1:
+                np.save(str(lat_dir / f"{casename}.npy"),
+                        np.asarray(result["latent"], dtype=np.float32))
+
             # obs_vs_recon/
             obs_vs_recon = create_obs_vs_recon_map(
                 result["pred_class_map"],
-                sparse_shape=tuple(
-                    result["gt_class_map"].shape[:step_axis]
-                    + (result["n_observed_slices"],)
-                    + result["gt_class_map"].shape[step_axis+1:]
-                ),
-                slice_step_size=step if step > 1 else 1,
+                slice_step_size=step,
                 slice_start_id=0,
                 slice_axis=step_axis,
             )
@@ -519,26 +447,31 @@ def infer_test_set(params):
                 nib.Nifti1Image(obs_vs_recon.astype(np.uint8), aff),
                 str(ovr_dir / f"{casename}_obs_vs_recon.nii.gz"),
             )
- 
-            # iso_space/
+
+            # iso_space/  (skip if anisotropy is negligible OR latent unavailable)
             spacing_t = torch.from_numpy(sp)
             iso_sp = spacing_t.min().repeat(3)
-            if not torch.allclose(iso_sp, spacing_t, atol=0.01):
-                latent_t = torch.from_numpy(
-                    result["latent"]
-                ).unsqueeze(0).to(device)
-                iso_target = (net.image_size.cpu() / iso_sp).round().long()
-                with torch.no_grad():
-                    iso_map = net.predict_dense(
-                        latent_t, iso_target.to(device), iso_sp.to(device),
-                    )
-                iso_aff = np.diag([*iso_sp.numpy(), 1.0])
-                nib.save(
-                    nib.Nifti1Image(iso_map.numpy().astype(np.uint8), iso_aff),
-                    str(iso_dir / f"{casename}_pred_iso.nii.gz"),
+            if torch.allclose(iso_sp, spacing_t, atol=0.01):
+                continue
+            if result.get("latent_missing", False) or result["latent"].size <= 1:
+                # Cache hit without a saved latent: don't fabricate an iso
+                # reconstruction (predict_dense would either fail with a
+                # shape mismatch or return garbage from a placeholder).
+                continue
+            latent_t = torch.from_numpy(
+                np.asarray(result["latent"], dtype=np.float32)
+            ).unsqueeze(0).to(device)
+            iso_target = (net.image_size.cpu() / iso_sp).round().long()
+            with torch.no_grad():
+                iso_map = net.predict_dense(
+                    latent_t, iso_target.to(device), iso_sp.to(device),
                 )
- 
-        # Save metadata JSON per step directory
+            iso_aff = np.diag([*iso_sp.numpy(), 1.0])
+            nib.save(
+                nib.Nifti1Image(iso_map.numpy().astype(np.uint8), iso_aff),
+                str(iso_dir / f"{casename}_pred_iso.nii.gz"),
+            )
+
         for step, cases_meta in step_metadata.items():
             step_dir = output_dir / f"step_{step:02d}"
             meta_path = step_dir / "metadata.json"
@@ -550,26 +483,46 @@ def infer_test_set(params):
                     "cases": cases_meta,
                 }, f, indent=2)
             print(f"  Metadata saved: {meta_path}")
- 
+
     # ── Class names for summary ───────────────────────────────────
     from data_prep.canonical_align import CANONICAL_LABEL_NAMES
     num_fg = net.num_classes - 1
     class_names = [CANONICAL_LABEL_NAMES.get(c, f"class_{c}")
                    for c in range(1, num_fg + 1)]
- 
+
     # ── Print & save ──────────────────────────────────────────────
     ckpt_info = (f"Checkpoint: {which_ckpt} "
                  f"(epoch {ckpt_meta.get('num_epochs_trained', '?')})")
-    print_sweep_summary(all_results, step_sizes, class_names, ckpt_info)
-    save_sweep_csvs(all_results, step_sizes, class_names, output_dir)
- 
-    # ── Map primary-step predictions to native space ──────────────
-    primary_results = [r for r in all_results if r["step_size"] == primary_step]
+    print_sweep_summary(all_results, class_names,
+                        bucket_edges=bucket_edges, ckpt_info=ckpt_info)
+    save_sweep_csvs(all_results, class_names, output_dir,
+                    bucket_edges=bucket_edges)
+
+    # ── Map primary-eff_res predictions to native space ───────────
+    primary_results = _pick_primary_per_case(all_results, primary_eff_res)
     if primary_results and params.get("export_predictions", True):
         meta_dir = Path(params["aligned_dir"]) / "metadata"
         native_dir = output_dir / "native_space"
-        print(f"\nMapping predictions to native space...")
+        chosen = [(r["casename"], r["step_size"],
+                   round(r["effective_resolution_mm"], 2))
+                  for r in primary_results]
+        print(f"\nMapping primary predictions to native space "
+              f"(target eff_res {primary_eff_res} mm):")
+        for cn, st, er in chosen:
+            print(f"  {cn}: step={st}, eff_res={er} mm")
         native_paths = map_results_to_native(primary_results, meta_dir, native_dir)
         print(f"Native-space predictions: {native_dir} ({len(native_paths)} volumes)")
- 
-    return all_results
+
+    # ── Pickle layout ────────────────────────────────────────────
+    # inference_results.pkl : per-case primary picks (one row per case),
+    #     consumed by 04_diagnose Sections 1/2 and by map_to_native.py
+    # sweep_results.pkl     : full per-(case, step) sweep, for ad-hoc
+    #     analysis or cross-resolution work
+    with open(output_dir / "inference_results.pkl", "wb") as f:
+        pickle.dump(primary_results, f)
+    with open(output_dir / "sweep_results.pkl", "wb") as f:
+        pickle.dump(all_results, f)
+    print(f"\nPickled {len(primary_results)} primary results "
+          f"and {len(all_results)} sweep rows under {output_dir}")
+
+    return {"primary": primary_results, "all": all_results}

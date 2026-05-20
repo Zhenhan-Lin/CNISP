@@ -4,7 +4,6 @@
 model_name: orbital_ad_v1
 
 # --- Architecture ---
-task_type: 0              # 0 = AutoDecoder (only option for Stage 1)
 num_classes: 5            # BG + ON + Globe + Fat + Recti
 latent_dim: 128
 op_num_layers: 8
@@ -23,23 +22,15 @@ test_fraction: 0.2
 # --- Sparsification (synthetic anisotropy for training) ---
 # Keep every Nth slice along this axis to simulate thick-slice acquisition
 slice_step_size: 4
-# 0=sagittal, 1=coronal, 2=axial (in LPS after canonical alignment)
+# 0=sagittal, 1=coronal, 2=axial (in RAS after canonical alignment)
 slice_step_axis: 2
 use_thick_slices: false
 
 # --- Sampling ---
 # Points per example per dim for training (64^3 = 262144 points total)
-num_points_per_example_per_dim_train: 80
-batch_size_train: 8
+num_points_per_example_per_dim_train: 64
+batch_size_train: 10
 batch_size_val: 1
-
-# --- Class-balanced sampling ---
-# ON and Recti are small structures; boost their sampling weight
-# Weight per class: [BG, ON, Globe, Fat, Recti]
-# null = uniform sampling (original Amiranashvili behavior)
-class_sample_weights: null
-# Alternative: [0.1, 0.3, 0.15, 0.15, 0.3]
-# ^ would oversample ON and Recti voxels during training
 
 # --- Loss ---
 # Multi-class CE + Dice, following Jansen et al.

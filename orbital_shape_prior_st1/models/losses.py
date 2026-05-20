@@ -5,8 +5,8 @@ Following Jansen et al.: L = L_CE + L_Dice + λ·||z||²
 
 Key design decisions:
     - Dice is computed per-class (excluding background) then averaged
-    - Optional per-class Dice weights to upweight small structures (ON, Recti)
-    - CE uses class-balanced weights if class_sample_weights are not used
+    - Optional per-class Dice weights (`dice_class_weights`) to upweight
+      small structures (ON, Recti); plain CE on the remaining term.
 """
 
 from typing import List, Optional

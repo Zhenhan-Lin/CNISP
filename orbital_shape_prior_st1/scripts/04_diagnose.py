@@ -323,10 +323,20 @@ def main():
         print(f"\nSKIP Section 2: no inference results.")
 
     # ── Section 3: Cross-resolution consistency ───────────────────
-    step_sizes = params.get("test_step_sizes",
-                            [params.get("slice_step_size", 4)])
-    if isinstance(step_sizes, int):
-        step_sizes = [step_sizes]
+    # With per-case adaptive sweep the union of step values is not in the
+    # config. Discover step directories from disk and fall back to the
+    # legacy ``test_step_sizes`` / ``slice_step_size`` keys only if no
+    # ``step_XX/`` subdirectories exist yet.
+    step_sizes = sorted(
+        int(p.name.split("_")[1])
+        for p in output_dir.glob("step_*")
+        if p.is_dir() and p.name.split("_")[1].isdigit()
+    )
+    if not step_sizes:
+        step_sizes = params.get("test_step_sizes",
+                                [params.get("slice_step_size", 4)])
+        if isinstance(step_sizes, int):
+            step_sizes = [step_sizes]
     num_classes = params.get("num_classes", 5)
 
     cross_res = run_cross_resolution_analysis(output_dir, step_sizes, num_classes)

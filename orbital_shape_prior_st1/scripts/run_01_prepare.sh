@@ -2,17 +2,15 @@
 # ============================================================
 # Step 1: Data Preparation
 #   - Canonical alignment (checklist + atlas)
-#   - Alignment QC (centroid std report)
-#   - Train/test split
+#   - Train/val/test split (by patient source_id)
 #
 # REVIEW BEFORE PROCEEDING TO STEP 2:
-#   1. Check terminal output for alignment QC report
-#      - Globe centroid std should be < 3mm (it's the anchor)
-#      - ON centroid std is the key metric: < 5mm = good, 5-10mm = marginal
-#   2. Visually inspect a few patches in Slicer:
+#   1. Visually inspect a few patches in Slicer:
 #      cd $ALIGNED_DIR/labels && ls *.nii.gz
 #      Open 5-10 patches, verify structures are centered and oriented consistently
-#   3. Check train/test split sizes in $CASEFILE_DIR/
+#   2. Check train/val/test split sizes in $CASEFILE_DIR/
+#   3. (Optional) regenerate alignment QC report with
+#      data_prep.alignment_qc.compute_alignment_stats / print_alignment_report
 # ============================================================
 
 set -euo pipefail
@@ -48,9 +46,9 @@ echo "============================================================"
 echo "Step 1 COMPLETE."
 echo ""
 echo "REVIEW CHECKLIST before running Step 2:"
-echo "  □ Alignment QC report above — check centroid std values"
 echo "  □ Open a few patches in Slicer to verify visual quality"
-echo "  □ Check train_cases.txt and test_cases.txt sizes"
+echo "  □ Check train_cases.txt / val_cases.txt / test_cases.txt sizes"
+echo "  □ (Optional) run alignment_qc.compute_alignment_stats for centroid std"
 echo ""
 echo "Aligned patches saved to the directory specified in paths.yaml"
 echo "============================================================"

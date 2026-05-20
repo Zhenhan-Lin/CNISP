@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import csv
 import time
+from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -24,6 +25,67 @@ try:
     import nibabel as nib
 except ImportError:
     nib = None
+
+
+# ── Adaptive step / eff-res helpers ──────────────────────────────
+
+DEFAULT_BUCKET_EDGES_MM: tuple = (1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0)
+
+
+def adaptive_steps_for_case(
+    spacing_axis: float,
+    target_eff_res_increment_mm: float = 1.0,
+    max_num_steps_per_case: int = 5,
+    max_eff_resolution_mm: float = 12.0,
+) -> List[int]:
+    """
+    Per-case adaptive step list for the resolution sweep (Rule A).
+
+      delta_step = max(1, round(target_eff_res_increment_mm / spacing_axis))
+      n_total    = max_num_steps_per_case + (delta_step - 1)
+      steps      = [1, 1+delta_step, 1+2*delta_step, ...]
+      truncate where eff_res = step * spacing_axis > max_eff_resolution_mm
+      (the dense baseline step=1 is always kept)
+
+    Examples:
+      spacing 0.5  -> delta=2, n_total=6  -> [1, 3, 5, 7, 9, 11]
+      spacing 1.25 -> delta=1, n_total=5  -> [1, 2, 3, 4, 5]
+      spacing 3.0  -> delta=1, n_total=5  -> [1, 2, 3, 4] (5*3=15>12 -> cut)
+    """
+    if spacing_axis <= 0:
+        return [1]
+    delta_step = max(
+        1, int(round(target_eff_res_increment_mm / float(spacing_axis)))
+    )
+    n_total = max_num_steps_per_case + (delta_step - 1)
+    steps: List[int] = []
+    for k in range(n_total):
+        s = 1 + k * delta_step
+        if s > 1 and s * spacing_axis > max_eff_resolution_mm:
+            break
+        steps.append(s)
+    return steps
+
+
+def assign_eff_res_bucket(eff_res: float,
+                          bucket_edges: Sequence[float]) -> int:
+    """
+    Return bucket index for `eff_res`. `bucket_edges` are sorted upper
+    bounds in mm; the last bucket catches anything above the highest edge.
+    """
+    for i, ub in enumerate(bucket_edges):
+        if eff_res <= ub + 1e-6:
+            return i
+    return len(bucket_edges)  # overflow bucket
+
+
+def _bucket_label(idx: int, bucket_edges: Sequence[float]) -> str:
+    """Human-readable label for a bucket index (e.g. '(2.0, 3.0]')."""
+    if idx >= len(bucket_edges):
+        return f"({bucket_edges[-1]:.1f}, inf]"
+    lower = 0.0 if idx == 0 else float(bucket_edges[idx - 1])
+    upper = float(bucket_edges[idx])
+    return f"({lower:.1f}, {upper:.1f}]"
 
 
 # ── Dice (self-contained) ────────────────────────────────────────
@@ -229,6 +291,7 @@ def eval_case_at_resolution(
         "pred_class_map": pred_np,
         "gt_class_map": gt_np,
         "latent": latent.cpu().squeeze(0).numpy(),
+        "latent_missing": False,
         "spacing": spacing_dense.numpy(),
         "step_size": step_size,
         "effective_resolution_mm": float(spacing_dense[step_axis]) * step_size,
@@ -248,8 +311,18 @@ def _try_load_cached(output_dir, casename, step, step_axis,
                      label_dense, spacing_dense, num_classes):
     """
     Check if step_XX/pred/{casename}_pred.nii.gz exists.
-    If so, load it, compute dice vs dense GT, return a result dict.
-    Returns None if not cached.
+    If so, load it (plus its sidecar latent if available), compute Dice
+    vs dense GT, and return a result dict. Returns None if not cached.
+
+    Latent recovery
+    ---------------
+    Downstream consumers (e.g. iso reconstruction in infer.py) call
+    ``net.predict_dense(latent, ...)``, so a missing latent silently
+    corrupts those outputs. We look for an optional sidecar
+    ``step_XX/latents/{casename}.npy`` and load it when present; if it is
+    absent we mark the result with ``latent_missing=True`` and ship a
+    placeholder ``latent`` of shape (0,) so consumers can detect this and
+    skip latent-dependent steps instead of producing garbage.
     """
     if output_dir is None or nib is None:
         return None
@@ -261,14 +334,12 @@ def _try_load_cached(output_dir, casename, step, step_axis,
     pred_np = np.asarray(pred_nii.dataobj).astype(np.int32)
     gt_np = label_dense.numpy() if isinstance(label_dense, torch.Tensor) else label_dense
 
-    # Align shapes (pred from image_size, GT may differ by ±1 voxel)
     common = tuple(min(pred_np.shape[d], gt_np.shape[d]) for d in range(3))
     pred_eval = pred_np[:common[0], :common[1], :common[2]]
     gt_eval = gt_np[:common[0], :common[1], :common[2]]
 
     dice_dense = _hard_dice(pred_eval, gt_eval, num_classes)
 
-    # Observed-slice Dice
     if step > 1:
         obs_slices = list(range(0, common[step_axis], step))
         sl = [slice(None)] * 3
@@ -280,12 +351,21 @@ def _try_load_cached(output_dir, casename, step, step_axis,
     sp = spacing_dense.numpy() if isinstance(spacing_dense, torch.Tensor) else spacing_dense
     n_total = pred_np.shape[step_axis]
 
+    latent_path = output_dir / f"step_{step:02d}" / "latents" / f"{casename}.npy"
+    if latent_path.exists():
+        latent_np = np.load(str(latent_path)).astype(np.float32)
+        latent_missing = False
+    else:
+        latent_np = np.zeros((0,), dtype=np.float32)
+        latent_missing = True
+
     return {
         "dice": dice_dense,
         "dice_observed": dice_observed,
         "pred_class_map": pred_np,
         "gt_class_map": gt_np,
-        "latent": np.zeros(1),  # not available from cache
+        "latent": latent_np,
+        "latent_missing": latent_missing,
         "spacing": sp,
         "step_size": step,
         "effective_resolution_mm": float(sp[step_axis]) * step,
@@ -304,35 +384,65 @@ def run_sweep(
     casenames: List[str],
     labels_dense: List[torch.Tensor],
     spacings_dense: List[torch.Tensor],
-    step_sizes: List[int],
     step_axis: int,
     params: dict,
     device: torch.device,
-    output_dir: Path = None,
+    sweep_cfg: Optional[dict] = None,
+    output_dir: Optional[Path] = None,
 ) -> List[Dict]:
-    all_results = []
+    """
+    Per-case adaptive resolution sweep.
+
+    Each case's step list is computed from its own through-plane spacing
+    via ``adaptive_steps_for_case`` (Rule A). All cases share the same
+    ``step_axis`` but may have different step lists, so on-disk
+    ``step_XX/`` directories may contain different subsets of cases.
+
+    sweep_cfg keys (all optional; defaults reproduce the original behaviour):
+        target_eff_res_increment_mm  (default 1.0)
+        max_num_steps_per_case       (default 5)
+        max_eff_resolution_mm        (default 12.0)
+    """
+    cfg = sweep_cfg or {}
+    target_inc = float(cfg.get("target_eff_res_increment_mm", 1.0))
+    max_count = int(cfg.get("max_num_steps_per_case", 5))
+    max_eff = float(cfg.get("max_eff_resolution_mm", 12.0))
+
+    all_results: List[Dict] = []
     for ci, casename in enumerate(casenames):
-        print(f"\n{'='*50}")
+        spacing_axis = float(spacings_dense[ci][step_axis])
+        steps = adaptive_steps_for_case(
+            spacing_axis,
+            target_eff_res_increment_mm=target_inc,
+            max_num_steps_per_case=max_count,
+            max_eff_resolution_mm=max_eff,
+        )
+        eff_res_list = [s * spacing_axis for s in steps]
+
+        print(f"\n{'='*60}")
         print(f"Case {ci+1}/{len(casenames)}: {casename}")
-        print(f"{'='*50}")
+        print(f"  spacing[axis={step_axis}] = {spacing_axis:.3f} mm")
+        print(f"  adaptive steps = {steps}")
+        print(f"  eff_res (mm)   = [" + ", ".join(f"{e:.2f}" for e in eff_res_list) + "]")
+        print(f"{'='*60}")
 
-        for step in step_sizes:
-            eff_res = float(spacings_dense[ci][step_axis]) * step
+        for step in steps:
+            eff_res = step * spacing_axis
 
-            # ── Skip if prediction already exists ─────────────────
             cached = _try_load_cached(
                 output_dir, casename, step, step_axis,
                 labels_dense[ci], spacings_dense[ci], net.num_classes,
             ) if output_dir else None
 
             if cached is not None:
-                print(f"  step={step} (eff_res={eff_res:.1f}mm) ... "
-                      f"CACHED dense={cached['dice']['mean']:.3f}  "
+                tag = "CACHED" if not cached.get("latent_missing") else "CACHED (no z)"
+                print(f"  step={step:>2d} (eff_res={eff_res:.2f}mm) ... "
+                      f"{tag} dense={cached['dice']['mean']:.3f}  "
                       f"obs={cached['dice_observed']['mean']:.3f}")
                 all_results.append(cached)
                 continue
 
-            print(f"  step={step} (eff_res={eff_res:.1f}mm) ... ",
+            print(f"  step={step:>2d} (eff_res={eff_res:.2f}mm) ... ",
                   end="", flush=True)
 
             result = eval_case_at_resolution(
@@ -359,47 +469,85 @@ def run_sweep(
 
 # ── Summary printing ──────────────────────────────────────────────
 
-def print_sweep_summary(all_results: List[Dict], step_sizes: List[int],
-                        class_names: List[str], ckpt_info: str = ""):
+def _group_by_bucket(all_results: List[Dict],
+                     bucket_edges: Sequence[float]) -> Dict[int, List[Dict]]:
+    """Group results by effective-resolution bucket."""
+    grouped: Dict[int, List[Dict]] = defaultdict(list)
+    for r in all_results:
+        bi = assign_eff_res_bucket(r["effective_resolution_mm"], bucket_edges)
+        grouped[bi].append(r)
+    return grouped
+
+
+def print_sweep_summary(all_results: List[Dict],
+                        class_names: List[str],
+                        bucket_edges: Sequence[float] = DEFAULT_BUCKET_EDGES_MM,
+                        ckpt_info: str = ""):
+    """
+    Print a cross-case summary grouped by effective-resolution bucket.
+
+    With adaptive per-case step lists, the raw `step` is not directly
+    comparable across cases (e.g. step=3 means 1.5 mm for a 0.5 mm-spacing
+    case but 3.75 mm for a 1.25 mm-spacing case). We bucket by physical
+    effective resolution instead.
+    """
     n_cases = len(set(r["casename"] for r in all_results))
-    print(f"\n\n{'='*70}")
-    print(f"TEST RESULTS — Controlled Reconstruction")
-    print(f"{'='*70}")
+    print(f"\n\n{'='*78}")
+    print(f"TEST RESULTS - Controlled Reconstruction (per-case adaptive sweep)")
+    print(f"{'='*78}")
     if ckpt_info:
         print(ckpt_info)
-    print(f"Test cases: {n_cases}")
+    print(f"Test cases: {n_cases}   Bucket edges (mm): {list(bucket_edges)}")
 
-    header = f"{'Eff.Res(mm)':>12s} {'Step':>5s} {'Dense Dice':>12s} {'Obs Dice':>10s}"
+    header = (f"{'Eff.Res bucket':>18s} {'n_obs':>6s} "
+              f"{'eff_res(mm)':>14s} "
+              f"{'Dense Dice':>14s} {'Obs Dice':>14s}")
     for cn in class_names:
         header += f" {cn:>8s}"
     print(f"\n{header}")
     print("-" * len(header))
 
-    for step in step_sizes:
-        step_r = [r for r in all_results if r["step_size"] == step]
-        if not step_r:
+    grouped = _group_by_bucket(all_results, bucket_edges)
+    n_buckets = len(bucket_edges) + 1  # +1 for the overflow bucket
+    for bi in range(n_buckets):
+        results_bi = grouped.get(bi, [])
+        if not results_bi:
             continue
-        eff_res = step_r[0]["effective_resolution_mm"]
-        dices = [r["dice"]["mean"] for r in step_r]
-        dices_obs = [r["dice_observed"]["mean"] for r in step_r]
-        per_class = np.array([r["dice"]["per_class"] for r in step_r])
-        row = (f"{eff_res:>11.1f}  {step:>5d} "
+        effs = [r["effective_resolution_mm"] for r in results_bi]
+        dices = [r["dice"]["mean"] for r in results_bi]
+        dices_obs = [r["dice_observed"]["mean"] for r in results_bi]
+        per_class = np.array([r["dice"]["per_class"] for r in results_bi])
+        eff_summary = f"{np.mean(effs):.2f}±{np.std(effs):.2f}"
+        row = (f"{_bucket_label(bi, bucket_edges):>18s} "
+               f"{len(results_bi):>6d} "
+               f"{eff_summary:>14s} "
                f"{np.mean(dices):>7.3f}±{np.std(dices):.3f} "
                f"{np.mean(dices_obs):>7.3f}±{np.std(dices_obs):.3f}")
         for ci_col in range(per_class.shape[1]):
             row += f" {np.mean(per_class[:, ci_col]):>7.3f}"
         print(row)
-    print(f"{'='*70}")
+    print(f"{'='*78}")
 
 
 # ── CSV export ────────────────────────────────────────────────────
 
-def save_sweep_csvs(all_results: List[Dict], step_sizes: List[int],
-                    class_names: List[str], output_dir):
+def save_sweep_csvs(all_results: List[Dict],
+                    class_names: List[str],
+                    output_dir,
+                    bucket_edges: Sequence[float] = DEFAULT_BUCKET_EDGES_MM):
+    """
+    Write two CSVs:
+
+    test_results.csv   one row per (case, step) - the raw observation
+    test_summary.csv   one row per effective-resolution bucket -
+                       aggregated across the cases that contributed a
+                       result in that bucket
+    """
     output_dir = Path(output_dir)
 
     csv_path = output_dir / "test_results.csv"
     fieldnames = (["casename", "step_size", "effective_resolution_mm",
+                   "eff_res_bucket",
                    "dice_dense_mean", "dice_observed_mean"]
                   + [f"dice_dense_{cn}" for cn in class_names]
                   + [f"dice_obs_{cn}" for cn in class_names]
@@ -408,10 +556,12 @@ def save_sweep_csvs(all_results: List[Dict], step_sizes: List[int],
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in all_results:
+            bi = assign_eff_res_bucket(r["effective_resolution_mm"], bucket_edges)
             row = {
                 "casename": r["casename"],
                 "step_size": r["step_size"],
-                "effective_resolution_mm": f"{r['effective_resolution_mm']:.1f}",
+                "effective_resolution_mm": f"{r['effective_resolution_mm']:.3f}",
+                "eff_res_bucket": _bucket_label(bi, bucket_edges),
                 "dice_dense_mean": f"{r['dice']['mean']:.4f}",
                 "dice_observed_mean": f"{r['dice_observed']['mean']:.4f}",
                 "n_observed_slices": r["n_observed_slices"],
@@ -426,7 +576,9 @@ def save_sweep_csvs(all_results: List[Dict], step_sizes: List[int],
 
     summary_path = output_dir / "test_summary.csv"
     with open(summary_path, "w", newline="") as f:
-        fields = (["effective_resolution_mm", "step_size",
+        fields = (["eff_res_bucket",
+                   "eff_res_mean_mm", "eff_res_std_mm",
+                   "n_observations",
                    "dice_dense_mean", "dice_dense_std",
                    "dice_observed_mean", "dice_observed_std"]
                   + [f"{cn}_dense_mean" for cn in class_names]
@@ -435,18 +587,22 @@ def save_sweep_csvs(all_results: List[Dict], step_sizes: List[int],
                   + [f"{cn}_obs_std" for cn in class_names])
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
-        for step in step_sizes:
-            step_r = [r for r in all_results if r["step_size"] == step]
-            if not step_r:
+        grouped = _group_by_bucket(all_results, bucket_edges)
+        n_buckets = len(bucket_edges) + 1
+        for bi in range(n_buckets):
+            results_bi = grouped.get(bi, [])
+            if not results_bi:
                 continue
-            eff_res = step_r[0]["effective_resolution_mm"]
-            d_dense = [r["dice"]["mean"] for r in step_r]
-            d_obs = [r["dice_observed"]["mean"] for r in step_r]
-            pc_dense = np.array([r["dice"]["per_class"] for r in step_r])
-            pc_obs = np.array([r["dice_observed"]["per_class"] for r in step_r])
+            effs = [r["effective_resolution_mm"] for r in results_bi]
+            d_dense = [r["dice"]["mean"] for r in results_bi]
+            d_obs = [r["dice_observed"]["mean"] for r in results_bi]
+            pc_dense = np.array([r["dice"]["per_class"] for r in results_bi])
+            pc_obs = np.array([r["dice_observed"]["per_class"] for r in results_bi])
             row = {
-                "effective_resolution_mm": f"{eff_res:.1f}",
-                "step_size": step,
+                "eff_res_bucket": _bucket_label(bi, bucket_edges),
+                "eff_res_mean_mm": f"{np.mean(effs):.3f}",
+                "eff_res_std_mm": f"{np.std(effs):.3f}",
+                "n_observations": len(results_bi),
                 "dice_dense_mean": f"{np.mean(d_dense):.4f}",
                 "dice_dense_std": f"{np.std(d_dense):.4f}",
                 "dice_observed_mean": f"{np.mean(d_obs):.4f}",

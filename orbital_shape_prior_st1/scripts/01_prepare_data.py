@@ -11,7 +11,6 @@ import argparse
 import yaml
 
 from data_prep.canonical_align import align_dataset
-from data_prep.alignment_qc import compute_alignment_stats, print_alignment_report
 from data_prep.build_caselist import generate_train_test_split
 
 
@@ -46,16 +45,11 @@ def main():
         patch_size_mm=args.patch_size,
     )
 
-    # Step 2: Alignment QC
+    # Step 2: Train/val/test split (by patient)
+    # (alignment QC report can be regenerated separately with
+    #  data_prep.alignment_qc.compute_alignment_stats; not run here.)
     print("\n" + "=" * 60)
-    print("STEP 2: Alignment quality check")
-    print("=" * 60)
-    stats = compute_alignment_stats(paths["aligned_dir"])
-    print_alignment_report(stats)
-
-    # Step 3: Train/val/test split (by patient)
-    print("\n" + "=" * 60)
-    print("STEP 3: Train/val/test split")
+    print("STEP 2: Train/val/test split")
     print("=" * 60)
     generate_train_test_split(
         aligned_dir=paths["aligned_dir"],

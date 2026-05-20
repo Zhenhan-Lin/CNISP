@@ -29,7 +29,7 @@ def sparsen_volume(
         volume: [D1, D2, D3] label tensor
         spacing: [3] voxel spacing
         offset: [3] spatial offset of first voxel center
-        axis: which axis to sparsify (0=sag, 1=cor, 2=axial in LPS)
+        axis: which axis to sparsify (0=sag, 1=cor, 2=axial in RAS)
         slice_step_size: keep every Nth slice
         slice_start_id: which slice to start from
         use_thick_slices: average neighboring slices before selection

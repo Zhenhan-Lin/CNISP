@@ -20,7 +20,7 @@ import nibabel as nib
 import numpy as np
 from dataclasses import dataclass
 
-from .canonical_align import CANONICAL_LABELS, CANONICAL_LABEL_NAMES
+from .canonical_align import CANONICAL_LABELS
 
 
 @dataclass
@@ -136,10 +136,11 @@ def print_alignment_report(stats: Dict[str, StructureCentroidStats]):
         std = np.array(s.centroid_std_mm)
         max_std = float(np.max(std))
         status = "✓" if max_std < 5.0 else ("⚠" if max_std < 10.0 else "✗")
+        present_pct = 100 * s.n_present / s.n_total if s.n_total else 0.0
 
         print(f"\n{status} {name}:")
         print(f"  Present: {s.n_present}/{s.n_total} cases "
-              f"({100*s.n_present/s.n_total:.0f}%)")
+              f"({present_pct:.0f}%)")
         print(f"  Centroid mean (mm): [{s.centroid_mean_mm[0]:.1f}, "
               f"{s.centroid_mean_mm[1]:.1f}, {s.centroid_mean_mm[2]:.1f}]")
         print(f"  Centroid std  (mm): [{s.centroid_std_mm[0]:.1f}, "
@@ -155,21 +156,3 @@ def print_alignment_report(stats: Dict[str, StructureCentroidStats]):
     print("=" * 70)
 
 
-def visualize_overlays(
-    aligned_dir: str,
-    output_path: str,
-    n_cases: int = 10,
-    slice_axis: int = 2,
-):
-    """
-    Create overlay visualization: superimpose N cases' mid-slice contours.
-    Saves a PNG showing whether structures are consistently located.
-
-    TODO: implement using matplotlib contour overlay
-    This is a visualization-only function; the quantitative check is
-    compute_alignment_stats.
-    """
-    raise NotImplementedError(
-        "Overlay visualization to be implemented. "
-        "Use compute_alignment_stats for quantitative assessment."
-    )
