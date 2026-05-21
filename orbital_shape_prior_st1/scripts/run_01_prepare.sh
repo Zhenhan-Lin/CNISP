@@ -24,8 +24,8 @@ PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
 TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 
 PATCH_SIZE_MM=80.0
-TEST_FRACTION=0.2
-VAL_FRACTION="${VAL_FRACTION:-0.0}"
+# Split fractions (test_fraction, val_fraction, atlas_to_test) are read
+# from $TRAIN_YAML by 01_prepare_data.py — edit there to change them.
 
 # ── Run ───────────────────────────────────────────────────────
 echo "============================================================"

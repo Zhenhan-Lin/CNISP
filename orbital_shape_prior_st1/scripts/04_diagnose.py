@@ -52,14 +52,16 @@ from diagnostics.latent_analysis import (
 
 # ── Cross-resolution utilities (self-contained, no engine imports) ─
 
-def _dice(a: np.ndarray, b: np.ndarray, num_classes: int) -> Dict:
-    per_class = []
+def _dice_per_class(a: np.ndarray, b: np.ndarray,
+                    num_classes: int) -> np.ndarray:
+    """Hard Dice for each foreground class 1..num_classes-1 (shape [K])."""
+    per_class = np.empty(num_classes - 1, dtype=np.float64)
     for c in range(1, num_classes):
         pa, pb = (a == c), (b == c)
         inter = np.sum(pa & pb)
         total = np.sum(pa) + np.sum(pb)
-        per_class.append(2.0 * inter / (total + 1e-5))
-    return {"mean": float(np.mean(per_class)), "per_class": per_class}
+        per_class[c - 1] = 2.0 * inter / (total + 1e-5)
+    return per_class
 
 
 def _load_iso_predictions(output_dir: Path, step_sizes: List[int],
@@ -89,26 +91,51 @@ def _get_casenames_from_metadata(output_dir: Path, step_sizes: List[int]) -> Lis
 
 
 def _compute_pairwise_dice(preds, step_sizes, casenames, num_classes):
-    n = len(step_sizes)
-    per_case = np.full((len(casenames), n, n), np.nan)
+    """
+    Per-case pairwise Dice between iso predictions at each (step_i, step_j),
+    computed once per class and reused for the mean.
+
+    Returns:
+        mean_per_class : ndarray [K, M, M]
+            mean over cases, K = num_classes-1, M = len(step_sizes)
+        per_case       : ndarray [N, K, M, M]
+            raw per-(case, class, step, step) Dice (NaN if missing)
+    """
+    n = len(casenames)
+    m = len(step_sizes)
+    k = num_classes - 1
+    per_case = np.full((n, k, m, m), np.nan, dtype=np.float64)
+
     for ci, cn in enumerate(casenames):
         for si, s1 in enumerate(step_sizes):
-            for sj, s2 in enumerate(step_sizes):
+            if cn not in preds[s1]:
+                continue
+            p1 = preds[s1][cn]
+            for sj in range(si, m):
+                s2 = step_sizes[sj]
                 if si == sj:
-                    per_case[ci, si, sj] = 1.0
+                    per_case[ci, :, si, sj] = 1.0
                     continue
-                if cn not in preds[s1] or cn not in preds[s2]:
+                if cn not in preds[s2]:
                     continue
-                p1, p2 = preds[s1][cn], preds[s2][cn]
-                if p1.shape != p2.shape:
-                    ms = tuple(min(a, b) for a, b in zip(p1.shape, p2.shape))
-                    p1, p2 = p1[:ms[0], :ms[1], :ms[2]], p2[:ms[0], :ms[1], :ms[2]]
-                per_case[ci, si, sj] = _dice(p1, p2, num_classes)["mean"]
-    return np.nanmean(per_case, axis=0), per_case
+                p2 = preds[s2][cn]
+                # Shapes must match: same case + same native spacing ->
+                # same iso_target, regardless of step (see engine/infer.py).
+                # If they don't, refuse to silently truncate.
+                assert p1.shape == p2.shape, (
+                    f"iso shape mismatch for {cn} step={s1} vs step={s2}: "
+                    f"{p1.shape} vs {p2.shape}. Re-run inference for this "
+                    f"case so iso_space outputs share a common grid."
+                )
+                dice_k = _dice_per_class(p1, p2, num_classes)
+                per_case[ci, :, si, sj] = dice_k
+                per_case[ci, :, sj, si] = dice_k  # symmetric
+
+    mean_per_class = np.nanmean(per_case, axis=0)  # [K, M, M]
+    return mean_per_class, per_case
 
 
-def _plot_heatmap(matrix, step_sizes, spacings_per_step, save_path, title,
-                  struct_names=None, preds=None, casenames=None, num_classes=None):
+def _plot_heatmap(matrix, step_sizes, spacings_per_step, save_path, title):
     n = len(step_sizes)
     labels = [f"step={s}\n({spacings_per_step.get(s, 0):.1f}mm)" for s in step_sizes]
 
@@ -186,11 +213,13 @@ def run_cross_resolution_analysis(output_dir: Path, step_sizes: List[int],
     for step in available_steps:
         print(f"    step={step}: {len(preds[step])}/{len(casenames)} loaded")
 
-    # Pairwise Dice
+    # Pairwise Dice: single pass returns per-class tensor.
     print("  Computing pairwise Dice...")
-    matrix, per_case = _compute_pairwise_dice(
+    mean_per_class, per_case = _compute_pairwise_dice(
         preds, available_steps, casenames, num_classes,
     )
+    # Class-mean over foreground classes -> [M, M]
+    matrix = mean_per_class.mean(axis=0)
 
     # Print matrix
     print(f"\n  {'':>10s}", end="")
@@ -215,49 +244,33 @@ def run_cross_resolution_analysis(output_dir: Path, step_sizes: List[int],
     )
     print(f"\n  Heatmap: {analysis_dir / 'cross_res_dice_mean.png'}")
 
-    # Per-structure heatmaps
+    # Per-structure heatmaps (reuse mean_per_class; no recompute)
     struct_names = {1: "ON", 2: "Globe", 3: "Fat", 4: "Recti"}
-    n = len(available_steps)
     for cls_id in range(1, num_classes):
-        cls_matrix = np.full((len(casenames), n, n), np.nan)
-        for ci, cn in enumerate(casenames):
-            for si, s1 in enumerate(available_steps):
-                for sj, s2 in enumerate(available_steps):
-                    if si == sj:
-                        cls_matrix[ci, si, sj] = 1.0
-                        continue
-                    if cn not in preds[s1] or cn not in preds[s2]:
-                        continue
-                    p1, p2 = preds[s1][cn], preds[s2][cn]
-                    if p1.shape != p2.shape:
-                        ms = tuple(min(a, b) for a, b in zip(p1.shape, p2.shape))
-                        p1, p2 = p1[:ms[0], :ms[1], :ms[2]], p2[:ms[0], :ms[1], :ms[2]]
-                    pa, pb = (p1 == cls_id), (p2 == cls_id)
-                    inter = np.sum(pa & pb)
-                    total = np.sum(pa) + np.sum(pb)
-                    cls_matrix[ci, si, sj] = 2.0 * inter / (total + 1e-5)
-
-        cls_mean = np.nanmean(cls_matrix, axis=0)
         name = struct_names.get(cls_id, f"class_{cls_id}")
         _plot_heatmap(
-            cls_mean, available_steps, spacings_per_step,
+            mean_per_class[cls_id - 1], available_steps, spacings_per_step,
             analysis_dir / f"cross_res_dice_{name}.png",
             f"Cross-Resolution Dice — {name}",
         )
     print(f"  Per-structure heatmaps: {analysis_dir}/")
 
-    # CSV
+    # CSV: mean over classes
     csv_path = analysis_dir / "pairwise_dice_matrix.csv"
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow([""] + [f"step_{s}" for s in available_steps])
         for si, s1 in enumerate(available_steps):
             w.writerow([f"step_{s1}"] + [f"{matrix[si, sj]:.4f}"
-                                          for sj in range(n)])
+                                          for sj in range(len(available_steps))])
     print(f"  Matrix CSV: {csv_path}")
 
-    return {"matrix": matrix, "step_sizes": available_steps,
-            "spacings_per_step": spacings_per_step}
+    return {
+        "matrix": matrix,
+        "per_class_matrix": mean_per_class,
+        "step_sizes": available_steps,
+        "spacings_per_step": spacings_per_step,
+    }
 
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -320,26 +333,27 @@ def main():
             analysis = analyze_latent_space(latents, metadata)
             print_latent_report(analysis)
     else:
-        print(f"\nSKIP Section 2: no inference results.")
+        print("\nSKIP Section 2: no inference results.")
 
     # ── Section 3: Cross-resolution consistency ───────────────────
-    # With per-case adaptive sweep the union of step values is not in the
-    # config. Discover step directories from disk and fall back to the
-    # legacy ``test_step_sizes`` / ``slice_step_size`` keys only if no
-    # ``step_XX/`` subdirectories exist yet.
+    # With the per-case adaptive sweep the union of step values is not in
+    # any yaml; discover step_XX/ subdirectories on disk. If none exist
+    # inference hasn't been run yet and we skip Section 3 outright.
     step_sizes = sorted(
         int(p.name.split("_")[1])
         for p in output_dir.glob("step_*")
         if p.is_dir() and p.name.split("_")[1].isdigit()
     )
-    if not step_sizes:
-        step_sizes = params.get("test_step_sizes",
-                                [params.get("slice_step_size", 4)])
-        if isinstance(step_sizes, int):
-            step_sizes = [step_sizes]
     num_classes = params.get("num_classes", 5)
 
-    cross_res = run_cross_resolution_analysis(output_dir, step_sizes, num_classes)
+    if not step_sizes:
+        print(f"\nSKIP Section 3: no step_XX/ directories under "
+              f"{output_dir} (run inference first).")
+        cross_res = None
+    else:
+        cross_res = run_cross_resolution_analysis(
+            output_dir, step_sizes, num_classes,
+        )
 
     # ── Save combined report ──────────────────────────────────────
     report = {"model_name": args.model_name}

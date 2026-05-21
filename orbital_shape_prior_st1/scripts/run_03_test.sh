@@ -3,28 +3,24 @@
 # Step 3: Test A — Controlled Reconstruction
 #
 # What this does:
-#   For each test case:
+#   For each test case, the adaptive resolution sweep:
 #     1. Load full-resolution aligned GT label patch
-#     2. Synthetically sparsify (keep every Nth slice → simulates anisotropy)
-#     3. Use sparse slices as observation → optimize latent code (1200 iters)
-#     4. Dense-sample MLP on full-resolution grid → 3D reconstruction
-#     5. Compare reconstruction vs full-resolution GT
+#     2. Compute per-case step list from configs/test_default.yaml
+#        adaptive_step_sweep (steps depend on the case's through-plane
+#        spacing so eff_res stays under max_eff_resolution_mm)
+#     3. For each step: sparsify, optimize latent (≤1200 iters),
+#        dense-sample MLP, compute Dice (dense + observed-only)
+#     4. Pick per-case "primary" result closest to primary_eff_res_mm
+#        and map it back to native image space
 #
-# This answers: "Given PERFECT sparse observations, how much 3D
-# information can the shape prior recover?"
+# This answers: "Given PERFECT sparse observations at varying acquisition
+# anisotropy, how much 3D structure can the shape prior recover?"
 #
 # REVIEW BEFORE PROCEEDING TO STEP 4:
-#   1. Check per-case dice scores in terminal output
-#   2. Open a few *_pred.nii.gz files in Slicer alongside GT
-#      to visually assess reconstruction quality
+#   1. Check per-case dice scores in stdout + test_summary.csv
+#   2. Open a few step_XX/pred/*_pred.nii.gz in Slicer alongside GT
 #   3. Check if failures are systematic (all ON bad?) or random
-#
-# OPTIONAL: run at multiple sparsification levels to see degradation:
-#   for STEP in 2 4 8; do
-#     sed "s/slice_step_size: .*/slice_step_size: $STEP/" \
-#       configs/eval_default.yaml > /tmp/eval_step${STEP}.yaml
-#     bash scripts/run_03_test.sh /tmp/eval_step${STEP}.yaml
-#   done
+#   4. Look at primary native_space/ outputs for the down-stream pipeline
 # ============================================================
 
 set -euo pipefail
@@ -62,8 +58,14 @@ echo "============================================================"
 echo "Step 3 COMPLETE."
 echo ""
 echo "Outputs saved to: output_basedir/$MODEL_NAME/"
-echo "  *_pred.nii.gz  — reconstructed label maps"
-echo "  inference_results.pkl — serialized results for diagnostics"
+echo "  inference_results.pkl   — primary picks (one per case), feeds 04_diagnose + map_to_native"
+echo "  sweep_results.pkl       — full (case × step) sweep"
+echo "  test_results.csv        — per-(case, step) metrics"
+echo "  test_summary.csv        — eff_res-bucket aggregates"
+echo "  step_XX/pred/*.nii.gz   — reconstructed label maps (per step)"
+echo "  step_XX/latents/*.npy   — optimized latents (cache resume)"
+echo "  step_XX/iso_space/      — isotropic-grid predictions (for 04_diagnose heatmap)"
+echo "  native_space/           — primary picks mapped back to native image grid"
 echo ""
 echo "REVIEW CHECKLIST before running Step 4:"
 echo "  □ Mean dice > 0.75? (viable shape prior)"
