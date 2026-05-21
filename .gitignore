@@ -1,6 +1,6 @@
 .gitignore
 orbital_shape_prior_st1/aligned_patches
-orbital_shape_prior_st1/reconstruction
+orbital_shape_prior_st1/reconstructions
 orbital_shape_prior_st1/models/orbital_ad_v1
 .venv
 orbital_shape_prior_st1/data_prep/__pycache__
@@ -9,3 +9,5 @@ orbital_shape_prior_st1/engine/__pycache__
 orbital_shape_prior_st1/models/__pycache__
 orbital_shape_prior_st1/scripts/__pycache__
 orbital_shape_prior_st1/scripts/probe_inference_shapes.py
+review_checklist.csv
+main.py
