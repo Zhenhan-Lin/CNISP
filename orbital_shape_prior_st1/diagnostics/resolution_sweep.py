@@ -178,7 +178,21 @@ def eval_case_at_resolution(
     # 3. Iteratively expand any face that has foreground on it
     # 4. Stop when all 6 faces are fully background
 
-    full_shape = (net.image_size.cpu() / spacing_dense).ceil().long()
+    # Render the prediction on the dense GT's voxel grid so that
+    # pred_class_map.shape == gt_class_map.shape downstream.
+    #
+    # `net.image_size` is the MAX physical extent across the training set
+    # (see OrbitalImplicitDataset.image_size), so the legacy
+    # `ceil(image_size / spacing_dense)` envelope is per-case >= the case's
+    # own label_dense.shape and only matches by coincidence. label_dense is
+    # exactly the canonical patch the model is supposed to reconstruct.
+    assert label_dense is not None, (
+        "_run_case requires label_dense in this pipeline — both eval and "
+        "cache paths in resolution_sweep.run_sweep pass a non-None GT. If "
+        "you intentionally added a no-GT inference mode, decide the target "
+        "grid explicitly instead of falling back to net.image_size envelope."
+    )
+    full_shape = torch.as_tensor(label_dense.shape, dtype=torch.long)
     offset_dense = spacing_dense / 2.0
 
     fg_vox = torch.nonzero(label_obs > 0, as_tuple=False)  # [M, 3]
@@ -281,26 +295,26 @@ def eval_case_at_resolution(
     bbox_points = int(np.prod(pred_vol.shape))
     full_points = int(np.prod(full_shape.tolist()))
 
-    # ── Dice (only if GT available, i.e. evaluation mode) ─────
-    gt_np = label_dense.numpy() if label_dense is not None else None
-    dice_dense = {"mean": 0.0, "per_class": []}
-    dice_observed = {"mean": 0.0, "per_class": []}
+    # ── Dice ──────────────────────────────────────────────────
+    gt_np = label_dense.numpy()
+    assert pred_np.shape == gt_np.shape, (
+        f"[_run_case] step={step_size}: pred {pred_np.shape} != gt "
+        f"{gt_np.shape}. full_shape was built from label_dense.shape so this "
+        f"should never trigger — investigate."
+    )
+    print(f"  [_run_case] step={step_size}  pred={pred_np.shape}  "
+          f"gt={gt_np.shape}  bbox_pts={bbox_points}/{full_points}  "
+          f"spacing={tuple(round(float(s), 3) for s in spacing_dense)}")
 
-    if gt_np is not None:
-        common = tuple(min(pred_np.shape[d], gt_np.shape[d]) for d in range(3))
-        pred_eval = pred_np[:common[0], :common[1], :common[2]]
-        gt_eval = gt_np[:common[0], :common[1], :common[2]]
-
-        dice_dense = _hard_dice(pred_eval, gt_eval, net.num_classes)
-
-        if step_size > 1:
-            obs_slices = list(range(0, common[step_axis], step_size))
-            sl = [slice(None)] * 3
-            sl[step_axis] = obs_slices
-            dice_observed = _hard_dice(pred_eval[tuple(sl)], gt_eval[tuple(sl)],
-                                       net.num_classes)
-        else:
-            dice_observed = dice_dense
+    dice_dense = _hard_dice(pred_np, gt_np, net.num_classes)
+    if step_size > 1:
+        obs_slices = list(range(0, pred_np.shape[step_axis], step_size))
+        sl = [slice(None)] * 3
+        sl[step_axis] = obs_slices
+        dice_observed = _hard_dice(pred_np[tuple(sl)], gt_np[tuple(sl)],
+                                   net.num_classes)
+    else:
+        dice_observed = dice_dense
 
     n_total = full_shape[step_axis].item()
     n_obs = len(range(0, n_total, max(step_size, 1)))
@@ -354,17 +368,26 @@ def _try_load_cached(output_dir, casename, step, step_axis,
     pred_np = np.asarray(pred_nii.dataobj).astype(np.int32)
     gt_np = label_dense.numpy() if isinstance(label_dense, torch.Tensor) else label_dense
 
-    common = tuple(min(pred_np.shape[d], gt_np.shape[d]) for d in range(3))
-    pred_eval = pred_np[:common[0], :common[1], :common[2]]
-    gt_eval = gt_np[:common[0], :common[1], :common[2]]
+    # Stale-cache trap: a saved pred from a previous run can have a different
+    # shape (built from a now-changed net.image_size envelope, or from a
+    # different canonical_align voxel grid). Surface it loudly instead of
+    # silently cropping — the right action is to delete that step_XX/ subtree
+    # and re-run inference for the affected cases.
+    assert pred_np.shape == gt_np.shape, (
+        f"[_try_load_cached] {casename} step={step}: cached pred shape "
+        f"{pred_np.shape} != gt shape {gt_np.shape} at {pred_path}. This is "
+        f"a stale cache from a previous run with a different envelope; "
+        f"delete step_{step:02d}/pred/{casename}_pred.nii.gz (and the "
+        f"matching latents/) and re-run."
+    )
+    print(f"  [cache hit] {casename}  step={step}  shape={pred_np.shape}")
 
-    dice_dense = _hard_dice(pred_eval, gt_eval, num_classes)
-
+    dice_dense = _hard_dice(pred_np, gt_np, num_classes)
     if step > 1:
-        obs_slices = list(range(0, common[step_axis], step))
+        obs_slices = list(range(0, pred_np.shape[step_axis], step))
         sl = [slice(None)] * 3
         sl[step_axis] = obs_slices
-        dice_observed = _hard_dice(pred_eval[tuple(sl)], gt_eval[tuple(sl)], num_classes)
+        dice_observed = _hard_dice(pred_np[tuple(sl)], gt_np[tuple(sl)], num_classes)
     else:
         dice_observed = dice_dense
 

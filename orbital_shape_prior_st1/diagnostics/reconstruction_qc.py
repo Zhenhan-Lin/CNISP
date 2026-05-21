@@ -100,6 +100,17 @@ def diagnose_single_case(
     if label_names is None:
         label_names = DEFAULT_LABEL_NAMES
 
+    assert pred_map.shape == gt_map.shape, (
+        f"[reconstruction_qc] {casename}: pred and gt shape mismatch — "
+        f"pred={pred_map.shape}, gt={gt_map.shape}. This means the inference "
+        f"that produced this result rendered the prediction on a different "
+        f"voxel grid than the GT (likely a stale cache from an older "
+        f"net.image_size envelope, or resolution_sweep._run_case rendering "
+        f"on `ceil(image_size / spacing)` rather than label_dense.shape). "
+        f"Re-run inference for this case (and clear step_*/pred/, latents/ "
+        f"for it) so pred and gt share the canonical patch grid."
+    )
+
     voxel_vol = float(np.prod(spacing))
     diag = CaseDiagnostics(casename=casename)
 
