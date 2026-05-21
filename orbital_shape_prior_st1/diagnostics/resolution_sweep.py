@@ -32,6 +32,18 @@ except ImportError:
 DEFAULT_BUCKET_EDGES_MM: tuple = (1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0)
 
 
+def _sweep_autocast_dtype() -> torch.dtype:
+    """Pick autocast dtype for sweep no_grad forward passes."""
+    if not torch.cuda.is_available():
+        return torch.float32
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+_SWEEP_AUTOCAST_DTYPE = _sweep_autocast_dtype()
+
+
 def adaptive_steps_for_case(
     spacing_axis: float,
     target_eff_res_increment_mm: float = 1.0,
@@ -179,22 +191,30 @@ def eval_case_at_resolution(
         bbox_min = torch.zeros(3, dtype=torch.long)
         bbox_max = full_shape
 
+    use_amp = (device.type == "cuda"
+               and _SWEEP_AUTOCAST_DTYPE != torch.float32)
+
     def _predict_voxels(vox_indices):
-        """Predict labels for a set of voxel indices [N, 3] → [N] int."""
+        """Predict labels for a set of voxel indices [N, 3] -> [N] int (CPU)."""
         coords = vox_indices.float() * spacing_dense + offset_dense
         coords_batch = coords.reshape(1, -1, 1, 1, 3).to(device)
         n = coords_batch.shape[1]
-        chunk = 300_000
+        # no_grad: 2M chunk is comfortably within 8 GB on any modern GPU
+        # (the MLP is 128 wide, no activation accumulation across layers).
+        chunk = 2_000_000
+        preds_gpu = torch.empty(n, dtype=torch.int32, device=device)
         with torch.no_grad():
-            if n <= chunk:
-                logits = net(latent, coords_batch)
-                return logits.squeeze(0).squeeze(1).squeeze(1).argmax(dim=-1).cpu()
-            parts = []
             for c0 in range(0, n, chunk):
                 c1 = min(c0 + chunk, n)
-                lg = net(latent, coords_batch[:, c0:c1])
-                parts.append(lg.squeeze(0).squeeze(1).squeeze(1).argmax(dim=-1).cpu())
-            return torch.cat(parts, dim=0)
+                with torch.autocast(device_type=device.type,
+                                    dtype=_SWEEP_AUTOCAST_DTYPE,
+                                    enabled=use_amp):
+                    lg = net(latent, coords_batch[:, c0:c1])
+                preds_gpu[c0:c1] = (
+                    lg.squeeze(0).squeeze(1).squeeze(1)
+                      .argmax(dim=-1).to(torch.int32)
+                )
+        return preds_gpu.cpu()
 
     def _build_bbox_grid(bmin, bmax):
         """Build voxel index grid [B1, B2, B3, 3] within bounding box."""

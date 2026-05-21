@@ -80,7 +80,8 @@ class MultiClassAutoDecoder(nn.Module):
         return self.occp_pred(z, local_coords)
 
     def predict_dense(self, latent, target_shape, spacing,
-                      batch_size_coords=64**3):
+                      batch_size_coords=2_000_000,
+                      autocast_dtype=None):
         """
         Dense prediction on a full grid, following Amiranashvili's
         generate_sampling_grid with cmin=0, cmax=image_size.
@@ -100,8 +101,14 @@ class MultiClassAutoDecoder(nn.Module):
             latent: [1, Z]
             target_shape: [3] integer tensor
             spacing: [3] float tensor (mm per voxel)
+            batch_size_coords: voxels per forward chunk (no_grad, so chunk
+                size only bounds peak intermediate activations, not gradient
+                buffers; 2M is safe on 8GB+ GPUs for a 128-wide MLP).
+            autocast_dtype: if not None, run forward under
+                ``torch.autocast(device.type, dtype=autocast_dtype)`` for
+                ~2x speedup; bf16 is recommended on Ampere+.
         Returns:
-            class_map: [D1, D2, D3] int tensor (argmax of logits)
+            class_map: [D1, D2, D3] int32 CPU tensor (argmax of logits)
         """
         device = latent.device
         target_shape = target_shape.long()
@@ -124,18 +131,25 @@ class MultiClassAutoDecoder(nn.Module):
         coords_flat = torch.stack(grid, dim=-1).reshape(-1, 3)  # [N, 3]
         n_total = coords_flat.shape[0]
 
-        # Process in batches
-        logits_all = []
+        use_amp = (autocast_dtype is not None
+                   and autocast_dtype != torch.float32
+                   and device.type == "cuda")
+
+        # Pre-allocate GPU label buffer (uint8 fits class_id < 256)
+        preds_gpu = torch.empty(n_total, dtype=torch.int32, device=device)
+
         self.eval()
         with torch.no_grad():
             for start in range(0, n_total, batch_size_coords):
                 end = min(start + batch_size_coords, n_total)
                 bc = coords_flat[start:end].unsqueeze(0).unsqueeze(2).unsqueeze(2)
-                bl = self.forward(latent, bc)
+                with torch.autocast(device_type=device.type,
+                                    dtype=autocast_dtype or torch.float32,
+                                    enabled=use_amp):
+                    bl = self.forward(latent, bc)
                 bl = bl.squeeze(0).squeeze(1).squeeze(1)
-                logits_all.append(bl.cpu())
+                preds_gpu[start:end] = bl.argmax(dim=-1).to(torch.int32)
 
-        logits = torch.cat(logits_all, dim=0)
-        return logits.argmax(dim=-1).reshape(
+        return preds_gpu.reshape(
             int(target_shape[0]), int(target_shape[1]), int(target_shape[2])
-        )
+        ).cpu()

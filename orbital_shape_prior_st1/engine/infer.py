@@ -33,19 +33,25 @@ from engine.io_utils import load_latest_checkpoint
 from engine.native_mapping import map_results_to_native
 
 
-MAX_POINTS_PER_CHUNK = 3_000_000
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def _flatten_spatial(tensor):
-    """Flatten spatial dims: [1, D1, D2, D3, ...] → [1, N, 1, 1, ...]"""
-    shape = tensor.shape
-    if tensor.dim() == 5:
-        # coords: [1, D1, D2, D3, 3] → [1, N, 1, 1, 3]
-        return tensor.reshape(1, -1, 1, 1, shape[-1])
-    elif tensor.dim() == 4:
-        # labels: [1, D1, D2, D3] → [1, N, 1, 1]
-        return tensor.reshape(1, -1, 1, 1)
-    return tensor
+
+def _autocast_dtype() -> torch.dtype:
+    """
+    Pick the best mixed-precision dtype for the current GPU.
+
+    bfloat16: matches fp32 exponent range, no GradScaler needed (Ampere+).
+    float16:  half range, requires GradScaler (Volta/Turing fallback).
+    fp32:     CPU fallback.
+    """
+    if not torch.cuda.is_available():
+        return torch.float32
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float16
+
+
+_AUTOCAST_DTYPE = _autocast_dtype()
 
 # ── Checkpoint loading ────────────────────────────────────────────
 
@@ -95,10 +101,13 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
                     device, verbose=True):
     """
     Test-time latent optimization for one case.
- 
-    Supports chunked forward pass for large volumes (e.g. step=1 dense):
-    splits coordinates into chunks, accumulates gradients on the shared
-    latent, so memory usage is bounded regardless of volume size.
+
+    Single forward+backward per iteration (no chunking).
+    Memory budget assumption: the caller has filtered patch sizes so that
+    a full backward graph fits in VRAM after bf16/fp16 autocast. For an
+    80mm patch, bf16 on a 48 GB GPU comfortably handles up to ~15M voxels
+    (single forward); beyond that the caller is responsible for downsampling
+    or skipping the case.
     """
     latent = torch.nn.Parameter(
         torch.normal(0.0, 1e-4, [1, latent_dim], device=device),
@@ -107,72 +116,51 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
     criterion = MultiClassShapeLoss().to(device)
     metric = MultiClassDiceMetric(net.num_classes).to(device)
     optimizer = torch.optim.Adam([latent], lr=lr)
- 
+
     net.eval()
- 
-    # Flatten spatial dims for uniform chunking
-    coords_flat = _flatten_spatial(coords)     # [1, N, 1, 1, 3]
-    labels_flat = _flatten_spatial(labels_sparse)  # [1, N, 1, 1]
-    total_points = coords_flat.shape[1]
-    use_chunks = total_points > MAX_POINTS_PER_CHUNK
- 
-    if use_chunks:
-        n_chunks = (total_points + MAX_POINTS_PER_CHUNK - 1) // MAX_POINTS_PER_CHUNK
-        if verbose:
-            print(f"  Chunked optimization: {total_points} points → "
-                  f"{n_chunks} chunks of ≤{MAX_POINTS_PER_CHUNK}")
- 
+
+    use_amp = device.type == "cuda" and _AUTOCAST_DTYPE != torch.float32
+    # fp16 needs loss scaling; bf16 does not.
+    scaler = (torch.cuda.amp.GradScaler()
+              if use_amp and _AUTOCAST_DTYPE == torch.float16
+              else None)
+
+    if verbose:
+        n_vox = int(torch.tensor(labels_sparse.shape).prod().item())
+        dt = ("bf16" if _AUTOCAST_DTYPE == torch.bfloat16
+              else "fp16" if _AUTOCAST_DTYPE == torch.float16
+              else "fp32")
+        print(f"  optimize_latent: {n_vox} voxels, dtype={dt}, "
+              f"iters={num_iters}")
+
     prev_dsc, n_const = 0.0, 0
     t0 = time.time()
- 
+
     for i in range(num_iters):
         optimizer.zero_grad()
- 
-        if use_chunks:
-            # Chunked forward: accumulate gradients on latent
-            total_loss = 0.0
-            for c_start in range(0, total_points, MAX_POINTS_PER_CHUNK):
-                c_end = min(c_start + MAX_POINTS_PER_CHUNK, total_points)
-                c_coords = coords_flat[:, c_start:c_end]
-                c_labels = labels_flat[:, c_start:c_end]
-                c_logits = net(latent, c_coords)
-                c_loss = criterion(c_logits, c_labels) * (c_end - c_start) / total_points
-                c_loss.backward()
-                total_loss += c_loss.item()
- 
-            if lat_reg_lambda > 0:
-                lat_reg = torch.mean(torch.sum(latent ** 2, dim=1))
-                reg_loss = min(1.0, i / 100.0) * lat_reg_lambda * lat_reg
-                reg_loss.backward()
-                total_loss += reg_loss.item()
- 
-            optimizer.step()
-            loss_val = total_loss
-        else:
-            # Single forward (fits in memory)
+
+        with torch.autocast(device_type=device.type,
+                            dtype=_AUTOCAST_DTYPE,
+                            enabled=use_amp):
             logits = net(latent, coords)
             loss = criterion(logits, labels_sparse)
             if lat_reg_lambda > 0:
                 lat_reg = torch.mean(torch.sum(latent ** 2, dim=1))
                 loss = loss + min(1.0, i / 100.0) * lat_reg_lambda * lat_reg
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
             loss.backward()
             optimizer.step()
-            loss_val = loss.item()
- 
+        loss_val = loss.item()
+
         if (i + 1) % 10 == 0:
             with torch.no_grad():
-                if use_chunks:
-                    # Chunked metric computation
-                    all_logits = []
-                    for c_start in range(0, total_points, MAX_POINTS_PER_CHUNK):
-                        c_end = min(c_start + MAX_POINTS_PER_CHUNK, total_points)
-                        c_logits = net(latent, coords_flat[:, c_start:c_end])
-                        all_logits.append(c_logits)
-                    full_logits = torch.cat(all_logits, dim=1)
-                    dsc = metric(full_logits, labels_flat)["mean"]
-                else:
-                    dsc = metric(logits, labels_sparse)["mean"]
- 
+                dsc = metric(logits, labels_sparse)["mean"]
+
             if verbose and (i + 1) % 100 == 0:
                 print(f"  step {i+1:04d}/{num_iters}: loss={loss_val:.4f} "
                       f"dice={dsc:.3f} |z|²={torch.sum(latent**2).item():.2f} "
@@ -187,7 +175,7 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
                     print(f"  converged at step {i+1}")
                 break
             prev_dsc = dsc
- 
+
     return latent.detach()
 
 
@@ -224,7 +212,10 @@ def generate_average_shape(
     z_zero = torch.zeros(1, latent_dim, device=device)
 
     net.eval()
-    avg_map = net.predict_dense(z_zero, target_shape.to(device), spacing.to(device))
+    avg_map = net.predict_dense(
+        z_zero, target_shape.to(device), spacing.to(device),
+        autocast_dtype=_AUTOCAST_DTYPE,
+    )
 
     aff = np.diag([*spacing.cpu().numpy(), 1.0])
     nib.save(
@@ -465,6 +456,7 @@ def infer_test_set(params):
             with torch.no_grad():
                 iso_map = net.predict_dense(
                     latent_t, iso_target.to(device), iso_sp.to(device),
+                    autocast_dtype=_AUTOCAST_DTYPE,
                 )
             iso_aff = np.diag([*iso_sp.numpy(), 1.0])
             nib.save(
