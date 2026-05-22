@@ -1,7 +1,7 @@
 .gitignore
 orbital_shape_prior_st1/aligned_patches
 orbital_shape_prior_st1/reconstructions
-orbital_shape_prior_st1/models/orbital_ad_v1
+orbital_shape_prior_st1/models/*
 .venv
 orbital_shape_prior_st1/data_prep/__pycache__
 orbital_shape_prior_st1/diagnostics/__pycache__

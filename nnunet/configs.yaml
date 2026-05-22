@@ -7,7 +7,8 @@
 # Matches the training run in run_nnUNet_iso05.sh
 dataset_id: 835
 dataset_name: PHOTON_CT_QAfiltered
-plan: nnUNetPlans_iso05
+# plan: nnUNetPlans_iso05  # we use this plan but in result folder it has .json file without "iso_05"
+plan: nnUNetPlans
 configuration: 3d_fullres
 trainer: nnUNetTrainer
 folds: [0]

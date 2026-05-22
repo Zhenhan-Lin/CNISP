@@ -28,7 +28,7 @@ use_thick_slices: false
 
 # --- Sampling ---
 # Points per example per dim for training (64^3 = 262144 points total)
-num_points_per_example_per_dim_train: 80
+num_points_per_example_per_dim_train: 64
 batch_size_train: 10
 batch_size_val: 1
 
@@ -44,7 +44,7 @@ dice_class_weights: null
 learning_rate: 1.0e-4      # for network params, scaled by batch_size
 learning_rate_lat: 1.0e-3   # for latent codes, NOT scaled by batch_size
 lat_reg_lambda: 1.0e-4      # L2 regularization on latent codes
-num_epochs: 2000
+num_epochs: 1800
 
 # --- Logging & checkpointing ---
 log_epoch_count: 1
