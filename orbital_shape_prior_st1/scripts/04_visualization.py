@@ -3,12 +3,17 @@
 Step 4: Result visualization & summary.
 
 Reads the reconstruction folder produced by `scripts/03_infer.py`
-(output_basedir/<model_name>/) and emits:
+(output_basedir/<model_name>/) and emits the CNISP-only artifacts:
 
     recon_layout.txt            file-tree summary
-    recon_summary.png           per-step Dice trends + per-class breakdowns
     cross_resolution_analysis/  iso-space pairwise Dice heatmaps + CSV
+                                (prior self-consistency; no GT involved)
     native_sweep_summary.json   per-step native_space_step_XX/ audit
+
+Per-step Dice trend / per-class / per-case figures are now produced by
+the `compare` phase (nnunet/engine/build_method_summary.py) so that
+CNISP and nnUNet share the same source set + bucket edges. The CNISP
+slice lands at output_basedir/<model_name>/viz/CNISP_*.
 
 No diagnostic interpretation is performed (see git history for the legacy
 `04_diagnose.py` if you need reconstruction QC or latent-space analysis).

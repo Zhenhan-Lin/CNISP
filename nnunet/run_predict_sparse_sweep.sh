@@ -8,7 +8,7 @@
 # step_size = XX), one predict run per step. Outputs land at
 # ${WORK_DIR}/nnunet_pred_native_step_XX/ at the sparse CT's
 # spacing (nnUNetv2 resamples to plan and back internally).
-# nnunet/infer/upsample_sparse_preds.py is the next step; it NN-resamples
+# nnunet/engine/upsample_sparse_preds.py is the next step; it NN-resamples
 # each prediction back to the dense native CT grid so Dice can
 # compare against the native GT.
 #

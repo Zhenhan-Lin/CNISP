@@ -27,11 +27,12 @@ nnunet/
 │   ├── sparsify_inputs.py          #   Phase 1b: sparsified CTs (1:1 with CNISP sweep)
 │   └── prepare_smore_inputs.py     #   Phase 1c: symlink SMORE'd CTs
 │
-├── infer/                          # derived artifacts post-inference
+├── engine/                         # post-inference artifact + visualization builders
 │   ├── upsample_sparse_preds.py    #   Phase 1b: NN-upsample preds to native grid
 │   ├── build_cnisp_native_sweep.py #   compare-side backfill: CNISP step_XX -> native_space_step_XX
-│   │                               #     (no-op when engine/infer.py already wrote them)
-│   └── build_smore_test_images.py  #   Phase 1.5: SMORE the 31 source CTs
+│   │                               #     (no-op when orbital_shape_prior_st1/engine/infer.py already wrote them)
+│   ├── build_smore_test_images.py  #   Phase 1.5: SMORE the 31 source CTs
+│   └── build_method_summary.py     #   per-method by-eff_res CSV + TXT + PNG (CNISP and nnUNet)
 │
 ├── run_predict_native.sh           # Phase 1:  nnUNetv2_predict on original CT (step=1 baseline)
 ├── run_predict_sparse_sweep.sh     # Phase 1b: nnUNetv2_predict per step
@@ -49,7 +50,7 @@ bash nnunet/run_compare.sh
 # or step-by-step:
 python nnunet/data_prep/prepare_inputs.py        --config nnunet/configs.yaml
 bash   nnunet/run_predict_native.sh              # honours $CONFIG
-python nnunet/infer/build_cnisp_native_sweep.py  --config nnunet/configs.yaml   # no-op if infer.py already produced native_space_step_XX/
+python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml   # no-op if infer.py already produced native_space_step_XX/
 python nnunet/compare_native.py                  --config nnunet/configs.yaml
 ```
 
@@ -58,7 +59,7 @@ Inputs the scripts expect:
 - `configs.yaml::cnisp_paths_yaml` -> `orbital_shape_prior_st1/configs/paths.yaml` (`aligned_dir`, `casefiles_dir`, `output_basedir`).
 - CNISP must have already run inference: `output_basedir/<model_name>/sweep_results.pkl` and `step_XX/pred/*.nii.gz` exist.
   - Recent inferences also have `native_space_step_XX/` + `native_sweep_manifest.json`; `compare_native.py` will consume them directly.
-  - Legacy inferences only have `step_XX/`; in that case `infer/build_cnisp_native_sweep.py` reconstructs `native_space_step_XX/` from `sweep_results.pkl`.
+  - Legacy inferences only have `step_XX/`; in that case `engine/build_cnisp_native_sweep.py` reconstructs `native_space_step_XX/` from `sweep_results.pkl`.
 - CT image discovery is driven by `atlas_image_dir` and `pivot_csv`; missing CTs fail loudly with a per-source list.
 
 Outputs (under `configs.yaml::work_dir`):
@@ -78,15 +79,32 @@ Outputs (CNISP side, under `cnisp_paths.output_basedir/<model_name>/`):
 
 The `chk_*` rows in `paired_per_source.csv` carry `gt_source=chk_pseudo`; filter to `gt_source=='atlas'` for the manual-GT-only view.
 
+### Per-method by-eff_res summary bundle
+
+`compare_native.py` finishes by running `engine/build_method_summary.py` once for each method. Same script, same `paired_per_source.csv` -> nnUNet and CNISP get a matched bundle:
+
+- `${work_dir}/viz/nnUNet/nnUNet_per_source.csv | _summary_by_eff_res.csv | .txt | _recon_summary.png`
+- `${cnisp_output_basedir}/<model>/viz/CNISP_per_source.csv | _summary_by_eff_res.csv | .txt | _recon_summary.png`
+
+Each `_recon_summary.png` is three stacked subplots:
+
+1. Overall mean Dice vs effective resolution (errorbar over sources in each bucket).
+2. Per-class Dice vs effective resolution (ON / Globe / Fat / Recti).
+3. Per-case mean-Dice boxplot per eff_res bucket.
+
+CNISP's old `recon_summary.png` from `cnisp-viz` plotted a separate "observed-only" line; that line is intentionally **omitted** here because `paired_per_source.csv` only carries dense Dice. Keeping both methods on the same single-curve layout makes side-by-side comparison honest.
+
 ## Phase 1b: native-space sparse-CT sweep
 
 Mirrors CNISP's per-step inference on the nnUNet side: feed nnUNet a sparsified copy of each source CT (drop every Nth axial slice along the through-plane axis), then NN-upsample the prediction back to the original native grid for Dice. The `(source_id, step_size)` set is read directly from `${cnisp_output_basedir}/<model>/sweep_results.pkl`, so the two methods cannot drift out of sync across runs.
+
+> **What "sparsified" means here:** the CT is **subsampled along the through-plane axis** — every Nth slice is kept verbatim and the rest are dropped, then the NIfTI affine's through-plane column is multiplied by `step_size` so the header reports the new (coarser) spacing. **No interpolation, no super-resolution.** This is distinct from Phase 1c, which feeds nnUNet SMORE-super-resolved CTs (every voxel is a neural-network output). CNISP's sweep, in contrast, sparsifies the *GT label* (not the CT image), so on a given `(source, step)` row the two methods consume strictly aligned "information content" (same kept-slice indices, same eff_res) from two different modalities.
 
 ```bash
 # orchestrated by run_pipeline.sh's `nnunet-predict-sweep` phase, or:
 python nnunet/data_prep/sparsify_inputs.py     --config nnunet/configs.yaml
 bash   nnunet/run_predict_sparse_sweep.sh
-python nnunet/infer/upsample_sparse_preds.py   --config nnunet/configs.yaml
+python nnunet/engine/upsample_sparse_preds.py  --config nnunet/configs.yaml
 ```
 
 Pipeline-level prereqs: `nnunet-predict` (provides the step_01 dense baseline that the upsample step symlinks) and `cnisp-infer` (provides `sweep_results.pkl`).
@@ -127,12 +145,12 @@ Independent of Phase 1; runs in parallel:
 
 ```bash
 # local backend (host run-smore in PATH)
-python nnunet/infer/build_smore_test_images.py \
+python nnunet/engine/build_smore_test_images.py \
     --config nnunet/configs.yaml \
     --smore-gpu-ids 0,1 --smore-per-gpu-concurrency 1
 
 # container backend
-python nnunet/infer/build_smore_test_images.py \
+python nnunet/engine/build_smore_test_images.py \
     --config nnunet/configs.yaml \
     --smore-backend container \
     --smore-sif /path/to/smore.sif \
@@ -170,6 +188,6 @@ In `nnunet/configs.yaml`:
 | `work_dir` | Phase 1 / 1b / 1c working dir |
 | `smore_out_root`, `smore_suffix` | Phase 1.5 SMORE shared output (flat layout: `<smore_out_root>/<sid><smore_suffix>.nii.gz`) |
 | `sparse_eff_res_tolerance` | Phase 1b axis-detection tolerance (relative); default 0.05 |
-| `summary_bucket_edges_mm` | eff-res buckets, inherited from `test_default.yaml` so reports line up with `test_summary.csv` |
+| `summary_bucket_edges_mm` | eff-res buckets, inherited from `test_default.yaml` so reports line up with CNISP's `test_results.csv` `eff_res_bucket` column |
 
 CLI flags override the corresponding yaml fields when set.

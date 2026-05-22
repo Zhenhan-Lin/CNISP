@@ -4,11 +4,11 @@
 For every source in ``${work_dir}/source_to_path.json`` (written by
 ``data_prep/prepare_inputs.py``), look up the canonical SMORE output at
 ``${smore_out_root}/<source_id>_smore.nii.gz`` (flat layout produced by
-the latest ``infer/build_smore_test_images.py``) and symlink it as
+the latest ``engine/build_smore_test_images.py``) and symlink it as
 ``${work_dir}/nnunet_input_smore/<source_id>_0000.nii.gz`` for nnUNetv2.
 
 Sources missing the SMORE file get listed in a warning block at the end
-with a hint to run ``nnunet/infer/build_smore_test_images.py`` first.
+with a hint to run ``nnunet/engine/build_smore_test_images.py`` first.
 The phase continues with whatever is available, but exits with code 2
 if zero sources are stageable so the pipeline visibly fails instead of
 silently producing an empty input dir.
@@ -36,7 +36,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
-# Mirrors ``--smore-suffix`` default in nnunet/infer/build_smore_test_images.py.
+# Mirrors ``--smore-suffix`` default in nnunet/engine/build_smore_test_images.py.
 # If you change it there, change it here.
 _SMORE_SUFFIX = "_smore"
 
@@ -97,7 +97,7 @@ def main() -> int:
               f"SMORE output:", file=sys.stderr)
         for line in missing:
             print(f"  - {line}", file=sys.stderr)
-        print(f"  Run nnunet/infer/build_smore_test_images.py to produce them.",
+        print(f"  Run nnunet/engine/build_smore_test_images.py to produce them.",
               file=sys.stderr)
 
     print(f"\n[prepare_smore_inputs] staged {len(staged)} symlink(s); "

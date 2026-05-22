@@ -17,7 +17,7 @@
 # anisotropy, how much 3D structure can the shape prior recover?"
 #
 # REVIEW BEFORE PROCEEDING TO STEP 4:
-#   1. Check per-case dice scores in stdout + test_summary.csv
+#   1. Check per-case dice scores in stdout + test_results.csv
 #   2. Open a few step_XX/pred/*_pred.nii.gz in Slicer alongside GT
 #   3. Check if failures are systematic (all ON bad?) or random
 #   4. Look at primary native_space/ outputs for the down-stream pipeline
@@ -60,8 +60,7 @@ echo ""
 echo "Outputs saved to: output_basedir/$MODEL_NAME/"
 echo "  inference_results.pkl       — primary picks (one per case), feeds map_to_native + 04_visualization"
 echo "  sweep_results.pkl           — full (case × step) sweep"
-echo "  test_results.csv            — per-(case, step) metrics"
-echo "  test_summary.csv            — eff_res-bucket aggregates"
+echo "  test_results.csv            — per-(case, step) metrics (with eff_res_bucket column)"
 echo "  step_XX/pred/*.nii.gz       — reconstructed label maps (per step)"
 echo "  step_XX/latents/*.npy       — optimized latents (cache resume)"
 echo "  step_XX/iso_space/          — isotropic-grid predictions (for cross-resolution heatmap)"

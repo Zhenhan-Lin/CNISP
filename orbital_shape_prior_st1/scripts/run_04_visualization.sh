@@ -2,14 +2,20 @@
 # ============================================================
 # Step 4: Result Visualization & Summary
 #
-# Reads output_basedir/<MODEL_NAME>/ produced by Step 3 and writes:
+# Reads output_basedir/<MODEL_NAME>/ produced by Step 3 and writes
+# the CNISP-only artifacts:
 #   recon_layout.txt           file tree of the recon folder
-#   recon_summary.png          per-step Dice trends + per-class breakdowns
 #   cross_resolution_analysis/ iso-space pairwise Dice heatmaps + CSV
+#                              (prior self-consistency; no GT involved)
 #   native_sweep_summary.json  audit of native_space_step_XX/ outputs
 #
-# No diagnostics. For reconstruction QC / latent analysis, recover the
-# legacy `scripts/04_diagnose.py` from git history.
+# Dice trend / per-class / per-case figures come from the `compare`
+# phase (nnunet/engine/build_method_summary.py), driven from the
+# paired_per_source.csv compare_native produces. The CNISP slice of
+# that bundle lands at output_basedir/<MODEL_NAME>/viz/CNISP_*.
+#
+# For reconstruction QC / latent analysis, recover the legacy
+# `scripts/04_diagnose.py` from git history.
 # ============================================================
 
 set -euo pipefail
@@ -42,7 +48,9 @@ echo "Step 4 COMPLETE."
 echo ""
 echo "Artifacts under output_basedir/$MODEL_NAME/:"
 echo "  recon_layout.txt"
-echo "  recon_summary.png"
 echo "  cross_resolution_analysis/  (iso-space pairwise Dice + heatmaps)"
 echo "  native_sweep_summary.json   (native_space_step_XX/ audit)"
+echo ""
+echo "Dice trend / per-class / per-case figures will appear under"
+echo "  output_basedir/$MODEL_NAME/viz/   after the \`compare\` phase."
 echo "============================================================"

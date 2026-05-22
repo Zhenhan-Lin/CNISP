@@ -7,7 +7,7 @@ This module is the single source of truth for:
   * which canonical label scheme each GT uses.
 
 Everything downstream (``data_prep/prepare_inputs.py``,
-``infer/build_smore_test_images.py``, ``compare_native.py``) calls into
+``engine/build_smore_test_images.py``, ``compare_native.py``) calls into
 this module so the resolution logic cannot drift.
 
 Conventions

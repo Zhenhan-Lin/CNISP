@@ -319,7 +319,6 @@ def infer_test_set(params):
     Output structure:
         output_dir/
         ├── test_results.csv          (per (case, step), with eff_res bucket)
-        ├── test_summary.csv          (grouped by eff_res bucket)
         ├── average_shape_z0.nii.gz
         ├── step_01/
         │   ├── pred/
@@ -512,7 +511,7 @@ def infer_test_set(params):
         print(f"Native-space predictions: {native_dir} ({len(native_paths)} volumes)")
 
     # ── Map EVERY sweep step to native space ──────────────────────
-    # Mirrors what nnunet/infer/build_cnisp_native_sweep.py does as a backfill
+    # Mirrors what nnunet/engine/build_cnisp_native_sweep.py does as a backfill
     # for already-run experiments; here it is folded into the inference
     # loop so a single run produces every artifact the cross-model
     # comparison (see nnunet/compare_native.py) consumes.

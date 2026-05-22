@@ -32,29 +32,59 @@
 #                                   + cnisp-infer (sweep set).
 #                         (nnunet/data_prep/sparsify_inputs.py
 #                          + nnunet/run_predict_sparse_sweep.sh
-#                          + nnunet/infer/upsample_sparse_preds.py)
+#                          + nnunet/engine/upsample_sparse_preds.py)
 #
 #   nnunet-predict-smore  nnUNet on the SMORE-super-resolved CTs (produced
 #                         out-of-band by
-#                         nnunet/infer/build_smore_test_images.py; this
+#                         nnunet/engine/build_smore_test_images.py; this
 #                         phase only consumes them). Output is
 #                         nnunet_pred_smore/<sid>.nii.gz on the SMORE
 #                         grid -- mask only, no downstream comparison yet.
 #                         (nnunet/data_prep/prepare_smore_inputs.py
 #                          + nnunet/run_predict_smore.sh)
 #
-#   cnisp-viz             CNISP-side result summary: recon_summary.png,
-#                         cross_resolution_analysis/, native_sweep_summary.json.
+#   cnisp-viz             CNISP-only artifacts (the bits no
+#                         method-agnostic viewer can reproduce):
+#                         recon_layout.txt (file-tree dump),
+#                         cross_resolution_analysis/ (iso-space
+#                         prior self-consistency heatmaps -- pairwise
+#                         Dice between predictions at every step pair
+#                         on the canonical iso grid; no GT involved),
+#                         and native_sweep_summary.json (file audit
+#                         of native_space_step_XX/ outputs).
+#                         Per-step Dice trend / per-class / per-case
+#                         figures are NOT produced here -- they live
+#                         in the per-method viz bundle that the
+#                         `compare` phase writes (see below). If you
+#                         run cnisp-viz on its own, those figures
+#                         won't appear until `compare` also runs.
 #                         (orbital_shape_prior_st1/scripts/run_04_visualization.sh)
 #
-#   compare               nnUNet vs CNISP paired Dice tables
-#                         (paired_per_source.csv, paired_summary.csv|.txt).
+#   compare               Two outputs:
+#                          (a) nnUNet vs CNISP paired Dice tables
+#                              under ${work_dir}:
+#                                paired_per_source.csv  (long, both methods)
+#                                paired_summary.csv     (by eff_res bucket)
+#                                paired_summary.txt     (pretty + caveats)
+#                          (b) per-method by-eff_res viz bundle, drawn
+#                              from the same paired_per_source.csv so
+#                              CNISP and nnUNet share one source set +
+#                              one eff_res axis. For each method:
+#                                {method}_per_source.csv
+#                                {method}_summary_by_eff_res.csv
+#                                {method}_summary_by_eff_res.txt
+#                                {method}_recon_summary.png   (3 subplots:
+#                                    mean Dice vs eff_res,
+#                                    per-class Dice vs eff_res,
+#                                    per-case Dice boxplot per bucket)
+#                              Output dirs:
+#                                nnUNet -> ${work_dir}/viz/nnUNet/
+#                                CNISP  -> ${cnisp_output_basedir}/<model>/viz/
 #                         build_cnisp_native_sweep.py is a no-op when
 #                         cnisp-infer already wrote native_space_step_XX/.
-#                         compare_native.py now emits per-step nnUNet
-#                         rows alongside CNISP's per-step rows.
-#                         (nnunet/infer/build_cnisp_native_sweep.py
-#                          + nnunet/compare_native.py)
+#                         (nnunet/engine/build_cnisp_native_sweep.py
+#                          + nnunet/compare_native.py
+#                          + nnunet/engine/build_method_summary.py)
 #
 # Dependency order (the order phases run when none are specified):
 #   cnisp-train -> nnunet-predict -> cnisp-infer
@@ -271,7 +301,7 @@ phase_nnunet_predict_sweep() {
     fi
     python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG"
     CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_sparse_sweep.sh"
-    python3 "$REPO_ROOT/nnunet/infer/upsample_sparse_preds.py" --config "$CONFIG"
+    python3 "$REPO_ROOT/nnunet/engine/upsample_sparse_preds.py" --config "$CONFIG"
 }
 
 phase_nnunet_predict_smore() {
@@ -324,8 +354,16 @@ phase_cnisp_viz() {
 phase_compare() {
     echo ""
     echo "[phase] compare ---------------------------------------"
-    python3 "$REPO_ROOT/nnunet/infer/build_cnisp_native_sweep.py" --config "$CONFIG"
-    python3 "$REPO_ROOT/nnunet/compare_native.py"                 --config "$CONFIG"
+    python3 "$REPO_ROOT/nnunet/engine/build_cnisp_native_sweep.py" --config "$CONFIG"
+    python3 "$REPO_ROOT/nnunet/compare_native.py"                  --config "$CONFIG"
+    # Per-method by-eff_res summary (PNG + CSV + TXT for each of
+    # nnUNet and CNISP). Cheap (seconds); driven from the
+    # paired_per_source.csv compare_native just wrote, so both methods
+    # always share the same source set + eff_res axis.
+    python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
+            --config "$CONFIG" --method nnUNet
+    python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
+            --config "$CONFIG" --method CNISP
 }
 
 # ── Dispatch ─────────────────────────────────────────────────
@@ -349,8 +387,8 @@ printf "Pipeline complete in %ds. Phases run: %s\n" \
     "$((END_TS - START_TS))" "${PHASES[*]}"
 echo ""
 echo "Where to look for results:"
-echo "  CNISP single-model summary:"
-echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/recon_summary.png"
+echo "  CNISP single-model artifacts:"
+echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/recon_layout.txt"
 echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/cross_resolution_analysis/"
 echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/native_sweep_summary.json"
 echo "  nnUNet sparse-CT sweep (per-step preds on native CT grid):"
@@ -362,4 +400,14 @@ echo "  nnUNet vs CNISP paired comparison (per-step rows):"
 echo "    $WORK_DIR/paired_per_source.csv"
 echo "    $WORK_DIR/paired_summary.csv"
 echo "    $WORK_DIR/paired_summary.txt"
+echo "  Per-method by-eff_res viz bundle (nnUNet):"
+echo "    $WORK_DIR/viz/nnUNet/nnUNet_recon_summary.png"
+echo "    $WORK_DIR/viz/nnUNet/nnUNet_per_source.csv"
+echo "    $WORK_DIR/viz/nnUNet/nnUNet_summary_by_eff_res.csv"
+echo "    $WORK_DIR/viz/nnUNet/nnUNet_summary_by_eff_res.txt"
+echo "  Per-method by-eff_res viz bundle (CNISP):"
+echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/CNISP_recon_summary.png"
+echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/CNISP_per_source.csv"
+echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/CNISP_summary_by_eff_res.csv"
+echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/CNISP_summary_by_eff_res.txt"
 echo "============================================================"

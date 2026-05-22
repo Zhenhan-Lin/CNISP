@@ -34,7 +34,7 @@ Output
 
 Usage
 -----
-    python nnunet/infer/upsample_sparse_preds.py --config nnunet/configs.yaml
+    python nnunet/engine/upsample_sparse_preds.py --config nnunet/configs.yaml
 """
 
 from __future__ import annotations

@@ -575,12 +575,12 @@ def save_sweep_csvs(all_results: List[Dict],
                     output_dir,
                     bucket_edges: Sequence[float] = DEFAULT_BUCKET_EDGES_MM):
     """
-    Write two CSVs:
-
-    test_results.csv   one row per (case, step) - the raw observation
-    test_summary.csv   one row per effective-resolution bucket -
-                       aggregated across the cases that contributed a
-                       result in that bucket
+    Write ``test_results.csv`` -- one row per (case, step), the raw
+    observation. This is the only CSV the inference loop emits now;
+    by-eff_res aggregates and all sweep figures are produced later by
+    ``nnunet/engine/build_method_summary.py`` against
+    ``paired_per_source.csv`` (so CNISP and nnUNet always share the
+    same source set + bucket edges).
     """
     output_dir = Path(output_dir)
 
@@ -612,45 +612,3 @@ def save_sweep_csvs(all_results: List[Dict],
                 row[f"dice_obs_{cn}"] = f"{r['dice_observed']['per_class'][ci_col]:.4f}"
             w.writerow(row)
     print(f"\nPer-case results: {csv_path}")
-
-    summary_path = output_dir / "test_summary.csv"
-    with open(summary_path, "w", newline="") as f:
-        fields = (["eff_res_bucket",
-                   "eff_res_mean_mm", "eff_res_std_mm",
-                   "n_observations",
-                   "dice_dense_mean", "dice_dense_std",
-                   "dice_observed_mean", "dice_observed_std"]
-                  + [f"{cn}_dense_mean" for cn in class_names]
-                  + [f"{cn}_dense_std" for cn in class_names]
-                  + [f"{cn}_obs_mean" for cn in class_names]
-                  + [f"{cn}_obs_std" for cn in class_names])
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        grouped = _group_by_bucket(all_results, bucket_edges)
-        n_buckets = len(bucket_edges) + 1
-        for bi in range(n_buckets):
-            results_bi = grouped.get(bi, [])
-            if not results_bi:
-                continue
-            effs = [r["effective_resolution_mm"] for r in results_bi]
-            d_dense = [r["dice"]["mean"] for r in results_bi]
-            d_obs = [r["dice_observed"]["mean"] for r in results_bi]
-            pc_dense = np.array([r["dice"]["per_class"] for r in results_bi])
-            pc_obs = np.array([r["dice_observed"]["per_class"] for r in results_bi])
-            row = {
-                "eff_res_bucket": _bucket_label(bi, bucket_edges),
-                "eff_res_mean_mm": f"{np.mean(effs):.3f}",
-                "eff_res_std_mm": f"{np.std(effs):.3f}",
-                "n_observations": len(results_bi),
-                "dice_dense_mean": f"{np.mean(d_dense):.4f}",
-                "dice_dense_std": f"{np.std(d_dense):.4f}",
-                "dice_observed_mean": f"{np.mean(d_obs):.4f}",
-                "dice_observed_std": f"{np.std(d_obs):.4f}",
-            }
-            for ci_col, cn in enumerate(class_names):
-                row[f"{cn}_dense_mean"] = f"{np.mean(pc_dense[:, ci_col]):.4f}"
-                row[f"{cn}_dense_std"] = f"{np.std(pc_dense[:, ci_col]):.4f}"
-                row[f"{cn}_obs_mean"] = f"{np.mean(pc_obs[:, ci_col]):.4f}"
-                row[f"{cn}_obs_std"] = f"{np.std(pc_obs[:, ci_col]):.4f}"
-            w.writerow(row)
-    print(f"Summary: {summary_path}")

@@ -14,6 +14,6 @@ nnunet/__pycache__
 nnunet/nnunet_input/*
 nnunet/nnunet_pred_native/*
 nnunet/data_prep/__pycache__
-nnunet/infer/__pycache__
+nnunet/engine/__pycache__
 nnunet/helpers/__pycache__
 main.py

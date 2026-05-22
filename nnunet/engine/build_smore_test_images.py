@@ -25,11 +25,11 @@ to the flat root and lifts ``weights/`` out of the inner subdir.
 Usage
 -----
     # local backend (host run-smore in PATH)
-    python nnunet/infer/build_smore_test_images.py --config nnunet/configs.yaml \
+    python nnunet/engine/build_smore_test_images.py --config nnunet/configs.yaml \
         --smore-gpu-ids 0,1 --smore-per-gpu-concurrency 1
 
     # container backend
-    python nnunet/infer/build_smore_test_images.py --config nnunet/configs.yaml \
+    python nnunet/engine/build_smore_test_images.py --config nnunet/configs.yaml \
         --smore-backend container \
         --smore-sif /path/to/smore.sif \
         --smore-gpu-ids 0
@@ -55,7 +55,7 @@ import yaml
 
 
 # ── Wire up imports to reuse the existing SMORE helpers ───────────
-# This file lives at nnunet/infer/build_smore_test_images.py; repo root is two up.
+# This file lives at nnunet/engine/build_smore_test_images.py; repo root is two up.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))

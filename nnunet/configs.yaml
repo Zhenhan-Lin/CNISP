@@ -39,7 +39,7 @@ work_dir: /home-local/linz18/CNISP/nnunet
 # Phase 1.5 SMORE shared output (NOT under work_dir on purpose - it is
 # expensive to recompute and is shared across projects).
 smore_out_root: /fs5/p_masi/linz18/data/smore_resolved_images
-# Filename suffix used by infer/build_smore_test_images.py (flat layout):
+# Filename suffix used by engine/build_smore_test_images.py (flat layout):
 # ``${smore_out_root}/<source_id>${smore_suffix}.nii.gz``.
 smore_suffix: _smore
 
@@ -53,7 +53,7 @@ sparse_eff_res_tolerance: 0.05
 
 # ── Aggregation ───────────────────────────────────────────────────
 # Inherit from test_default.yaml so the report buckets line up with
-# CNISP's existing test_summary.csv.
+# CNISP's existing test_results.csv (eff_res_bucket column).
 summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
 
 # ── nnUNet label-scheme assertion ─────────────────────────────────

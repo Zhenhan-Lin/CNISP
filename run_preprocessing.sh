@@ -37,7 +37,7 @@
 #                  (nnunet/data_prep/prepare_inputs.py)
 #   smore          (opt-in, NOT in default) Super-resolve the 31 CTs
 #                  with SMORE for the deferred iso-grid comparison.
-#                  (nnunet/infer/build_smore_test_images.py)
+#                  (nnunet/engine/build_smore_test_images.py)
 #
 # Default (no phases given): cnisp-align nnunet-stage
 #   -- smore is opt-in because it can take many GPU-hours.
@@ -229,7 +229,7 @@ phase_smore() {
     if [[ ${#SMORE_EXTRA_ARGS[@]} -gt 0 ]]; then
         echo "  smore extra args: ${SMORE_EXTRA_ARGS[*]}"
     fi
-    python3 "$REPO_ROOT/nnunet/infer/build_smore_test_images.py" \
+    python3 "$REPO_ROOT/nnunet/engine/build_smore_test_images.py" \
         --config "$CONFIG" "${SMORE_EXTRA_ARGS[@]}"
 }
 

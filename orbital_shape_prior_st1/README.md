@@ -66,7 +66,11 @@ python scripts/02_train.py -p configs/paths.yaml -c configs/train_default.yaml
 python scripts/03_infer.py -p configs/paths.yaml \
     -t configs/train_default.yaml -c configs/test_default.yaml -m <model_name>
 
-# 4. Build the visualization bundle (recon_summary.png + heatmaps + sweep audit)
+# 4. Build the CNISP-only artifacts (cross-resolution heatmaps,
+#    file-tree dump, native_space_step_XX/ audit). Per-step Dice trend
+#    / per-class / per-case figures come from ../run_pipeline.sh's
+#    `compare` phase instead, which writes the CNISP slice of the
+#    bundle to output_basedir/<model_name>/viz/CNISP_recon_summary.png.
 python scripts/04_visualization.py -p configs/paths.yaml \
     -t configs/train_default.yaml -c configs/test_default.yaml -m <model_name>
 ```

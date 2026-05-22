@@ -25,8 +25,8 @@ Outputs (under output_basedir/<model_name>/):
     native_space_step_XX/       every sweep step mapped to native space +
                                 manifest.json indexed by source_id
     native_sweep_manifest.json  top-level index over per-step manifests
-    test_results.csv            per-row sweep metrics
-    test_summary.csv            eff_res-bucket aggregated metrics
+    test_results.csv            per-(case, step) sweep metrics
+                                (eff_res_bucket column is included)
 """
 
 import argparse

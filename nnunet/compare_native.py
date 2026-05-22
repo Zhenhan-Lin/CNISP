@@ -9,8 +9,8 @@ Inputs
   (step_01 is a symlink to the dense baseline ``nnunet_pred_native/``).
   Indexed via ``{work_dir}/nnunet_pred_native_sweep_manifest.json``.
 * ``output_basedir/{model}/native_space_step_{XX}/...``   - CNISP per-step
-  predictions (produced by ``infer/build_cnisp_native_sweep.py`` or
-  directly by engine/infer.py).
+  predictions (produced by ``engine/build_cnisp_native_sweep.py`` or
+  directly by orbital_shape_prior_st1/engine/infer.py).
 * ``output_basedir/{model}/sweep_results.pkl``            - eff_res lookup
 * Native-head GT (per ``resolve_gt.SourceInfo``)
 
@@ -19,7 +19,7 @@ Comparison
 * nnUNet and CNISP both contribute one row per (source_id, step_size,
   structure). Both live on the ORIGINAL CT's voxel grid -- GT is never
   resampled. nnUNet's sparse-CT predictions are NN-upsampled along the
-  through-plane axis by ``infer/upsample_sparse_preds.py`` before this step.
+  through-plane axis by ``engine/upsample_sparse_preds.py`` before this step.
 * Dice computed per structure (ON, Globe, Fat, Recti) plus the
   unweighted mean across the four foreground structures.
 * Same effective-resolution bucket edges apply to both methods, so the
@@ -185,7 +185,7 @@ def main() -> int:
     if not nnunet_sweep_manifest.exists():
         print(f"[compare_native] nnUNet sweep manifest not found: "
               f"{nnunet_sweep_manifest}", file=sys.stderr)
-        print(f"  Did you run nnunet/infer/upsample_sparse_preds.py? "
+        print(f"  Did you run nnunet/engine/upsample_sparse_preds.py? "
               f"(`nnunet-predict-sweep` phase)", file=sys.stderr)
         return 2
 
@@ -242,7 +242,7 @@ def main() -> int:
     if not cnisp_step_paths:
         print(f"[compare_native] no CNISP step manifests under {output_base}.",
               file=sys.stderr)
-        print(f"  Did you run nnunet/infer/build_cnisp_native_sweep.py?",
+        print(f"  Did you run nnunet/engine/build_cnisp_native_sweep.py?",
               file=sys.stderr)
         return 2
     print(f"[compare_native] CNISP steps available: {sorted(cnisp_step_paths)}")
@@ -292,7 +292,7 @@ def main() -> int:
         # ── nnUNet per step ───────────────────────────────────────
         # nnUNet predictions live on the same native CT grid as the GT;
         # for step>1 they've already been NN-upsampled by
-        # infer/upsample_sparse_preds.py before reaching this script.
+        # engine/upsample_sparse_preds.py before reaching this script.
         for step in sorted(nnunet_step_paths):
             path_map = nnunet_step_paths[step]
             if sid not in path_map:
