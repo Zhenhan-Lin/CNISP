@@ -6,7 +6,7 @@
 checklist_csv: /home-local/linz18/eye_segmentation/QA_nnUNet_CT/check_list/nnUNetTrainer_resampling_results/review_checklist.csv
 
 # Source 2: CTONS_atlas_TBI manual GT labels ({1,3,5,7} scheme)
-atlas_label_dir: /home-local/linz18/atlas_megadocker_export/CTONS_atlas_TBI/atlas_labels
+atlas_label_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_labels
 
 # Output directory for canonical-aligned patches
 aligned_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/aligned_patches

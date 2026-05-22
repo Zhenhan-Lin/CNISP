@@ -37,7 +37,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+import pandas as pd
 import numpy as np
 
 
@@ -162,10 +162,6 @@ def resolve_sources(
     # Reported in chk_* error messages even when the CSV path is missing.
     subject_col = pivot_subject_column
     if pivot_csv is not None and pivot_csv.exists():
-        try:
-            import pandas as pd
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("pandas is required to read the pivot CSV") from exc
         df = pd.read_csv(pivot_csv)
         pivot_columns_available = list(df.columns)
         # Resolve subject column with a small fallback chain so common
@@ -234,7 +230,7 @@ def resolve_sources(
                 missing.append(f"{source_id}: atlas_image_dir not set in config")
             else:
                 # atlas source_id = "atlas_" + stem; image dir holds {stem}.nii.gz
-                stem = source_id[len("atlas_"):]
+                stem = source_id[len("atlas_"):].split("_")[0]
                 candidate = Path(atlas_image_dir) / f"{stem}.nii.gz"
                 if candidate.exists():
                     ct_image_path = candidate
