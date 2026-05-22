@@ -1,40 +1,37 @@
 #!/usr/bin/env bash
 # ============================================================
-# Top-level orchestrator: nnUNet inference + CNISP retrain/infer
-# + per-model visualization + nnUNet-vs-CNISP paired comparison.
+# nnUNet inference + CNISP retrain/infer + per-model
+# visualization + nnUNet-vs-CNISP paired comparison.
 #
 # What each phase does:
-#   nnunet-predict  Stage the 31 source CTs as nnUNet inputs and run
-#                   nnUNetv2_predict on the native (anisotropic) grid.
-#                   (nnunet/prepare_inputs.py + nnunet/run_predict_native.sh)
+#   nnunet-predict  Run nnUNetv2_predict on the staged native CT inputs
+#                   under $work_dir/nnunet_input/.
+#                   (nnunet/run_predict_native.sh)
 #
 #   cnisp-train     Train the orbital implicit shape prior.
 #                   (orbital_shape_prior_st1/scripts/run_02_train.sh)
 #                   Auto-skipped if best_checkpoint.pth already exists;
 #                   pass --force-train to override.
 #
-#   cnisp-infer     Run CNISP test-time latent optimization +
-#                   per-step native-space mapping (writes
-#                   native_space_step_XX/ + native_sweep_manifest.json
-#                   that the compare phase consumes).
+#   cnisp-infer     CNISP test-time latent optimization + per-step
+#                   native-space mapping (writes native_space_step_XX/
+#                   + native_sweep_manifest.json that the compare phase
+#                   consumes).
 #                   (orbital_shape_prior_st1/scripts/run_03_test.sh)
 #
-#   cnisp-viz       Build CNISP-side result summary: recon_summary.png,
+#   cnisp-viz       CNISP-side result summary: recon_summary.png,
 #                   cross_resolution_analysis/, native_sweep_summary.json.
 #                   (orbital_shape_prior_st1/scripts/run_04_visualization.sh)
 #
-#   compare         nnUNet vs CNISP paired Dice tables (paired_per_source.csv,
-#                   paired_summary.csv|.txt). build_cnisp_native_sweep.py is
-#                   a no-op when cnisp-infer already wrote native_space_step_XX/.
-#                   (nnunet/build_cnisp_native_sweep.py + nnunet/compare_native.py)
+#   compare         nnUNet vs CNISP paired Dice tables
+#                   (paired_per_source.csv, paired_summary.csv|.txt).
+#                   build_cnisp_native_sweep.py is a no-op when
+#                   cnisp-infer already wrote native_space_step_XX/.
+#                   (nnunet/build_cnisp_native_sweep.py
+#                    + nnunet/compare_native.py)
 #
 # Dependency order (the order phases run when none are specified):
 #   nnunet-predict -> cnisp-train -> cnisp-infer -> cnisp-viz -> compare
-#
-# NOT included by default:
-#   * Phase 1.5 SMORE prep (run separately):
-#       python3 nnunet/build_smore_test_images.py --config nnunet/configs.yaml
-#   * nnUNet training (uses run_nnUNet_iso05.sh, very long).
 #
 # Usage:
 #   bash run_pipeline.sh                                   # all phases
@@ -163,7 +160,6 @@ echo "============================================================"
 phase_nnunet_predict() {
     echo ""
     echo "[phase] nnunet-predict --------------------------------"
-    python3 "$REPO_ROOT/nnunet/prepare_inputs.py" --config "$CONFIG"
     CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_native.sh"
 }
 
