@@ -169,7 +169,7 @@ def separate_eyes(data, affine, globe_label, min_vox=50):
     return eyes
 
 def _whole_eye_centroid(data, affine, this_globe_vox, other_globe_vox,
-                        search_size_mm, voxel_sizes):
+                        search_size_mm, voxel_sizes, label_map):
     """
     Compute the dense centroid of ALL foreground voxels belonging to one eye.
 
@@ -187,6 +187,11 @@ def _whole_eye_centroid(data, affine, this_globe_vox, other_globe_vox,
                            not pull the centroid toward midline.
         search_size_mm:    Side length of the search bbox. Should be larger
                            than patch_size_mm so the bbox catches the full ON.
+        label_map:         {raw_label_value -> structure_name} as returned by
+                           detect_label_scheme. Used to identify foreground
+                           voxels in a label-scheme-agnostic way (atlas data
+                           uses the labelfusion scheme offset by -1000, so a
+                           naive ``data > 0`` test would miss all foreground).
 
     Returns:
         (centroid_voxel, centroid_world) or None if the bbox has no foreground.
@@ -209,7 +214,8 @@ def _whole_eye_centroid(data, affine, this_globe_vox, other_globe_vox,
             bbox_lo[sep_axis] = max(bbox_lo[sep_axis], midpoint)
 
     sl = tuple(slice(bbox_lo[ax], bbox_hi[ax]) for ax in range(3))
-    mask = data[sl] > 0
+    fg_labels = np.asarray(list(label_map.keys()), dtype=data.dtype)
+    mask = np.isin(data[sl], fg_labels)
     if not mask.any():
         return None
 
@@ -326,7 +332,7 @@ def align_single_case(seg_path, source_id, source="checklist",
         eye_c = _whole_eye_centroid(
             data, affine,
             eye_info["centroid_voxel"], other_globe_vox,
-            search_size_mm, voxel_sizes,
+            search_size_mm, voxel_sizes, label_map,
         )
         if eye_c is not None:
             crop_centroid_vox, crop_centroid_world = eye_c
