@@ -16,15 +16,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
+import nibabel as nib
 import numpy as np
 import torch
 
 from data_prep.sparsify import sparsen_volume
-
-try:
-    import nibabel as nib
-except ImportError:
-    nib = None
 
 
 # ── Adaptive step / eff-res helpers ──────────────────────────────
@@ -358,7 +354,7 @@ def _try_load_cached(output_dir, casename, step, step_axis,
     placeholder ``latent`` of shape (0,) so consumers can detect this and
     skip latent-dependent steps instead of producing garbage.
     """
-    if output_dir is None or nib is None:
+    if output_dir is None:
         return None
     pred_path = output_dir / f"step_{step:02d}" / "pred" / f"{casename}_pred.nii.gz"
     if not pred_path.exists():

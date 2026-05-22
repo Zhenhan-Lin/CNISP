@@ -106,10 +106,7 @@ def _detect_gt_offset(gt_label_path: Path) -> int:
     without re-running its full scheme detection (we already know the
     scheme from ``input_label_scheme`` in the metadata JSON).
     """
-    try:
-        import nibabel as nib  # local import keeps import-time deps light
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("nibabel is required to detect GT label offset") from exc
+    import nibabel as nib
 
     img = nib.load(str(gt_label_path))
     arr = np.asarray(img.dataobj, dtype=np.int32)
