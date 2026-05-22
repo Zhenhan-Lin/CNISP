@@ -1,0 +1,51 @@
+# ── nnUNet vs CNISP comparison configuration ──────────────────────
+# Paths and inference knobs shared by every script under nnunet/.
+# Override any field on the CLI with --key=value or by passing a
+# different --config file.
+
+# ── nnUNet inference identity ─────────────────────────────────────
+# Matches the training run in run_nnUNet_iso05.sh
+dataset_id: 835
+dataset_name: PHOTON_CT_QAfiltered
+plan: nnUNetPlans_iso05
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+folds: [0]
+gpu_id: 0
+
+# ── CNISP-side artefacts to reuse (no re-inference) ───────────────
+cnisp_paths_yaml: orbital_shape_prior_st1/configs/paths.yaml
+cnisp_model_name: orbital_ad_v2
+
+# ── Source CT discovery ───────────────────────────────────────────
+# atlas: sibling 'atlas_images' folder next to atlas_label_dir from
+# CNISP's paths.yaml. Override here if the real layout differs.
+atlas_image_dir: /home-local/linz18/atlas_megadocker_export/CTONS_atlas_TBI/atlas_images
+# chk_*: subjects are looked up in the PHOTON_CP_QA pivot table.
+pivot_csv: /home-local/linz18/eye_segmentation/table_collection/PHOTON_CP_QA/PHOTON_CP_QA_pivot_table.csv
+# Columns probed in order; first existing column whose value is a
+# readable file path wins.
+pivot_image_path_columns: [ct_image_path, image_path, image, ct, t1]
+pivot_subject_column: subject
+
+# ── Working directories ───────────────────────────────────────────
+# Phase 1 staging + outputs (nnUNet input symlinks, predictions, CSVs).
+work_dir: /home-local/linz18/CNISP/nnunet_work
+
+# Phase 1.5 SMORE shared output (NOT under work_dir on purpose - it is
+# expensive to recompute and is shared across projects).
+smore_out_root: /fs5/p_masi/linz18/data/smore_resolved_images
+
+# ── Aggregation ───────────────────────────────────────────────────
+# Inherit from test_default.yaml so the report buckets line up with
+# CNISP's existing test_summary.csv.
+summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+
+# ── nnUNet label-scheme assertion ─────────────────────────────────
+# Expected dataset.json["labels"] for Dataset835. Asserted at compare time.
+expected_nnunet_labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4

@@ -318,18 +318,24 @@ def infer_test_set(params):
 
     Output structure:
         output_dir/
-        ├── test_results.csv       (per (case, step), with eff_res bucket)
-        ├── test_summary.csv       (grouped by eff_res bucket)
+        ├── test_results.csv          (per (case, step), with eff_res bucket)
+        ├── test_summary.csv          (grouped by eff_res bucket)
         ├── average_shape_z0.nii.gz
         ├── step_01/
         │   ├── pred/
-        │   ├── latents/           one .npy per case (for cache resume)
+        │   ├── latents/              one .npy per case (for cache resume)
         │   ├── obs_vs_recon/
         │   ├── iso_space/
-        │   └── metadata.json      per-case spacing + eff_res
+        │   └── metadata.json         per-case spacing + eff_res
         ├── step_03/
         │   └── ...
-        └── native_space/          per-case primary step (closest to target eff_res)
+        ├── native_space/             primary picks per source (closest to
+        │                             target eff_res) — full-head, OD+OS merged
+        ├── native_space_step_01/     every step mapped to native space
+        │   ├── manifest.json         {source_id: full-head .nii.gz path}
+        │   └── *_cnisp_step01.nii.gz
+        ├── native_space_step_03/     ...
+        └── native_sweep_manifest.json   top-level index over per-step manifests
     """
 
     model_dir = Path(params["model_basedir"]) / params["model_name"]
@@ -492,8 +498,8 @@ def infer_test_set(params):
 
     # ── Map primary-eff_res predictions to native space ───────────
     primary_results = _pick_primary_per_case(all_results, primary_eff_res)
+    meta_dir = Path(params["aligned_dir"]) / "metadata"
     if primary_results and params.get("export_predictions", True):
-        meta_dir = Path(params["aligned_dir"]) / "metadata"
         native_dir = output_dir / "native_space"
         chosen = [(r["casename"], r["step_size"],
                    round(r["effective_resolution_mm"], 2))
@@ -505,11 +511,67 @@ def infer_test_set(params):
         native_paths = map_results_to_native(primary_results, meta_dir, native_dir)
         print(f"Native-space predictions: {native_dir} ({len(native_paths)} volumes)")
 
+    # ── Map EVERY sweep step to native space ──────────────────────
+    # Mirrors what nnunet/build_cnisp_native_sweep.py does as a backfill
+    # for already-run experiments; here it is folded into the inference
+    # loop so a single run produces every artifact the cross-model
+    # comparison (see nnunet/compare_native.py) consumes.
+    if all_results and params.get("export_predictions", True):
+        by_step: Dict[int, List[dict]] = defaultdict(list)
+        for r in all_results:
+            by_step[int(r["step_size"])].append(r)
+        sweep_manifest: Dict[str, Dict[str, str]] = {}
+        print(f"\nMapping all sweep steps to native space "
+              f"({len(by_step)} step values):")
+        for step in sorted(by_step):
+            step_native_dir = output_dir / f"native_space_step_{step:02d}"
+            suffix = f"_cnisp_step{step:02d}"
+            step_paths = map_results_to_native(
+                by_step[step], meta_dir, step_native_dir, suffix=suffix,
+            )
+
+            per_step_manifest: Dict[str, str] = {}
+            seen = set()
+            for r in by_step[step]:
+                mp = meta_dir / f"{r['casename']}.json"
+                if not mp.exists():
+                    continue
+                with open(mp) as f:
+                    m = json.load(f)
+                sid = str(m["source_id"])
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                stem = (Path(m["original_nifti_path"]).name
+                        .replace(".nii.gz", "").replace(".nii", ""))
+                per_step_manifest[sid] = str(
+                    step_native_dir / f"{stem}{suffix}.nii.gz"
+                )
+
+            with open(step_native_dir / "manifest.json", "w") as f:
+                json.dump({
+                    "model_name": params["model_name"],
+                    "step_size": step,
+                    "suffix": suffix,
+                    "n_sources": len(per_step_manifest),
+                    "by_source_id": per_step_manifest,
+                }, f, indent=2)
+            sweep_manifest[str(step)] = per_step_manifest
+            print(f"  step_{step:02d}: {step_native_dir} "
+                  f"({len(step_paths)} sources)")
+
+        with open(output_dir / "native_sweep_manifest.json", "w") as f:
+            json.dump({
+                "model_name": params["model_name"],
+                "primary_eff_res_mm": primary_eff_res,
+                "steps": sweep_manifest,
+            }, f, indent=2)
+
     # ── Pickle layout ────────────────────────────────────────────
     # inference_results.pkl : per-case primary picks (one row per case),
-    #     consumed by 04_diagnose Sections 1/2 and by map_to_native.py
-    # sweep_results.pkl     : full per-(case, step) sweep, for ad-hoc
-    #     analysis or cross-resolution work
+    #     consumed by map_to_native.py and downstream visualization
+    # sweep_results.pkl     : full per-(case, step) sweep, used by
+    #     scripts/04_visualization.py and by nnunet/compare_native.py
     with open(output_dir / "inference_results.pkl", "wb") as f:
         pickle.dump(primary_results, f)
     with open(output_dir / "sweep_results.pkl", "wb") as f:

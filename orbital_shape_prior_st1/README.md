@@ -38,17 +38,18 @@ orbital_shape_prior/
 │   ├── dataset.py              # OrbitalImplicitDataset (extends Amiranashvili)
 │   ├── train.py                # training loop
 │   ├── infer.py                # test-time latent optimization + reconstruction
+│   ├── native_mapping.py       # project canonical patches back to native CT space
+│   ├── visualize.py            # result-summary + cross-resolution heatmaps
 │   └── io_utils.py             # NIfTI I/O, checkpoint management
 ├── diagnostics/
 │   ├── __init__.py
-│   ├── reconstruction_qc.py    # centroid shift, volume ratio, aligned dice
-│   ├── latent_analysis.py      # latent space visualization (t-SNE, PCA)
-│   └── report.py               # generate summary tables + figures
+│   ├── multiview_qc.py         # train-time multi-offset diagnostic
+│   └── resolution_sweep.py     # adaptive per-case sparsity sweep used by infer
 ├── scripts/
 │   ├── 01_prepare_data.py      # end-to-end data preparation
 │   ├── 02_train.py             # launch training
-│   ├── 03_infer.py             # launch inference
-│   └── 04_diagnose.py          # run all diagnostics
+│   ├── 03_infer.py             # launch inference (also writes per-step native space)
+│   └── 04_visualization.py     # generate result summary + cross-resolution heatmaps
 └── README.md
 ```
 
@@ -61,9 +62,11 @@ python scripts/01_prepare_data.py -p configs/paths.yaml
 # 2. Train shape prior
 python scripts/02_train.py -p configs/paths.yaml -c configs/train_default.yaml
 
-# 3. Infer on test set
-python scripts/03_infer.py -p configs/paths.yaml -c configs/eval_default.yaml -m <model_name>
+# 3. Infer on test set (writes step_XX/, native_space/, native_space_step_XX/)
+python scripts/03_infer.py -p configs/paths.yaml \
+    -t configs/train_default.yaml -c configs/test_default.yaml -m <model_name>
 
-# 4. Run diagnostics
-python scripts/04_diagnose.py -p configs/paths.yaml -m <model_name>
+# 4. Build the visualization bundle (recon_summary.png + heatmaps + sweep audit)
+python scripts/04_visualization.py -p configs/paths.yaml \
+    -t configs/train_default.yaml -c configs/test_default.yaml -m <model_name>
 ```

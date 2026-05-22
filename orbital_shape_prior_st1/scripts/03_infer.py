@@ -15,14 +15,18 @@ Usage:
     python scripts/03_infer.py ... --checkpoint latest
 
 Outputs (under output_basedir/<model_name>/):
-    inference_results.pkl   per-case primary picks (one row per case,
-                            picked by adaptive_step_sweep.primary_eff_res_mm)
-                            -> consumed by 04_diagnose Sections 1/2 and
-                            by map_to_native.py
-    sweep_results.pkl       full per-(case, step) sweep
-    step_XX/                NIfTI predictions, latents, viz, metadata
-    test_results.csv        per-row sweep metrics
-    test_summary.csv        eff_res-bucket aggregated metrics
+    inference_results.pkl       per-case primary picks (one row per case,
+                                picked by adaptive_step_sweep.primary_eff_res_mm)
+                                -> consumed by map_to_native.py and by
+                                scripts/04_visualization.py
+    sweep_results.pkl           full per-(case, step) sweep
+    step_XX/                    NIfTI predictions, latents, viz, metadata
+    native_space/               primary picks mapped to native CT space
+    native_space_step_XX/       every sweep step mapped to native space +
+                                manifest.json indexed by source_id
+    native_sweep_manifest.json  top-level index over per-step manifests
+    test_results.csv            per-row sweep metrics
+    test_summary.csv            eff_res-bucket aggregated metrics
 """
 
 import argparse

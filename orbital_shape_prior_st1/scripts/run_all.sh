@@ -5,9 +5,9 @@
 # Pauses between steps for manual review.
 # Alternatively, run each step individually:
 #   bash scripts/run_01_prepare.sh
-#   bash scripts/run_02_train.sh   (long — hours/days)
+#   bash scripts/run_02_train.sh        (long — hours/days)
 #   bash scripts/run_03_test.sh
-#   bash scripts/run_04_diagnose.sh
+#   bash scripts/run_04_visualization.sh
 # ============================================================
 
 set -euo pipefail
@@ -42,16 +42,17 @@ fi
 bash "$SCRIPT_DIR/run_03_test.sh"
 
 echo ""
-read -p "Review reconstruction results. Run diagnostics? [y/N] " confirm
+read -p "Review reconstruction results. Build visualization summary? [y/N] " confirm
 if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
     echo "Stopped after Step 3."
     exit 0
 fi
 
 # ── Step 4 ────────────────────────────────────────────────────
-bash "$SCRIPT_DIR/run_04_diagnose.sh"
+bash "$SCRIPT_DIR/run_04_visualization.sh"
 
 echo ""
 echo "============================================================"
-echo "Pipeline complete. Review diagnostic_report.json for results."
+echo "Pipeline complete. Review recon_summary.png and the"
+echo "cross_resolution_analysis/ + native_sweep_summary.json outputs."
 echo "============================================================"
