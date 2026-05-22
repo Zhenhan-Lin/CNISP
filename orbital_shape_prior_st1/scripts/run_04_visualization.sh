@@ -20,7 +20,7 @@ export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
 TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
-MODEL_NAME="orbital_ad_v2"
+MODEL_NAME="orbital_ad_v3"
 
 echo "============================================================"
 echo "Step 4: Result Visualization"

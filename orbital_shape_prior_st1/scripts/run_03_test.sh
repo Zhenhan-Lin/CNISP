@@ -36,7 +36,7 @@ TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
 
 # Read model_name from train config (or override here)
-MODEL_NAME="orbital_ad_v2"
+MODEL_NAME="orbital_ad_v3"
 
 # ── Run ───────────────────────────────────────────────────────
 echo "============================================================"
