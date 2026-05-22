@@ -26,7 +26,10 @@ pivot_csv: /home-local/linz18/eye_segmentation/table_collection/PHOTON_CP_QA/PHO
 # Columns probed in order; first existing column whose value is a
 # readable file path wins.
 pivot_image_path_columns: [ct_image_path, image_path, image, ct, t1]
-pivot_subject_column: subject
+# Subject column: real CSV column name. resolve_gt.py also auto-tries a
+# few common variants (subject, subject_label, subj, subj_id, subject_id)
+# if this exact name is absent.
+pivot_subject_column: subject_label
 
 # ── Working directories ───────────────────────────────────────────
 # Phase 1 staging + outputs (nnUNet input symlinks, predictions, CSVs).

@@ -159,6 +159,8 @@ def resolve_sources(
     # Lazy CSV read for chk_* lookups.
     pivot_index: Dict[str, Dict[str, str]] = {}
     pivot_columns_available: List[str] = []
+    # Reported in chk_* error messages even when the CSV path is missing.
+    subject_col = pivot_subject_column
     if pivot_csv is not None and pivot_csv.exists():
         try:
             import pandas as pd
@@ -166,13 +168,31 @@ def resolve_sources(
             raise RuntimeError("pandas is required to read the pivot CSV") from exc
         df = pd.read_csv(pivot_csv)
         pivot_columns_available = list(df.columns)
-        if pivot_subject_column not in df.columns:
-            raise KeyError(
-                f"pivot_csv {pivot_csv} has no column {pivot_subject_column!r}. "
-                f"Available columns: {pivot_columns_available}"
+        # Resolve subject column with a small fallback chain so common
+        # variants ("subject" vs "subject_label" vs "subj_id") all work
+        # even when the config still has the default.
+        subject_col = pivot_subject_column
+        if subject_col not in df.columns:
+            fallbacks = [
+                "subject", "subject_label", "subj", "subj_id",
+                "subject_id", "subjectID", "patient_id", "patient",
+            ]
+            picked = next((c for c in fallbacks if c in df.columns), None)
+            if picked is None:
+                raise KeyError(
+                    f"pivot_csv {pivot_csv} has no column "
+                    f"{pivot_subject_column!r} and none of the fallback "
+                    f"variants {fallbacks!r}. Available columns: "
+                    f"{pivot_columns_available}"
+                )
+            print(
+                f"[resolve_gt] pivot subject column {pivot_subject_column!r} "
+                f"not found; auto-selected {picked!r} from CSV.",
+                file=sys.stderr,
             )
+            subject_col = picked
         for _, row in df.iterrows():
-            subj = str(row[pivot_subject_column])
+            subj = str(row[subject_col])
             # Each subject may have multiple rows (sessions). Keep the
             # first row that exposes an existing image-path column.
             if subj in pivot_index:
@@ -234,7 +254,7 @@ def resolve_sources(
             if row is None:
                 missing.append(
                     f"{source_id}: subject {subj!r} not found in pivot CSV "
-                    f"(searched column {pivot_subject_column!r}). "
+                    f"(searched column {subject_col!r}). "
                     f"Available columns: {pivot_columns_available}"
                 )
             else:
