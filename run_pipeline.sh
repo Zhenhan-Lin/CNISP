@@ -4,14 +4,14 @@
 # visualization + nnUNet-vs-CNISP paired comparison.
 #
 # What each phase does:
-#   nnunet-predict  Run nnUNetv2_predict on the staged native CT inputs
-#                   under $work_dir/nnunet_input/.
-#                   (nnunet/run_predict_native.sh)
-#
 #   cnisp-train     Train the orbital implicit shape prior.
 #                   (orbital_shape_prior_st1/scripts/run_02_train.sh)
 #                   Auto-skipped if best_checkpoint.pth already exists;
 #                   pass --force-train to override.
+#
+#   nnunet-predict  Run nnUNetv2_predict on the staged native CT inputs
+#                   under $work_dir/nnunet_input/.
+#                   (nnunet/run_predict_native.sh)
 #
 #   cnisp-infer     CNISP test-time latent optimization + per-step
 #                   native-space mapping (writes native_space_step_XX/
@@ -31,7 +31,7 @@
 #                    + nnunet/compare_native.py)
 #
 # Dependency order (the order phases run when none are specified):
-#   nnunet-predict -> cnisp-train -> cnisp-infer -> cnisp-viz -> compare
+#   cnisp-train -> nnunet-predict -> cnisp-infer -> cnisp-viz -> compare
 #
 # Usage:
 #   bash run_pipeline.sh                                   # all phases
@@ -53,7 +53,7 @@ CONFIG="$REPO_ROOT/nnunet/configs.yaml"
 TEST_CONFIG=""                       # passed through to CNISP run_03/run_04
 FORCE_TRAIN=0
 GPU_OVERRIDE="1"                      # CUDA_VISIBLE_DEVICES override
-PHASES_DEFAULT=(nnunet-predict cnisp-train cnisp-infer cnisp-viz compare)
+PHASES_DEFAULT=(cnisp-train nnunet-predict cnisp-infer cnisp-viz compare)
 PHASES=()
 
 usage() {
@@ -91,7 +91,7 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 
 # ── Validate phase names early (no PyYAML needed) ────────────
-VALID_PHASES=(nnunet-predict cnisp-train cnisp-infer cnisp-viz compare)
+VALID_PHASES=(cnisp-train nnunet-predict cnisp-infer cnisp-viz compare)
 for phase in "${PHASES[@]}"; do
     found=0
     for v in "${VALID_PHASES[@]}"; do [[ "$phase" == "$v" ]] && found=1; done
@@ -157,12 +157,6 @@ echo "============================================================"
 
 # ── Phase implementations ────────────────────────────────────
 
-phase_nnunet_predict() {
-    echo ""
-    echo "[phase] nnunet-predict --------------------------------"
-    CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_native.sh"
-}
-
 phase_cnisp_train() {
     echo ""
     echo "[phase] cnisp-train -----------------------------------"
@@ -174,6 +168,12 @@ phase_cnisp_train() {
         return 0
     fi
     bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_02_train.sh"
+}
+
+phase_nnunet_predict() {
+    echo ""
+    echo "[phase] nnunet-predict --------------------------------"
+    CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_native.sh"
 }
 
 phase_cnisp_infer() {
@@ -207,8 +207,8 @@ phase_compare() {
 START_TS="$(date +%s)"
 for phase in "${PHASES[@]}"; do
     case "$phase" in
-        nnunet-predict) phase_nnunet_predict ;;
         cnisp-train)    phase_cnisp_train ;;
+        nnunet-predict) phase_nnunet_predict ;;
         cnisp-infer)    phase_cnisp_infer ;;
         cnisp-viz)      phase_cnisp_viz ;;
         compare)        phase_compare ;;
