@@ -14,17 +14,17 @@ export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DS_DIR_NAME="$(printf "Dataset%03d_%s" "${DATASET_ID}" "${DATASET_NAME}")"
 
-# # ── Step 1-3: Preprocess ──────────────────────────────────────────
-# if [[ "$SKIP_PREPROCESS" != "1" ]]; then
-#     echo -e "\n--- Step 1: Default plan_and_preprocess ---"
-#     nnUNetv2_plan_and_preprocess -d "${DATASET_ID}" --verify_dataset_integrity
+# ── Step 1-3: Preprocess ──────────────────────────────────────────
+if [[ "$SKIP_PREPROCESS" != "1" ]]; then
+    echo -e "\n--- Step 1: Default plan_and_preprocess ---"
+    nnUNetv2_plan_and_preprocess -d "${DATASET_ID}" --verify_dataset_integrity
 
-#     echo -e "\n--- Step 2: Copy custom plan ---"
-#     cp -v "${CUSTOM_PLAN_SRC}" "${nnUNet_preprocessed}/${DS_DIR_NAME}/${CUSTOM_PLAN_NAME}.json"
+    echo -e "\n--- Step 2: Copy custom plan ---"
+    cp -v "${CUSTOM_PLAN_SRC}" "${nnUNet_preprocessed}/${DS_DIR_NAME}/${CUSTOM_PLAN_NAME}.json"
 
-#     echo -e "\n--- Step 3: Preprocess with ${CUSTOM_PLAN_NAME} ---"
-#     nnUNetv2_preprocess -d "${DATASET_ID}" -plans_name "${CUSTOM_PLAN_NAME}" -c "${CFG}"
-# fi
+    echo -e "\n--- Step 3: Preprocess with ${CUSTOM_PLAN_NAME} ---"
+    nnUNetv2_preprocess -d "${DATASET_ID}" -plans_name "${CUSTOM_PLAN_NAME}" -c "${CFG}"
+fi
 
 # ── Step 4: Train ─────────────────────────────────────────────────
 echo -e "\n--- Step 4: Train ---"
