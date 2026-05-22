@@ -10,4 +10,6 @@ orbital_shape_prior_st1/models/__pycache__
 orbital_shape_prior_st1/scripts/__pycache__
 orbital_shape_prior_st1/probe_inference_shapes.py
 review_checklist.csv
+nnunet/__pycache__
+nnunet/nnunet_input/*
 main.py

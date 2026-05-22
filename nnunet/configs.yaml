@@ -30,7 +30,7 @@ pivot_subject_column: subject
 
 # ── Working directories ───────────────────────────────────────────
 # Phase 1 staging + outputs (nnUNet input symlinks, predictions, CSVs).
-work_dir: /home-local/linz18/CNISP/nnunet_work
+work_dir: /home-local/linz18/CNISP/nnunet
 
 # Phase 1.5 SMORE shared output (NOT under work_dir on purpose - it is
 # expensive to recompute and is shared across projects).
