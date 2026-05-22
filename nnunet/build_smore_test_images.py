@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Super-resolve the 31 CNISP test source CTs with SMORE.
 
-Companion to ``nnunet/nnunetv2_build_datasets2.py``. Reuses that
-script's SMORE helpers (compatibility check, local + container backends,
-multi-GPU concurrency, multi-machine-safe claim/lock semantics) and
-applies them to a list of CT paths instead of a CSV-driven nnUNet
-dataset.
+Wraps the IACL ``run-smore`` CLI (compatibility check, local +
+container backends, multi-GPU concurrency, multi-machine-safe
+claim/lock semantics via :mod:`nnunet._smore_helpers`) for a list of CT
+paths instead of a CSV-driven nnUNet dataset.
 
 Output layout::
 
@@ -63,7 +62,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
-from nnunet.nnunetv2_build_datasets2 import (  # noqa: E402
+from nnunet.helpers.smore import (  # noqa: E402
     _acquire_dir_lock,
     _is_smore_compatible_from_nifti_header,
     _release_dir_lock,
