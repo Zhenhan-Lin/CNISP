@@ -9,7 +9,7 @@
 #   4. paired native-space Dice         -> work_dir/paired_*.csv|.txt
 #
 # Phase 1.5 (SMORE prep) is NOT invoked here; run
-#   python nnunet/build_smore_test_images.py --config nnunet/configs.yaml
+#   python nnunet/infer/build_smore_test_images.py --config nnunet/configs.yaml
 # separately, ideally in parallel with this driver.
 # ============================================================
 set -euo pipefail
@@ -21,14 +21,14 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 cd "$REPO_ROOT"
 
 echo "[run_compare] CONFIG=$CONFIG"
-echo "[run_compare] step 1/4: prepare_inputs.py"
-python3 nnunet/prepare_inputs.py --config "$CONFIG"
+echo "[run_compare] step 1/4: data_prep/prepare_inputs.py"
+python3 nnunet/data_prep/prepare_inputs.py --config "$CONFIG"
 
 echo "[run_compare] step 2/4: run_predict_native.sh"
 CONFIG="$CONFIG" bash nnunet/run_predict_native.sh
 
-echo "[run_compare] step 3/4: build_cnisp_native_sweep.py (idempotent backfill)"
-python3 nnunet/build_cnisp_native_sweep.py --config "$CONFIG"
+echo "[run_compare] step 3/4: infer/build_cnisp_native_sweep.py (idempotent backfill)"
+python3 nnunet/infer/build_cnisp_native_sweep.py --config "$CONFIG"
 
 echo "[run_compare] step 4/4: compare_native.py"
 python3 nnunet/compare_native.py --config "$CONFIG"

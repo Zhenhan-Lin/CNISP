@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # ============================================================
-# Phase 1: nnUNetv2_predict on the original (native-spacing) CT
-# inputs staged by nnunet/data_prep/prepare_inputs.py.
+# Phase 1c: nnUNetv2_predict on the SMORE-super-resolved CTs
+# staged by nnunet/data_prep/prepare_smore_inputs.py.
 #
-# Output is written at the input CT's native spacing -- nnUNetv2
-# resamples internally to the iso plan during forward pass and
-# resamples back to native before saving. For the iso-grid
-# comparison (Phase 2) re-run this on SMORE'd inputs instead.
+# Input  : ${WORK_DIR}/nnunet_input_smore/<sid>_0000.nii.gz
+# Output : ${WORK_DIR}/nnunet_pred_smore/<sid>.nii.gz
+#
+# Mask only. No upsampling, no compare wiring -- downstream analysis is
+# TBD; this phase exists so the SMORE-grid prediction is always on hand
+# when we decide what to do with it.
 # ============================================================
 set -euo pipefail
 
 CONFIG="${CONFIG:-nnunet/configs.yaml}"
 
-# Tolerant YAML peek -- only needs scalar keys.
 _yaml_get() {
     python3 - "$CONFIG" "$1" <<'PY'
 import sys, yaml
@@ -40,21 +41,22 @@ if [[ -z "$WORK_DIR" ]]; then
     exit 2
 fi
 
-IN_DIR="${IN_DIR:-${WORK_DIR}/nnunet_input}"
-OUT_DIR="${OUT_DIR:-${WORK_DIR}/nnunet_pred_native}"
+IN_DIR="${IN_DIR:-${WORK_DIR}/nnunet_input_smore}"
+OUT_DIR="${OUT_DIR:-${WORK_DIR}/nnunet_pred_smore}"
 
 if [[ ! -d "$IN_DIR" ]]; then
-    echo "[ERROR] input dir not found: $IN_DIR (did you run nnunet/data_prep/prepare_inputs.py?)" >&2
+    echo "[ERROR] input dir not found: $IN_DIR" >&2
+    echo "        run nnunet/data_prep/prepare_smore_inputs.py first." >&2
     exit 2
 fi
 
 mkdir -p "$OUT_DIR"
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
-echo "[run_predict_native] dataset=${DATASET_ID} cfg=${CFG} plan=${PLAN} trainer=${TRAINER}"
-echo "[run_predict_native] folds=${FOLDS}  GPU=${GPU_ID}"
-echo "[run_predict_native] in:  ${IN_DIR}"
-echo "[run_predict_native] out: ${OUT_DIR}"
+echo "[run_predict_smore] dataset=${DATASET_ID} cfg=${CFG} plan=${PLAN} trainer=${TRAINER}"
+echo "[run_predict_smore] folds=${FOLDS}  GPU=${GPU_ID}"
+echo "[run_predict_smore] in:  ${IN_DIR}"
+echo "[run_predict_smore] out: ${OUT_DIR}"
 
 # shellcheck disable=SC2086
 nnUNetv2_predict \
@@ -66,4 +68,4 @@ nnUNetv2_predict \
     -i "${IN_DIR}" \
     -o "${OUT_DIR}"
 
-echo "[run_predict_native] done. predictions: ${OUT_DIR}"
+echo "[run_predict_smore] done. predictions: ${OUT_DIR}"

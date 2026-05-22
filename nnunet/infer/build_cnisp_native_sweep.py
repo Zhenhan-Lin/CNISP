@@ -18,8 +18,8 @@ Outputs (per step, only when missing or ``--force``):
 
 Usage
 -----
-    python nnunet/build_cnisp_native_sweep.py --config nnunet/configs.yaml
-    python nnunet/build_cnisp_native_sweep.py --config nnunet/configs.yaml --force
+    python nnunet/infer/build_cnisp_native_sweep.py --config nnunet/configs.yaml
+    python nnunet/infer/build_cnisp_native_sweep.py --config nnunet/configs.yaml --force
 """
 
 from __future__ import annotations
@@ -36,7 +36,9 @@ import yaml
 
 
 # ── Make orbital_shape_prior_st1 importable ───────────────────────
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# This file lives at nnunet/infer/build_cnisp_native_sweep.py;
+# repo root is two directories up.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _CNISP_SRC = _REPO_ROOT / "orbital_shape_prior_st1"
 if str(_CNISP_SRC) not in sys.path:
     sys.path.insert(0, str(_CNISP_SRC))

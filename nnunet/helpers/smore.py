@@ -14,10 +14,9 @@ The output layout that ``run-smore`` produces is fixed by the upstream
     out_dir = Path(args.out_dir).resolve() / subj_id
     out_fpath = out_dir / f"{subj_id}{args.suffix}.{ext}"
 
-where ``subj_id, ext = in_fpath.name.split('.', maxsplit=1)``. The
-``build_smore_test_images.py`` driver pre-symlinks the source CT as
-``<case_root>/_src/<source_id>.nii.gz`` and passes ``out_dir=<case_root>``
-so SMORE writes to ``<case_root>/<source_id>/<source_id>_smore.nii.gz``.
+where ``subj_id, ext = in_fpath.name.split('.', maxsplit=1)``. Callers
+that want a flat layout move/rename the file after the helper returns
+the predicted path.
 
 The lock primitives (``_acquire_dir_lock`` / ``_release_dir_lock``) are
 intentionally based on ``mkdir`` -- which is POSIX-atomic across the
@@ -230,8 +229,8 @@ def _run_smore_local_run_smore(
     """Invoke the host ``run-smore`` CLI for one volume.
 
     The per-case ``run_smore.log`` lives directly under ``out_root`` so
-    parallel workers (each with their own ``out_root = case_root``)
-    never race on a shared log.
+    parallel workers (each with their own per-case ``out_root``) never
+    race on a shared log.
     """
     in_fpath = Path(in_fpath)
     out_root = Path(out_root)

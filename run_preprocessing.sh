@@ -15,12 +15,13 @@
 #                  -> writes paths.yaml::aligned_dir
 #   nnunet-stage   configs.yaml::atlas_image_dir, configs.yaml::pivot_csv
 #                  -> writes configs.yaml::work_dir/nnunet_input/
-#                  NOTE: prepare_inputs.py *symlinks* the original CTs
-#                  into nnunet_input/. The GPU host must still resolve
-#                  those symlinks at predict time. Either keep the
-#                  source CTs on a shared filesystem, copy them onto
-#                  the GPU host first, or edit prepare_inputs.py to
-#                  copy instead of symlink.
+#                  NOTE: data_prep/prepare_inputs.py *symlinks* the
+#                  original CTs into nnunet_input/. The GPU host must
+#                  still resolve those symlinks at predict time. Either
+#                  keep the source CTs on a shared filesystem, copy
+#                  them onto the GPU host first, or edit
+#                  data_prep/prepare_inputs.py to copy instead of
+#                  symlink.
 #   smore          same source CTs as nnunet-stage; writes to the
 #                  shared filesystem configs.yaml::smore_out_root
 #                  (default /fs5/p_masi/linz18/data/smore_resolved_images).
@@ -33,10 +34,10 @@
 #                  pass --force-align to override.
 #   nnunet-stage   Resolve 31 source CTs and symlink them as nnUNet
 #                  channel-0 inputs + source_to_path.json manifest.
-#                  (nnunet/prepare_inputs.py)
+#                  (nnunet/data_prep/prepare_inputs.py)
 #   smore          (opt-in, NOT in default) Super-resolve the 31 CTs
 #                  with SMORE for the deferred iso-grid comparison.
-#                  (nnunet/build_smore_test_images.py)
+#                  (nnunet/infer/build_smore_test_images.py)
 #
 # Default (no phases given): cnisp-align nnunet-stage
 #   -- smore is opt-in because it can take many GPU-hours.
@@ -211,7 +212,7 @@ phase_cnisp_align() {
 phase_nnunet_stage() {
     echo ""
     echo "[phase] nnunet-stage ----------------------------------"
-    python3 "$REPO_ROOT/nnunet/prepare_inputs.py" --config "$CONFIG"
+    python3 "$REPO_ROOT/nnunet/data_prep/prepare_inputs.py" --config "$CONFIG"
     echo ""
     echo "  Staged inputs (symlinks pointing at the source CTs):"
     echo "    ${WORK_DIR%/}/nnunet_input/"
@@ -228,7 +229,7 @@ phase_smore() {
     if [[ ${#SMORE_EXTRA_ARGS[@]} -gt 0 ]]; then
         echo "  smore extra args: ${SMORE_EXTRA_ARGS[*]}"
     fi
-    python3 "$REPO_ROOT/nnunet/build_smore_test_images.py" \
+    python3 "$REPO_ROOT/nnunet/infer/build_smore_test_images.py" \
         --config "$CONFIG" "${SMORE_EXTRA_ARGS[@]}"
 }
 

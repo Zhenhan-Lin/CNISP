@@ -38,6 +38,17 @@ work_dir: /home-local/linz18/CNISP/nnunet
 # Phase 1.5 SMORE shared output (NOT under work_dir on purpose - it is
 # expensive to recompute and is shared across projects).
 smore_out_root: /fs5/p_masi/linz18/data/smore_resolved_images
+# Filename suffix used by infer/build_smore_test_images.py (flat layout):
+# ``${smore_out_root}/<source_id>${smore_suffix}.nii.gz``.
+smore_suffix: _smore
+
+# ── Sparse-CT sweep ───────────────────────────────────────────────
+# Tolerance (relative) for data_prep/sparsify_inputs.py's axis-detection check:
+# the new through-plane spacing after sparsifying along voxel argmax(spacing)
+# must match CNISP's effective_resolution_mm for the same (source, step)
+# within this fraction. Failures usually mean a non-axial acquisition
+# whose largest-spacing voxel axis isn't the through-plane axis.
+sparse_eff_res_tolerance: 0.05
 
 # ── Aggregation ───────────────────────────────────────────────────
 # Inherit from test_default.yaml so the report buckets line up with

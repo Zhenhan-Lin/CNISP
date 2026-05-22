@@ -6,33 +6,30 @@ container backends, multi-GPU concurrency, multi-machine-safe
 claim/lock semantics via :mod:`nnunet._smore_helpers`) for a list of CT
 paths instead of a CSV-driven nnUNet dataset.
 
-Output layout::
+Output layout (flat)::
 
     /fs5/p_masi/linz18/data/smore_resolved_images/
-      <source_id>/
-        _src/<source_id>.nii.gz                 # symlink to original CT
-        run_smore.log                            # per-case SMORE stdout/stderr
-        <source_id>/                             # SMORE writes here
-            <source_id>_smore.nii.gz             # SR output (canonical path)
-            weights/best_weights.pt
-        <source_id>_smore.nii.gz -> <source_id>/<source_id>_smore.nii.gz
-          (convenience symlink so downstream uses one stable path)
+      <source_id>_smore.nii.gz                   # SR output (canonical path);
+                                                 #   symlink to original CT for
+                                                 #   SMORE-incompatible cases.
+      _artifacts/<source_id>/                    # only for SMORE'd cases
+          run_smore.log                          # per-case SMORE stdout/stderr
+          weights/best_weights.pt
+      build_smore_test_images.<host>.<pid>.tsv   # per-host run log
 
-    build_smore_test_images.<host>.<pid>.tsv     # per-host run log
-
-The pre-symlink with ``{source_id}.nii.gz`` is what makes SMORE's
-auto-derived ``subj_id`` equal ``source_id``. Per-case ``out_root``
-isolates each case's ``run_smore.log`` (otherwise parallel workers
-would race on a shared log file).
+Per-case ``out_root = _artifacts/<source_id>/`` isolates each case's
+``run_smore.log`` (otherwise parallel workers would race on a shared
+log file). After ``run-smore`` returns, the worker moves the SR file
+to the flat root and lifts ``weights/`` out of the inner subdir.
 
 Usage
 -----
     # local backend (host run-smore in PATH)
-    python nnunet/build_smore_test_images.py --config nnunet/configs.yaml \
+    python nnunet/infer/build_smore_test_images.py --config nnunet/configs.yaml \
         --smore-gpu-ids 0,1 --smore-per-gpu-concurrency 1
 
     # container backend
-    python nnunet/build_smore_test_images.py --config nnunet/configs.yaml \
+    python nnunet/infer/build_smore_test_images.py --config nnunet/configs.yaml \
         --smore-backend container \
         --smore-sif /path/to/smore.sif \
         --smore-gpu-ids 0
@@ -43,6 +40,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shutil
 import socket
 import sys
 import time
@@ -57,7 +55,8 @@ import yaml
 
 
 # ── Wire up imports to reuse the existing SMORE helpers ───────────
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# This file lives at nnunet/infer/build_smore_test_images.py; repo root is two up.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -68,7 +67,6 @@ from nnunet.helpers.smore import (  # noqa: E402
     _release_dir_lock,
     _run_smore_local_run_smore,
     _run_smore_singularity_run_smore,
-    _smore_expected_out_fpath,
 )
 from nnunet.resolve_gt import fail_on_missing, resolve_sources  # noqa: E402
 
@@ -147,6 +145,8 @@ def main() -> int:
     meta_dir = Path(cnisp_paths["aligned_dir"]) / "metadata"
 
     smore_out_root.mkdir(parents=True, exist_ok=True)
+    artifacts_root = smore_out_root / "_artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
 
     sources, missing = resolve_sources(
         test_cases_path=test_cases,
@@ -208,31 +208,14 @@ def main() -> int:
         ct_path = src.ct_image_path
         if ct_path is None:
             continue
-        case_root = smore_out_root / sid
-        case_root.mkdir(parents=True, exist_ok=True)
+        flat_sr = smore_out_root / f"{sid}{suffix}.nii.gz"
 
-        # Pre-symlink so SMORE's auto-derived subj_id equals source_id.
-        staged_in = case_root / "_src" / f"{sid}.nii.gz"
-        _safe_symlink(ct_path, staged_in)
-
-        # SMORE writes to <case_root>/<sid>/<sid>_smore.nii.gz (the extra
-        # subdir is SMORE's own convention because we use per-case
-        # out_root). We additionally maintain a top-level convenience
-        # symlink at <case_root>/<sid>_smore.nii.gz pointing at it.
-        expected_sr = _smore_expected_out_fpath(staged_in, case_root, suffix)
-        # = case_root / <sid> / <sid>_smore.nii.gz
-        top_level_link = case_root / f"{sid}{suffix}.nii.gz"
-
-        if expected_sr.exists():
-            # ensure the convenience link exists even on resume
-            if not top_level_link.exists() and not top_level_link.is_symlink():
-                rel = Path(sid) / expected_sr.name
-                top_level_link.symlink_to(rel)
+        if flat_sr.exists() or flat_sr.is_symlink():
             skipped_already_done.append(sid)
             continue
 
         compatible, compat_msg, _ = _is_smore_compatible_from_nifti_header(
-            staged_in,
+            ct_path,
             min_slice_separation=float(args.smore_min_slice_separation),
             inplane_atol=float(args.smore_inplane_atol),
             isotropic_eps=float(args.smore_isotropic_eps),
@@ -251,26 +234,21 @@ def main() -> int:
                 # Pass the original through under the canonical _smore
                 # name (symlink only). Phase 2 downstream can read it
                 # via the same path as SMORE'd cases.
-                expected_sr.parent.mkdir(parents=True, exist_ok=True)
-                _safe_symlink(ct_path, expected_sr)
-                if not top_level_link.exists() and not top_level_link.is_symlink():
-                    rel = Path(sid) / expected_sr.name
-                    top_level_link.symlink_to(rel)
+                _safe_symlink(ct_path, flat_sr)
                 incompatible_records.append({
                     "source_id": sid,
                     "ct_image_path": str(ct_path),
                     "status": "ok_passthrough_incompatible_smore",
                     "message": compat_msg,
-                    "smore_path": str(top_level_link),
+                    "smore_path": str(flat_sr),
                 })
             continue
 
         jobs.append({
             "source_id": sid,
             "ct_image_path": str(ct_path),
-            "staged_in": str(staged_in),
-            "case_root": str(case_root),
-            "top_level_link": str(top_level_link),
+            "flat_sr": str(flat_sr),
+            "artifact_dir": str(artifacts_root / sid),
             "compat_msg": compat_msg,
         })
 
@@ -288,44 +266,30 @@ def main() -> int:
     log_rows: List[Dict] = []
     log_lock = Lock()
 
-    def _ensure_top_level_link(top_level_link: Path, expected_sr: Path,
-                               sid: str) -> None:
-        if top_level_link.exists() or top_level_link.is_symlink():
-            return
-        rel = Path(sid) / expected_sr.name
-        try:
-            top_level_link.symlink_to(rel)
-        except FileExistsError:  # benign race
-            pass
-
     def _run_one(job: Dict) -> Dict:
         gpu_id = slot_q.get()
         claim_dir: Optional[Path] = None
         acquired = False
-        case_root = Path(str(job["case_root"]))
-        staged_in = Path(str(job["staged_in"]))
         sid = str(job["source_id"])
-        top_level_link = Path(str(job["top_level_link"]))
+        ct_path = Path(str(job["ct_image_path"]))
+        flat_sr = Path(str(job["flat_sr"]))
+        artifact_dir = Path(str(job["artifact_dir"]))
         try:
-            claim_dir = case_root / ".smore_claim"
+            claim_dir = artifact_dir / ".smore_claim"
             if not _acquire_dir_lock(claim_dir):
-                expected_sr = _smore_expected_out_fpath(
-                    staged_in, case_root, suffix
-                )
-                if expected_sr.exists():
-                    _ensure_top_level_link(top_level_link, expected_sr, sid)
+                if flat_sr.exists():
                     return {
                         "source_id": sid,
-                        "ct_image_path": str(job["ct_image_path"]),
+                        "ct_image_path": str(ct_path),
                         "status": "ok_smore_cached_late",
                         "message": "completed elsewhere",
-                        "smore_path": str(top_level_link),
+                        "smore_path": str(flat_sr),
                         "gpu_id": gpu_id,
                         "duration_sec": 0.0,
                     }
                 return {
                     "source_id": sid,
-                    "ct_image_path": str(job["ct_image_path"]),
+                    "ct_image_path": str(ct_path),
                     "status": "defer_claimed_elsewhere",
                     "message": "claimed by another worker",
                     "smore_path": "",
@@ -337,18 +301,22 @@ def main() -> int:
             print(f"[SMORE][START] {sid} gpu={gpu_id} "
                   f"at={datetime.now().strftime('%m-%d %H:%M:%S')}")
 
+            # Stage the symlink so SMORE's auto-derived subj_id == sid.
+            staged_in = artifact_dir / "_src" / f"{sid}.nii.gz"
+            _safe_symlink(ct_path, staged_in)
+
             if args.smore_backend == "container":
                 assert smore_sif is not None
                 bind_roots = list(dict.fromkeys([
                     *bind_roots_user,
-                    _top_level_root(Path(job["ct_image_path"])),
-                    _top_level_root(case_root),
+                    _top_level_root(ct_path),
+                    _top_level_root(artifact_dir),
                 ]))
                 sr_path = _run_smore_singularity_run_smore(
                     sif_path=smore_sif,
                     bind_roots=bind_roots,
                     in_fpath=staged_in,
-                    out_root=case_root,
+                    out_root=artifact_dir,
                     suffix=suffix,
                     gpu_id=int(gpu_id),
                     patch_sampling=str(args.smore_patch_sampling),
@@ -358,7 +326,7 @@ def main() -> int:
             else:
                 sr_path = _run_smore_local_run_smore(
                     in_fpath=staged_in,
-                    out_root=case_root,
+                    out_root=artifact_dir,
                     suffix=suffix,
                     gpu_id=int(gpu_id),
                     patch_sampling=str(args.smore_patch_sampling),
@@ -366,13 +334,17 @@ def main() -> int:
                     blur_kernel_fpath=args.smore_blur_kernel_fpath,
                 )
 
-            _ensure_top_level_link(top_level_link, sr_path, sid)
+            # Flatten: SR -> flat root; lift weights/ up; drop scaffolding.
+            sr_path.rename(flat_sr)
+            (sr_path.parent / "weights").rename(artifact_dir / "weights")
+            shutil.rmtree(sr_path.parent)
+            shutil.rmtree(artifact_dir / "_src")
             return {
                 "source_id": sid,
-                "ct_image_path": str(job["ct_image_path"]),
+                "ct_image_path": str(ct_path),
                 "status": "ok_smore",
                 "message": str(job["compat_msg"]),
-                "smore_path": str(top_level_link),
+                "smore_path": str(flat_sr),
                 "gpu_id": gpu_id,
                 "duration_sec": float(time.time() - t0),
             }
@@ -428,7 +400,7 @@ def main() -> int:
             "ct_image_path": "",
             "status": "ok_smore_already_done",
             "message": "expected SR output already existed at start",
-            "smore_path": str(smore_out_root / sid / f"{sid}{suffix}.nii.gz"),
+            "smore_path": str(smore_out_root / f"{sid}{suffix}.nii.gz"),
             "gpu_id": -1,
             "duration_sec": 0.0,
         })

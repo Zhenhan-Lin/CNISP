@@ -4,19 +4,27 @@
 Inputs
 ------
 * ``{work_dir}/nnunet_input/{source_id}_0000.nii.gz``     - staged input CT
-* ``{work_dir}/nnunet_pred_native/{source_id}.nii.gz``    - nnUNet pred
+* ``{work_dir}/nnunet_pred_native_step_{XX}_upsampled/{source_id}.nii.gz``
+  - nnUNet per-step prediction NN-upsampled back to the native CT grid
+  (step_01 is a symlink to the dense baseline ``nnunet_pred_native/``).
+  Indexed via ``{work_dir}/nnunet_pred_native_sweep_manifest.json``.
 * ``output_basedir/{model}/native_space_step_{XX}/...``   - CNISP per-step
-  predictions (produced by ``build_cnisp_native_sweep.py``)
+  predictions (produced by ``infer/build_cnisp_native_sweep.py`` or
+  directly by engine/infer.py).
 * ``output_basedir/{model}/sweep_results.pkl``            - eff_res lookup
 * Native-head GT (per ``resolve_gt.SourceInfo``)
 
 Comparison
 ----------
-* For each of the 31 sources, OD and OS are already merged on the CNISP
-  side; nnUNet predicts the full head directly. Both live on the
-  ORIGINAL CT's voxel grid -- no resampling.
+* nnUNet and CNISP both contribute one row per (source_id, step_size,
+  structure). Both live on the ORIGINAL CT's voxel grid -- GT is never
+  resampled. nnUNet's sparse-CT predictions are NN-upsampled along the
+  through-plane axis by ``infer/upsample_sparse_preds.py`` before this step.
 * Dice computed per structure (ON, Globe, Fat, Recti) plus the
   unweighted mean across the four foreground structures.
+* Same effective-resolution bucket edges apply to both methods, so the
+  summary table places ``nnUNet (lo, hi]`` and ``CNISP (lo, hi]`` side
+  by side per bucket.
 
 Outputs (under ``{work_dir}``)
 ------------------------------
@@ -173,10 +181,12 @@ def main() -> int:
     casefiles_dir = Path(cnisp_paths["casefiles_dir"])
     test_cases = casefiles_dir / "test_cases.txt"
 
-    nnunet_pred_dir = work_dir / "nnunet_pred_native"
-    if not nnunet_pred_dir.exists():
-        print(f"[compare_native] nnUNet pred dir not found: {nnunet_pred_dir}",
-              file=sys.stderr)
+    nnunet_sweep_manifest = work_dir / "nnunet_pred_native_sweep_manifest.json"
+    if not nnunet_sweep_manifest.exists():
+        print(f"[compare_native] nnUNet sweep manifest not found: "
+              f"{nnunet_sweep_manifest}", file=sys.stderr)
+        print(f"  Did you run nnunet/infer/upsample_sparse_preds.py? "
+              f"(`nnunet-predict-sweep` phase)", file=sys.stderr)
         return 2
 
     bucket_edges = list(cfg.get("summary_bucket_edges_mm",
@@ -232,9 +242,26 @@ def main() -> int:
     if not cnisp_step_paths:
         print(f"[compare_native] no CNISP step manifests under {output_base}.",
               file=sys.stderr)
-        print(f"  Did you run build_cnisp_native_sweep.py?", file=sys.stderr)
+        print(f"  Did you run nnunet/infer/build_cnisp_native_sweep.py?",
+              file=sys.stderr)
         return 2
     print(f"[compare_native] CNISP steps available: {sorted(cnisp_step_paths)}")
+
+    # ── nnUNet per-step manifest loader ───────────────────────────
+    with open(nnunet_sweep_manifest) as f:
+        nn_m = json.load(f)
+    nnunet_step_paths: Dict[int, Dict[str, Path]] = {}
+    for step_tag, sid_map in nn_m.get("steps", {}).items():
+        try:
+            step = int(step_tag)
+        except ValueError:
+            continue
+        nnunet_step_paths[step] = {sid: Path(p) for sid, p in sid_map.items()}
+    if not nnunet_step_paths:
+        print(f"[compare_native] nnUNet sweep manifest has no usable steps: "
+              f"{nnunet_sweep_manifest}", file=sys.stderr)
+        return 2
+    print(f"[compare_native] nnUNet steps available: {sorted(nnunet_step_paths)}")
 
     # ── eff_res lookup ────────────────────────────────────────────
     eff_res_idx = _build_eff_res_index(
@@ -262,45 +289,51 @@ def main() -> int:
             print(f"  [skip] {sid}: failed to read GT ({e})", file=sys.stderr)
             continue
 
-        # ── nnUNet ────────────────────────────────────────────────
-        nnunet_pred_path = nnunet_pred_dir / f"{sid}.nii.gz"
-        if not nnunet_pred_path.exists():
-            n_skipped_nnunet += 1
-            print(f"  [skip nnUNet] {sid}: no pred at {nnunet_pred_path}",
-                  file=sys.stderr)
-        else:
+        # ── nnUNet per step ───────────────────────────────────────
+        # nnUNet predictions live on the same native CT grid as the GT;
+        # for step>1 they've already been NN-upsampled by
+        # infer/upsample_sparse_preds.py before reaching this script.
+        for step in sorted(nnunet_step_paths):
+            path_map = nnunet_step_paths[step]
+            if sid not in path_map:
+                continue
+            nnunet_pred_path = path_map[sid]
+            if not nnunet_pred_path.exists():
+                n_skipped_nnunet += 1
+                print(f"  [skip nnUNet step{step:02d}] {sid}: no pred at "
+                      f"{nnunet_pred_path}", file=sys.stderr)
+                continue
             try:
                 nn_pred = _load_label_volume(nnunet_pred_path)
             except Exception as e:  # noqa: BLE001
                 n_skipped_nnunet += 1
-                print(f"  [skip nnUNet] {sid}: load failed ({e})",
-                      file=sys.stderr)
-                nn_pred = None
-
-            if nn_pred is not None:
-                if nn_pred.shape != gt.shape:
-                    msg = (f"{sid}: nnUNet pred shape {nn_pred.shape} "
-                           f"!= GT shape {gt.shape}")
-                    if args.strict_shape:
-                        print(f"  [error] {msg}", file=sys.stderr)
-                        return 3
-                    print(f"  [skip nnUNet] {msg}", file=sys.stderr)
-                else:
-                    dices = _dice_for_source(
-                        nn_pred, gt,
-                        pred_scheme_map=nnunet_struct_map,
-                        gt_scheme_map=src.gt_struct_to_value,
-                    )
-                    for name in STRUCT_ORDER + ["mean"]:
-                        per_source_rows.append({
-                            "source_id": sid,
-                            "gt_source": src.gt_source,
-                            "method": "nnUNet",
-                            "step_size": "",
-                            "eff_res_mm": "",
-                            "structure": name,
-                            "dice": f"{dices[name]:.6f}",
-                        })
+                print(f"  [skip nnUNet step{step:02d}] {sid}: load failed "
+                      f"({e})", file=sys.stderr)
+                continue
+            if nn_pred.shape != gt.shape:
+                msg = (f"{sid} nnUNet step{step:02d}: pred shape "
+                       f"{nn_pred.shape} != GT shape {gt.shape}")
+                if args.strict_shape:
+                    print(f"  [error] {msg}", file=sys.stderr)
+                    return 3
+                print(f"  [skip nnUNet step{step:02d}] {msg}", file=sys.stderr)
+                continue
+            dices = _dice_for_source(
+                nn_pred, gt,
+                pred_scheme_map=nnunet_struct_map,
+                gt_scheme_map=src.gt_struct_to_value,
+            )
+            eff_res = eff_res_idx.get((sid, step))
+            for name in STRUCT_ORDER + ["mean"]:
+                per_source_rows.append({
+                    "source_id": sid,
+                    "gt_source": src.gt_source,
+                    "method": "nnUNet",
+                    "step_size": str(step),
+                    "eff_res_mm": (f"{eff_res:.4f}" if eff_res is not None else ""),
+                    "structure": name,
+                    "dice": f"{dices[name]:.6f}",
+                })
 
         # ── CNISP per step ────────────────────────────────────────
         # CNISP's native_mapping.remap_canonical_to_original emits labels
@@ -371,39 +404,33 @@ def main() -> int:
     }
 
     # Group: (method, bucket_label) -> {structure: [dice]}
+    # Both methods are bucketed by eff_res_mm; rows without an eff_res
+    # fall into the "unknown" bucket at the right edge of the table.
     grouped: Dict[Tuple[str, str], Dict[str, List[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
     for r in per_source_rows:
         method = r["method"]
-        if method == "nnUNet":
-            col = "nnUNet"
-        else:
-            eff = float(r["eff_res_mm"]) if r["eff_res_mm"] else None
-            _, label = _assign_bucket(eff, bucket_edges)
-            col = f"CNISP {label}"
+        eff = float(r["eff_res_mm"]) if r["eff_res_mm"] else None
+        _, label = _assign_bucket(eff, bucket_edges)
+        col = f"{method} {label}"
         grouped[(method, col)][r["structure"]].append(float(r["dice"]))
 
-    # Stable column ordering: nnUNet first, then CNISP buckets in order.
-    cnisp_col_order: List[str] = []
-    seen = set()
+    # Stable column ordering: pair (nnUNet, CNISP) at each eff-res bucket,
+    # buckets sorted by lower bound, unknown sinking to the bottom.
+    bucket_order: List[str] = []
+    seen_buckets = set()
     for r in per_source_rows:
-        if r["method"] != "CNISP":
-            continue
         if r["eff_res_mm"]:
             eff = float(r["eff_res_mm"])
             _, label = _assign_bucket(eff, bucket_edges)
         else:
             label = "unknown"
-        col = f"CNISP {label}"
-        if col not in seen:
-            seen.add(col)
-            cnisp_col_order.append(col)
+        if label not in seen_buckets:
+            seen_buckets.add(label)
+            bucket_order.append(label)
 
-    def _bucket_sort_key(col: str) -> float:
-        # sort CNISP columns by lower bound (or 0 for the first);
-        # unknown-bucket rows sink to the bottom.
-        label = col[len("CNISP "):]
+    def _bucket_sort_key(label: str) -> float:
         if label == "unknown":
             return 1e9
         try:
@@ -412,11 +439,14 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             return 1e9
 
-    cnisp_col_order.sort(key=_bucket_sort_key)
-    all_cols = ["nnUNet"] + cnisp_col_order
+    bucket_order.sort(key=_bucket_sort_key)
+    all_cols: List[str] = []
+    for label in bucket_order:
+        all_cols.append(f"nnUNet {label}")
+        all_cols.append(f"CNISP {label}")
 
     for col in all_cols:
-        method = "nnUNet" if col == "nnUNet" else "CNISP"
+        method = col.split(" ", 1)[0]
         for struct in STRUCT_ORDER + ["mean"]:
             vals = grouped.get((method, col), {}).get(struct, [])
             if not vals:
@@ -449,18 +479,25 @@ def main() -> int:
         f.write("nnUNet vs CNISP -- per-source full-head Dice (native space)\n")
         f.write("=" * 78 + "\n\n")
         f.write("Caveats\n")
-        f.write("  - CNISP is GT-conditioned (sparse-slice latent optimization)\n")
-        f.write("  - nnUNet is image-conditioned (CT only).\n")
+        f.write("  - CNISP is GT-conditioned (sparse-slice latent optimization).\n")
+        f.write("  - nnUNet is image-conditioned. Per-step rows feed nnUNet a\n")
+        f.write("    sparsified CT (drop every Nth axial slice) at the same\n")
+        f.write("    eff_res used by CNISP for that (source, step). The nnUNet\n")
+        f.write("    plan was trained at iso 0.5 mm, so large z-spacing rows\n")
+        f.write("    are intentionally out-of-distribution -- that's the test.\n")
+        f.write("  - nnUNet preds are NN-upsampled along the through-plane axis\n")
+        f.write("    back to the native CT grid before Dice; GT is never\n")
+        f.write("    resampled.\n")
         f.write("  - 6 chk_* sources use pseudo-GT (previous nnUNet's QA-kept\n")
-        f.write("    predictions). Filter on gt_source=='atlas' in paired_per_source.csv\n")
-        f.write("    for the manual-GT-only view.\n\n")
+        f.write("    predictions). Filter on gt_source=='atlas' in\n")
+        f.write("    paired_per_source.csv for the manual-GT-only view.\n\n")
 
         f.write(f"Sources processed: {n_done}  "
                 f"(skipped GT={n_skipped_gt}, skipped nnUNet={n_skipped_nnunet})\n\n")
 
         f.write("Mean Dice by eff_res bucket (n_sources in parentheses)\n")
         f.write("-" * 78 + "\n")
-        col_w = 18
+        col_w = 22
         header = "structure".ljust(11) + "".join(c.ljust(col_w) for c in all_cols)
         f.write(header + "\n")
         for struct in STRUCT_ORDER + ["mean"]:
@@ -473,19 +510,19 @@ def main() -> int:
             f.write(row + "\n")
         f.write("\n")
 
-        # CNISP - nnUNet delta on mean row, when both available
-        nn_cell = table_by_struct["mean"].get("nnUNet")
-        if nn_cell is not None:
-            nn_mean = nn_cell[0]
-            if not math.isnan(nn_mean):
-                f.write("CNISP mean Dice minus nnUNet mean (positive => CNISP wins)\n")
-                f.write("-" * 78 + "\n")
-                for col in cnisp_col_order:
-                    cn_mean, _, _ = table_by_struct["mean"][col]
-                    if math.isnan(cn_mean):
-                        continue
-                    f.write(f"  {col:<25} {cn_mean - nn_mean:+.3f}\n")
-                f.write("\n")
+        # CNISP - nnUNet delta on the mean row, within each shared bucket.
+        f.write("CNISP mean Dice minus nnUNet mean, same eff_res bucket\n")
+        f.write("(positive => CNISP wins within that bucket)\n")
+        f.write("-" * 78 + "\n")
+        for label in bucket_order:
+            nn_col = f"nnUNet {label}"
+            cn_col = f"CNISP {label}"
+            nn_mean = table_by_struct["mean"].get(nn_col, (float("nan"),))[0]
+            cn_mean = table_by_struct["mean"].get(cn_col, (float("nan"),))[0]
+            if math.isnan(nn_mean) or math.isnan(cn_mean):
+                continue
+            f.write(f"  {label:<25} {cn_mean - nn_mean:+.3f}\n")
+        f.write("\n")
     print(f"[compare_native] wrote {txt_path}")
 
     return 0

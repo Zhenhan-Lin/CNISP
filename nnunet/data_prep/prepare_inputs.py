@@ -12,7 +12,7 @@ metadata JSON paths without re-doing the lookup.
 
 Usage
 -----
-    python nnunet/prepare_inputs.py --config nnunet/configs.yaml \
+    python nnunet/data_prep/prepare_inputs.py --config nnunet/configs.yaml \
         [--atlas-image-dir /path/...] [--pivot-csv /path/...] \
         [--work-dir /path/...]
 """
@@ -28,7 +28,8 @@ from typing import Dict
 import yaml
 
 # Ensure ``nnunet`` is importable when this file is run as a script.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# (this file lives at nnunet/data_prep/prepare_inputs.py -> repo root is 2 up)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
