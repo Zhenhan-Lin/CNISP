@@ -16,7 +16,29 @@ gpu_id: 0
 
 # ── CNISP-side artefacts to reuse (no re-inference) ───────────────
 cnisp_paths_yaml: orbital_shape_prior_st1/configs/paths.yaml
-cnisp_model_name: orbital_ad_v2
+cnisp_model_name: orbital_ad_v3
+
+# ── Option C: which CNISP runs to compare against nnUNet ──────────
+# Each entry is a (run_tag, method_label) pair. CNISP infers per run_tag
+# under ${cnisp_output_basedir}/<model>/runs/<run_tag>/; compare_native.py
+# pulls per-step manifests from that subdir and labels Dice rows with
+# method_label. nnUNet sparse-CT predictions are shared across runs.
+#
+# Default: pair the legacy ceiling curve (atlas_gt) with the deployment
+# curve (nnunet_pred). Drop either entry if you only want one comparison.
+cnisp_runs_to_compare:
+  - run_tag: atlas_gt
+    method_label: CNISP-atlasGT
+  - run_tag: nnunet_pred
+    method_label: CNISP-nnUNetPred
+
+# When CNISP runs in test_label_source=nnunet_pred mode, the chk_* dense
+# Dice target switches from the legacy chk_pred (input_label_scheme on
+# disk) to Dataset835's dense pred on the same chk_* CT. compare_native.py
+# reads the swap target from ${work_dir}/nnunet_pred_native/<sid>.nii.gz
+# for chk_* rows belonging to a "deployment" run (run_tag != atlas_gt).
+# Atlas rows always Dice against the atlas manual GT regardless of run_tag.
+deployment_gt_dirname_for_chk: nnunet_pred_native
 
 # ── Source CT discovery ───────────────────────────────────────────
 # atlas: sibling 'atlas_images' folder next to atlas_label_dir from

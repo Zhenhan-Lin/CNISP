@@ -2,24 +2,36 @@
 """Backfill: map every CNISP sweep step back to native head space.
 
 ``orbital_shape_prior_st1/engine/infer.py`` now writes
-``native_space_step_XX/`` plus a ``native_sweep_manifest.json`` itself,
-so a *fresh* CNISP inference run does not need this script.
+``runs/<run_tag>/native_space_step_XX/`` plus a
+``runs/<run_tag>/native_sweep_manifest.json`` itself, so a *fresh* CNISP
+inference run does not need this script.
 
 This file is kept as a **backfill helper** for runs that finished before
-that change. It re-uses the same ``map_results_to_native`` call and
-produces the exact same layout, but is idempotent: any
-``native_space_step_XX/manifest.json`` that already exists is skipped
-unless ``--force`` is passed.
+that change, and as a uniform entry point that ``run_pipeline.sh``'s
+``compare`` phase invokes for every CNISP run (it's a no-op when the
+per-step manifests already exist). It re-uses the same
+``map_results_to_native`` call and produces the same layout, but is
+idempotent: any ``native_space_step_XX/manifest.json`` that already
+exists is skipped unless ``--force`` is passed.
+
+When the run's top-level ``native_sweep_manifest.json`` records
+``test_label_source=nnunet_pred``, the backfill follows the chk_* /
+atlas dispatch (``metadata_dataset835/`` vs ``metadata/``) so it never
+loses track of which canonical crop a chk_* deployment patch came
+from.
 
 Outputs (per step, only when missing or ``--force``):
-    output_basedir/{model_name}/native_space_step_{XX}/
+    output_basedir/{model_name}/runs/{run_tag}/native_space_step_{XX}/
         {original_stem}_cnisp_step{XX}.nii.gz   # OD+OS merged
         manifest.json                            # source_id -> nifti path
 
 Usage
 -----
+    # Ceiling-curve run (default)
     python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml
-    python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml --force
+    # Deployment-curve run
+    python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml \\
+        --run-tag nnunet_pred
 """
 
 from __future__ import annotations
@@ -61,11 +73,39 @@ def _stem_of(p: Path | str) -> str:
     return Path(name).stem
 
 
+def _meta_path_for_casename_factory(
+    aligned_dir: Path,
+    metadata_dirname: str,
+    metadata_dataset835_dirname: str,
+    test_label_source: str,
+):
+    """Same dispatch as engine/test_label_sources._meta_path_for_case.
+
+    Duplicated here (rather than imported) because the legacy backfill
+    must run without orbital_shape_prior_st1 on the Python path -- in
+    practice we still add the path via sys.path manipulation, but the
+    duplication avoids importing torch/nibabel transitively from
+    engine.test_label_sources just for one dispatch table.
+    """
+    meta_dir = aligned_dir / metadata_dirname
+    meta_dataset835_dir = aligned_dir / metadata_dataset835_dirname
+
+    def _resolve(casename: str) -> Path:
+        if (test_label_source == "nnunet_pred"
+                and not casename.startswith("atlas_")):
+            return meta_dataset835_dir / f"{casename}.json"
+        return meta_dir / f"{casename}.json"
+    return _resolve
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="nnunet/configs.yaml")
     ap.add_argument("--model-name", default=None,
                     help="Override cnisp_model_name from config")
+    ap.add_argument("--run-tag", default="atlas_gt",
+                    help="Which CNISP run to backfill, under "
+                         "output_basedir/<model>/runs/<run-tag>/.")
     ap.add_argument("--steps", default=None,
                     help="Optional comma-separated step_size whitelist "
                          "(default: every step present in sweep_results.pkl)")
@@ -78,9 +118,33 @@ def main() -> int:
     cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     model_name = args.model_name or cfg["cnisp_model_name"]
-    output_base = Path(cnisp_paths["output_basedir"]) / model_name
+    output_base = (
+        Path(cnisp_paths["output_basedir"]) / model_name / "runs" / args.run_tag
+    )
     sweep_pkl = output_base / "sweep_results.pkl"
-    meta_dir = Path(cnisp_paths["aligned_dir"]) / "metadata"
+    aligned_dir = Path(cnisp_paths["aligned_dir"])
+
+    # Read test_label_source from the run's top-level manifest if
+    # present (so the backfill picks the right metadata tree for chk_*
+    # cases). Falls back to "atlas_gt" for legacy runs that pre-date
+    # Option C.
+    top_manifest_path = output_base / "native_sweep_manifest.json"
+    test_label_source = "atlas_gt"
+    if top_manifest_path.exists():
+        try:
+            with open(top_manifest_path) as f:
+                test_label_source = json.load(f).get(
+                    "test_label_source", "atlas_gt"
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    meta_path_for = _meta_path_for_casename_factory(
+        aligned_dir,
+        cnisp_paths.get("metadata_dirname", "metadata"),
+        cnisp_paths.get("metadata_dataset835_dirname", "metadata_dataset835"),
+        test_label_source,
+    )
 
     if not sweep_pkl.exists():
         print(f"[build_cnisp_native_sweep] sweep_results.pkl not found: {sweep_pkl}",
@@ -93,7 +157,7 @@ def main() -> int:
     with open(sweep_pkl, "rb") as f:
         all_results: List[dict] = pickle.load(f)
     print(f"[build_cnisp_native_sweep] {len(all_results)} (case, step) rows; "
-          f"meta_dir={meta_dir}")
+          f"run_tag={args.run_tag} test_label_source={test_label_source}")
 
     # ── Group by step_size ────────────────────────────────────────
     by_step: Dict[int, List[dict]] = defaultdict(list)
@@ -142,7 +206,8 @@ def main() -> int:
 
         step_dir.mkdir(parents=True, exist_ok=True)
         native_paths = map_results_to_native(
-            step_results, meta_dir, step_dir, suffix=suffix,
+            step_results, aligned_dir, step_dir, suffix=suffix,
+            meta_path_for_casename=meta_path_for,
         )
 
         # ── source_id <-> output path manifest ────────────────────
@@ -153,7 +218,7 @@ def main() -> int:
         step_manifest: Dict[str, str] = {}
         seen_sources = set()
         for r in step_results:
-            meta_path = meta_dir / f"{r['casename']}.json"
+            meta_path = meta_path_for(r["casename"])
             if not meta_path.exists():
                 continue
             with open(meta_path) as f:
@@ -182,6 +247,8 @@ def main() -> int:
             json.dump({
                 "step_size": step,
                 "model_name": model_name,
+                "run_tag": args.run_tag,
+                "test_label_source": test_label_source,
                 "suffix": suffix,
                 "n_sources": len(step_manifest),
                 "by_source_id": step_manifest,
@@ -193,6 +260,8 @@ def main() -> int:
     with open(summary_path, "w") as f:
         json.dump({
             "model_name": model_name,
+            "run_tag": args.run_tag,
+            "test_label_source": test_label_source,
             "steps": {str(k): v for k, v in overall_manifest.items()},
         }, f, indent=2)
     print(f"\n[build_cnisp_native_sweep] summary: {summary_path}")

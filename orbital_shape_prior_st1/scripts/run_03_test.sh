@@ -38,26 +38,42 @@ TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
 # Read model_name from train config (or override here)
 MODEL_NAME="orbital_ad_v3"
 
+# Option C overrides (optional). Either pass on the command line or set
+# the corresponding fields in the test yaml. When unset, the test yaml
+# wins; the yaml's own default keeps the ceiling-curve behaviour.
+#
+#   ./run_03_test.sh [test_yaml] [test_label_source] [run_tag]
+TEST_LABEL_SOURCE="${2:-}"
+RUN_TAG="${3:-}"
+
 # ── Run ───────────────────────────────────────────────────────
 echo "============================================================"
 echo "Step 3: Test A — Controlled Reconstruction"
-echo "  Paths config:  $PATHS_YAML"
-echo "  Train config:  $TRAIN_YAML"
-echo "  Test config:   $TEST_YAML"
-echo "  Model:         $MODEL_NAME"
+echo "  Paths config:        $PATHS_YAML"
+echo "  Train config:        $TRAIN_YAML"
+echo "  Test config:         $TEST_YAML"
+echo "  Model:               $MODEL_NAME"
+[[ -n "$TEST_LABEL_SOURCE" ]] && echo "  test_label_source:   $TEST_LABEL_SOURCE"
+[[ -n "$RUN_TAG"           ]] && echo "  run_tag:             $RUN_TAG"
 echo "============================================================"
+
+EXTRA=()
+[[ -n "$TEST_LABEL_SOURCE" ]] && EXTRA+=(--test-label-source "$TEST_LABEL_SOURCE")
+[[ -n "$RUN_TAG"           ]] && EXTRA+=(--run-tag "$RUN_TAG")
 
 python3 "$PROJECT_ROOT/scripts/03_infer.py" \
     -p "$PATHS_YAML" \
     -t "$TRAIN_YAML" \
     -c "$TEST_YAML" \
-    -m "$MODEL_NAME"
+    -m "$MODEL_NAME" \
+    "${EXTRA[@]}"
 
 echo ""
 echo "============================================================"
 echo "Step 3 COMPLETE."
 echo ""
-echo "Outputs saved to: output_basedir/$MODEL_NAME/"
+RUN_TAG_DISPLAY="${RUN_TAG:-<from test yaml; defaults to atlas_gt>}"
+echo "Outputs saved to: output_basedir/$MODEL_NAME/runs/$RUN_TAG_DISPLAY/"
 echo "  inference_results.pkl       — primary picks (one per case), feeds map_to_native + 04_visualization"
 echo "  sweep_results.pkl           — full (case × step) sweep"
 echo "  test_results.csv            — per-(case, step) metrics (with eff_res_bucket column)"

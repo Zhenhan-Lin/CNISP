@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Per-source paired Dice: nnUNet vs CNISP, native head space.
+"""Per-source paired Dice: nnUNet vs one CNISP run, native head space.
+
+Each invocation handles ONE CNISP run -- it pairs the (always-shared)
+nnUNet sparse-CT sweep with the CNISP outputs under
+``output_basedir/<model>/runs/<run_tag>/`` and emits the matched
+paired CSV/TXT bundle.
+
+To compare ``CNISP-atlasGT`` vs ``CNISP-nnUNetPred`` head-to-head,
+the pipeline calls this script once per entry in
+``configs.yaml::cnisp_runs_to_compare``.
 
 Inputs
 ------
@@ -8,36 +17,49 @@ Inputs
   - nnUNet per-step prediction NN-upsampled back to the native CT grid
   (step_01 is a symlink to the dense baseline ``nnunet_pred_native/``).
   Indexed via ``{work_dir}/nnunet_pred_native_sweep_manifest.json``.
-* ``output_basedir/{model}/native_space_step_{XX}/...``   - CNISP per-step
-  predictions (produced by ``engine/build_cnisp_native_sweep.py`` or
-  directly by orbital_shape_prior_st1/engine/infer.py).
-* ``output_basedir/{model}/sweep_results.pkl``            - eff_res lookup
-* Native-head GT (per ``resolve_gt.SourceInfo``)
+* ``output_basedir/{model}/runs/{run_tag}/native_space_step_{XX}/...``
+  -- CNISP per-step predictions for this run, produced by
+  ``orbital_shape_prior_st1/engine/infer.py`` (or backfilled by
+  ``nnunet/engine/build_cnisp_native_sweep.py``).
+* ``output_basedir/{model}/runs/{run_tag}/sweep_results.pkl`` -- eff_res lookup.
+* ``output_basedir/{model}/runs/{run_tag}/native_sweep_manifest.json`` --
+  records the ``test_label_source`` used for this run, which decides
+  whether chk_* sources are Diced against the legacy chk_pseudo GT
+  (``atlas_gt`` runs) or against Dataset835's dense pred
+  (``nnunet_pred`` runs). Atlas sources always Dice against the
+  atlas manual GT.
 
 Comparison
 ----------
-* nnUNet and CNISP both contribute one row per (source_id, step_size,
-  structure). Both live on the ORIGINAL CT's voxel grid -- GT is never
-  resampled. nnUNet's sparse-CT predictions are NN-upsampled along the
-  through-plane axis by ``engine/upsample_sparse_preds.py`` before this step.
-* Dice computed per structure (ON, Globe, Fat, Recti) plus the
-  unweighted mean across the four foreground structures.
-* Same effective-resolution bucket edges apply to both methods, so the
-  summary table places ``nnUNet (lo, hi]`` and ``CNISP (lo, hi]`` side
-  by side per bucket.
+* Both methods contribute one row per (source_id, step_size,
+  structure). All Dice computed on the ORIGINAL CT's voxel grid -- GT
+  is never resampled. nnUNet's sparse-CT predictions are NN-upsampled
+  along the through-plane axis by ``engine/upsample_sparse_preds.py``
+  before this step.
+* When the CNISP run uses ``test_label_source=nnunet_pred`` we ALSO
+  switch nnUNet-sparse's chk_* GT to Dataset835's dense pred so both
+  methods Dice against the same target in this bucket. Atlas rows are
+  unaffected (they always Dice against atlas manual GT).
+* Same effective-resolution bucket edges apply to both methods.
 
 Outputs (under ``{work_dir}``)
 ------------------------------
-* ``paired_per_source.csv`` -- long: one row per (source, method,
-  step_size, structure, dice).
-* ``paired_summary.csv``    -- aggregated by (method, eff_res_bucket,
-  structure): mean +/- std Dice and n_sources.
-* ``paired_summary.txt``    -- human-readable header (asymmetry caveat
-  + chk_* pseudo-GT note) and a wide table per structure.
+For ``--cnisp-run-tag <T>``:
+* ``paired_per_source__<T>.csv`` -- long, one row per
+  (source, method, step_size, structure, dice).
+* ``paired_summary__<T>.csv``    -- aggregated by
+  (method, eff_res_bucket, structure).
+* ``paired_summary__<T>.txt``    -- human-readable wide table.
+
+The companion driver ``nnunet/engine/build_method_summary.py`` reads
+the per-source CSV and renders the per-method PNG.
 
 Usage
 -----
-    python nnunet/compare_native.py --config nnunet/configs.yaml
+    python nnunet/compare_native.py --config nnunet/configs.yaml \\
+        --cnisp-run-tag atlas_gt
+    python nnunet/compare_native.py --config nnunet/configs.yaml \\
+        --cnisp-run-tag nnunet_pred
 """
 
 from __future__ import annotations
@@ -49,6 +71,7 @@ import math
 import pickle
 import sys
 from collections import defaultdict
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -61,10 +84,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from nnunet.resolve_gt import NNUNET_LABELS, resolve_sources  # noqa: E402
+from nnunet.resolve_gt import (  # noqa: E402
+    NNUNET_LABELS, build_struct_to_value, resolve_sources,
+)
 
 
 STRUCT_ORDER = ["ON", "Globe", "Fat", "Recti"]
+NNUNET_METHOD_LABEL = "nnUNet-sparse"
 
 
 # ── Generic helpers ──────────────────────────────────────────────
@@ -161,11 +187,68 @@ def _build_eff_res_index(
 # ── Main ─────────────────────────────────────────────────────────
 
 
+def _lookup_method_label(cfg: Dict, run_tag: str) -> str:
+    """Pick the method_label for a given run_tag from configs.yaml.
+
+    Falls back to ``CNISP-<run_tag>`` if no entry matches; this keeps
+    one-off runs (e.g. an ablation with a custom run_tag) working
+    without forcing every contributor to update configs.yaml.
+    """
+    for entry in cfg.get("cnisp_runs_to_compare", []):
+        if str(entry.get("run_tag")) == run_tag:
+            return str(entry.get("method_label", f"CNISP-{run_tag}"))
+    return f"CNISP-{run_tag}"
+
+
+def _override_chk_gt_for_deployment(
+    sources,
+    work_dir: Path,
+    deployment_dirname: str,
+) -> List:
+    """Swap chk_* GT to Dataset835's dense pred for deployment-mode runs.
+
+    Atlas sources are returned unchanged (atlas manual GT remains the
+    Dice target there). chk_* sources have their ``gt_label_path`` and
+    ``gt_struct_to_value`` rewritten to point at
+    ``{work_dir}/{deployment_dirname}/<sid>.nii.gz`` with the
+    ``nnunet`` scheme. ``gt_source`` is tagged
+    ``chk_pseudo_dataset835`` so downstream filters / reports can tell
+    the two GT modes apart.
+    """
+    out = []
+    new_struct_map = build_struct_to_value("nnunet", offset=0)
+    for s in sources:
+        if s.gt_source != "chk_pseudo":
+            out.append(s)
+            continue
+        new_path = work_dir / deployment_dirname / f"{s.source_id}.nii.gz"
+        out.append(dataclass_replace(
+            s,
+            gt_label_path=new_path,
+            gt_scheme="nnunet",
+            gt_label_offset=0,
+            gt_struct_to_value=new_struct_map,
+            gt_source="chk_pseudo_dataset835",
+        ))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="nnunet/configs.yaml")
     ap.add_argument("--model-name", default=None)
     ap.add_argument("--work-dir", default=None)
+    ap.add_argument("--cnisp-run-tag", default="atlas_gt",
+                    help="Which CNISP run to compare against (subdir under "
+                         "output_basedir/<model>/runs/). Default atlas_gt "
+                         "preserves the ceiling-curve comparison.")
+    ap.add_argument("--cnisp-method-label", default=None,
+                    help="Override the CNISP method label. If unset, look up "
+                         "cnisp_runs_to_compare in the config.")
+    ap.add_argument("--out-suffix", default=None,
+                    help="Suffix for output filenames. Default is "
+                         "'__<cnisp_run_tag>' so multiple runs do not "
+                         "collide.")
     ap.add_argument("--strict-shape", action="store_true",
                     help="Fail if a prediction's shape differs from GT "
                          "(default: skip the source with a warning).")
@@ -176,8 +259,19 @@ def main() -> int:
 
     model_name = args.model_name or cfg["cnisp_model_name"]
     work_dir = Path(args.work_dir or cfg["work_dir"])
-    output_base = Path(cnisp_paths["output_basedir"]) / model_name
-    meta_dir = Path(cnisp_paths["aligned_dir"]) / "metadata"
+    run_tag = str(args.cnisp_run_tag)
+    cnisp_method_label = (
+        args.cnisp_method_label or _lookup_method_label(cfg, run_tag)
+    )
+    out_suffix = (args.out_suffix if args.out_suffix is not None
+                  else f"__{run_tag}")
+
+    output_base = (
+        Path(cnisp_paths["output_basedir"]) / model_name / "runs" / run_tag
+    )
+    meta_dir = Path(cnisp_paths["aligned_dir"]) / cnisp_paths.get(
+        "metadata_dirname", "metadata"
+    )
     casefiles_dir = Path(cnisp_paths["casefiles_dir"])
     test_cases = casefiles_dir / "test_cases.txt"
 
@@ -189,8 +283,32 @@ def main() -> int:
               f"(`nnunet-predict-sweep` phase)", file=sys.stderr)
         return 2
 
+    # The CNISP run's manifest tells us whether it was a deployment-mode
+    # run (test_label_source=nnunet_pred). When so, chk_* GT switches to
+    # Dataset835's dense pred for BOTH methods so the head-to-head Dice
+    # stays voxel-for-voxel against the same target.
+    cnisp_top_manifest = output_base / "native_sweep_manifest.json"
+    cnisp_test_label_source = "atlas_gt"
+    if cnisp_top_manifest.exists():
+        try:
+            with open(cnisp_top_manifest) as f:
+                cnisp_test_label_source = json.load(f).get(
+                    "test_label_source", "atlas_gt"
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+    deployment_dirname = cfg.get(
+        "deployment_gt_dirname_for_chk", "nnunet_pred_native"
+    )
+
     bucket_edges = list(cfg.get("summary_bucket_edges_mm",
                                 [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]))
+
+    print(f"[compare_native] run_tag                  = {run_tag}")
+    print(f"[compare_native] cnisp method label       = {cnisp_method_label}")
+    print(f"[compare_native] cnisp test_label_source  = {cnisp_test_label_source}")
+    print(f"[compare_native] cnisp run dir            = {output_base}")
+    print(f"[compare_native] output suffix            = {out_suffix}")
 
     # ── Resolve the 31 sources ────────────────────────────────────
     sources, missing = resolve_sources(
@@ -212,6 +330,16 @@ def main() -> int:
             print(f"  - {m}", file=sys.stderr)
         if len(missing) > 5:
             print(f"  ... and {len(missing) - 5} more", file=sys.stderr)
+
+    # Swap chk_* GT to Dataset835's dense pred for deployment-mode runs.
+    if cnisp_test_label_source == "nnunet_pred":
+        sources = _override_chk_gt_for_deployment(
+            sources, work_dir, deployment_dirname,
+        )
+        n_overridden = sum(1 for s in sources
+                           if s.gt_source == "chk_pseudo_dataset835")
+        print(f"[compare_native] deployment-mode: chk_* GT swapped to "
+              f"{deployment_dirname}/ ({n_overridden} source(s))")
 
     # ── nnUNet label scheme reminder ──────────────────────────────
     # We trust NNUNET_LABELS from resolve_gt (matches NNUNET_MAP_CT in
@@ -328,7 +456,7 @@ def main() -> int:
                 per_source_rows.append({
                     "source_id": sid,
                     "gt_source": src.gt_source,
-                    "method": "nnUNet",
+                    "method": NNUNET_METHOD_LABEL,
                     "step_size": str(step),
                     "eff_res_mm": (f"{eff_res:.4f}" if eff_res is not None else ""),
                     "structure": name,
@@ -338,7 +466,11 @@ def main() -> int:
         # ── CNISP per step ────────────────────────────────────────
         # CNISP's native_mapping.remap_canonical_to_original emits labels
         # in the SAME scheme as the source GT, so the same struct->value
-        # map works for both.
+        # map works for both. (When in deployment mode and the source is
+        # chk_*, both GT and CNISP pred use the nnunet scheme; when the
+        # source is atlas, both use the atlas scheme. No re-mapping
+        # needed -- the chk_* swap above already moved GT into the
+        # nnunet scheme.)
         cnisp_pred_struct_map = src.gt_struct_to_value
         for step in sorted(cnisp_step_paths):
             path_map = cnisp_step_paths[step]
@@ -374,7 +506,7 @@ def main() -> int:
                 per_source_rows.append({
                     "source_id": sid,
                     "gt_source": src.gt_source,
-                    "method": "CNISP",
+                    "method": cnisp_method_label,
                     "step_size": str(step),
                     "eff_res_mm": (f"{eff_res:.4f}" if eff_res is not None else ""),
                     "structure": name,
@@ -388,7 +520,7 @@ def main() -> int:
 
     # ── Write per-source CSV ──────────────────────────────────────
     work_dir.mkdir(parents=True, exist_ok=True)
-    per_source_csv = work_dir / "paired_per_source.csv"
+    per_source_csv = work_dir / f"paired_per_source{out_suffix}.csv"
     with open(per_source_csv, "w", newline="") as f:
         fieldnames = ["source_id", "gt_source", "method", "step_size",
                       "eff_res_mm", "structure", "dice"]
@@ -440,13 +572,18 @@ def main() -> int:
             return 1e9
 
     bucket_order.sort(key=_bucket_sort_key)
+    methods_in_order = [NNUNET_METHOD_LABEL, cnisp_method_label]
     all_cols: List[str] = []
     for label in bucket_order:
-        all_cols.append(f"nnUNet {label}")
-        all_cols.append(f"CNISP {label}")
+        for m in methods_in_order:
+            all_cols.append(f"{m} {label}")
 
     for col in all_cols:
-        method = col.split(" ", 1)[0]
+        # The method label is everything before the bucket; the bucket
+        # always starts with "(" or "unknown", so split on the first
+        # such delimiter.
+        method = next((m for m in methods_in_order
+                       if col.startswith(m + " ")), col.split(" ", 1)[0])
         for struct in STRUCT_ORDER + ["mean"]:
             vals = grouped.get((method, col), {}).get(struct, [])
             if not vals:
@@ -457,7 +594,7 @@ def main() -> int:
                                             float(arr.std()),
                                             int(len(arr)))
 
-    summary_csv = work_dir / "paired_summary.csv"
+    summary_csv = work_dir / f"paired_summary{out_suffix}.csv"
     with open(summary_csv, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["bucket", "structure", "mean_dice", "std_dice", "n_sources"])
@@ -473,14 +610,31 @@ def main() -> int:
     print(f"[compare_native] wrote {summary_csv}")
 
     # ── Plaintext table ───────────────────────────────────────────
-    txt_path = work_dir / "paired_summary.txt"
+    txt_path = work_dir / f"paired_summary{out_suffix}.txt"
+    if cnisp_test_label_source == "nnunet_pred":
+        chk_note = (
+            "  - DEPLOYMENT MODE: chk_* sources are Diced against\n"
+            "    Dataset835's dense pred (nnunet_pred_native/), shared\n"
+            "    between both methods; atlas sources Dice against the\n"
+            "    atlas manual GT.\n")
+    else:
+        chk_note = (
+            "  - 6 chk_* sources use the legacy chk_pseudo GT (previous\n"
+            "    nnUNet's QA-kept predictions). Filter on\n"
+            "    gt_source=='atlas' in paired_per_source.csv for the\n"
+            "    manual-GT-only view.\n")
     with open(txt_path, "w") as f:
         f.write("=" * 78 + "\n")
-        f.write("nnUNet vs CNISP -- per-source full-head Dice (native space)\n")
+        f.write(f"{NNUNET_METHOD_LABEL} vs {cnisp_method_label} -- "
+                f"per-source full-head Dice (native space)\n")
         f.write("=" * 78 + "\n\n")
+        f.write(f"CNISP run_tag           : {run_tag}\n")
+        f.write(f"CNISP test_label_source : {cnisp_test_label_source}\n\n")
         f.write("Caveats\n")
-        f.write("  - CNISP is GT-conditioned (sparse-slice latent optimization).\n")
-        f.write("  - nnUNet is image-conditioned. Per-step rows feed nnUNet a\n")
+        f.write(f"  - {cnisp_method_label} is GT-conditioned (sparse-slice "
+                f"latent optimization).\n")
+        f.write(f"  - {NNUNET_METHOD_LABEL} is image-conditioned. Per-step "
+                f"rows feed nnUNet a\n")
         f.write("    sparsified CT (drop every Nth axial slice) at the same\n")
         f.write("    eff_res used by CNISP for that (source, step). The nnUNet\n")
         f.write("    plan was trained at iso 0.5 mm, so large z-spacing rows\n")
@@ -488,16 +642,17 @@ def main() -> int:
         f.write("  - nnUNet preds are NN-upsampled along the through-plane axis\n")
         f.write("    back to the native CT grid before Dice; GT is never\n")
         f.write("    resampled.\n")
-        f.write("  - 6 chk_* sources use pseudo-GT (previous nnUNet's QA-kept\n")
-        f.write("    predictions). Filter on gt_source=='atlas' in\n")
-        f.write("    paired_per_source.csv for the manual-GT-only view.\n\n")
+        f.write(chk_note + "\n")
 
         f.write(f"Sources processed: {n_done}  "
                 f"(skipped GT={n_skipped_gt}, skipped nnUNet={n_skipped_nnunet})\n\n")
 
         f.write("Mean Dice by eff_res bucket (n_sources in parentheses)\n")
         f.write("-" * 78 + "\n")
-        col_w = 22
+        # Column width scales with the longest method-label prefix so
+        # CNISP-atlasGT / CNISP-nnUNetPred stay legible.
+        max_method_w = max(len(m) for m in methods_in_order)
+        col_w = max(22, max_method_w + 16)
         header = "structure".ljust(11) + "".join(c.ljust(col_w) for c in all_cols)
         f.write(header + "\n")
         for struct in STRUCT_ORDER + ["mean"]:
@@ -510,13 +665,14 @@ def main() -> int:
             f.write(row + "\n")
         f.write("\n")
 
-        # CNISP - nnUNet delta on the mean row, within each shared bucket.
-        f.write("CNISP mean Dice minus nnUNet mean, same eff_res bucket\n")
-        f.write("(positive => CNISP wins within that bucket)\n")
+        # (CNISP - nnUNet) delta on the mean row, within each shared bucket.
+        f.write(f"{cnisp_method_label} mean Dice minus {NNUNET_METHOD_LABEL} "
+                f"mean, same eff_res bucket\n")
+        f.write(f"(positive => {cnisp_method_label} wins within that bucket)\n")
         f.write("-" * 78 + "\n")
         for label in bucket_order:
-            nn_col = f"nnUNet {label}"
-            cn_col = f"CNISP {label}"
+            nn_col = f"{NNUNET_METHOD_LABEL} {label}"
+            cn_col = f"{cnisp_method_label} {label}"
             nn_mean = table_by_struct["mean"].get(nn_col, (float("nan"),))[0]
             cn_mean = table_by_struct["mean"].get(cn_col, (float("nan"),))[0]
             if math.isnan(nn_mean) or math.isnan(cn_mean):

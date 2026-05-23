@@ -22,3 +22,25 @@ casefiles_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/casename_files
 
 # Subdirectory name for labels inside aligned_dir
 labels_dirname: labels
+
+# ── Option C (deployment curve) staging directories ───────────────
+# These directories live inside aligned_dir and are written by the
+# nnUNet-side helpers BEFORE the deployment-curve CNISP inference:
+#
+#   labels_dataset835_dirname        Dataset835 DENSE pred canonical-aligned
+#                                    (chk_* GT target for nnunet_pred mode)
+#                                    -> nnunet/engine/build_dataset835_canonical_patches.py
+#   metadata_dataset835_dirname      sidecar JSONs for the above (needed by
+#                                    native_mapping for chk_* deployment row)
+#   labels_dataset835_step_prefix    per-step Dataset835 SPARSE pred
+#                                    canonical-aligned. Subdir names are
+#                                    "{prefix}{XX}" e.g. labels_dataset835_step_03.
+#                                    -> nnunet/engine/build_dataset835_sparse_patches.py
+#                                    (latent-opt INPUT for nnunet_pred mode)
+#
+# These defaults are also the convention used by run_pipeline.sh's
+# `cnisp-prep-dataset835-*` phases; only override if you renamed the
+# subtrees on disk.
+labels_dataset835_dirname: labels_dataset835
+metadata_dataset835_dirname: metadata_dataset835
+labels_dataset835_step_prefix: labels_dataset835_step_

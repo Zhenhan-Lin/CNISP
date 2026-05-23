@@ -6,6 +6,36 @@
 #   optimizes latent → dense reconstruction → compare with GT.
 #
 # This measures the shape prior's CEILING performance.
+#
+# ── Option C deployment-curve switch (new) ───────────────────────
+# test_label_source / run_tag together pick which "story" this run
+# tells. Same model weights, same test set, different latent-opt input.
+#
+#   atlas_gt    (default, ceiling curve):
+#     - Latent-opt input  : sparsified canonical GT patch from
+#                           ${aligned_dir}/labels/<casename>.nii.gz.
+#     - Dense Dice target : same GT patch (the ceiling, isolates prior).
+#     - Outputs land at   : ${output_basedir}/<model>/runs/atlas_gt/.
+#
+#   nnunet_pred (deployment curve, paired with nnUNet sparse sweep):
+#     - Latent-opt input  : per-step canonical-aligned Dataset835 sparse-CT
+#                           prediction at
+#                           ${aligned_dir}/labels_dataset835_step_XX/<casename>.nii.gz.
+#                           (built by nnunet/engine/build_dataset835_sparse_patches.py
+#                           from ${work_dir}/nnunet_pred_native_step_XX/<sid>.nii.gz.)
+#     - Dense Dice target : for atlas cases, atlas manual GT
+#                           (${aligned_dir}/labels/atlas_*.nii.gz, unchanged).
+#                           For chk_* cases, canonical-aligned Dataset835
+#                           DENSE pred
+#                           (${aligned_dir}/labels_dataset835/chk_*.nii.gz,
+#                           built by nnunet/engine/build_dataset835_canonical_patches.py).
+#     - Outputs land at   : ${output_basedir}/<model>/runs/nnunet_pred/.
+#
+# Both runs are GT-conditioned latent optimisation; only the *source* of
+# the sparse observation differs. compare_native.py reads both runs and
+# emits methods CNISP-atlasGT vs CNISP-nnUNetPred (vs nnUNet-sparse).
+test_label_source: atlas_gt
+run_tag: atlas_gt
 
 # Which cases to test on
 test_casefile: test_cases.txt

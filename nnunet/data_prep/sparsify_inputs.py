@@ -15,7 +15,10 @@ that directory so the sweep manifest is still complete.
 
 Inputs
 ------
-* ``${cnisp_output_basedir}/<cnisp_model_name>/sweep_results.pkl``
+* ``${cnisp_output_basedir}/<cnisp_model_name>/runs/<cnisp_sweep_source_run_tag>/sweep_results.pkl``
+  -- defaults to ``runs/atlas_gt/`` (the ceiling curve). Override with
+  ``--cnisp-sweep-source`` if your nnUNet sweep should track a
+  different CNISP run's (source, step) set.
 * ``${work_dir}/source_to_path.json`` (written by data_prep/prepare_inputs.py)
 * Per-source CT NIfTIs referenced by source_to_path.json
 
@@ -156,14 +159,35 @@ def _eff_res_from_affine(affine: np.ndarray, axis: int) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="nnunet/configs.yaml")
+    ap.add_argument("--cnisp-sweep-source", default="atlas_gt",
+                    help="run_tag under output_basedir/<model>/runs/ "
+                         "whose sweep_results.pkl drives the (source, "
+                         "step) set. Default atlas_gt: the deployment "
+                         "curve always re-uses the ceiling curve's "
+                         "sweep so a single nnUNet sparse-CT sweep "
+                         "covers both stories.")
     args = ap.parse_args()
 
     cfg = _load_yaml(Path(args.config))
     cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     work_dir = Path(cfg["work_dir"])
-    cnisp_output_base = Path(cnisp_paths["output_basedir"]) / cfg["cnisp_model_name"]
-    sweep_pkl = cnisp_output_base / "sweep_results.pkl"
+    cnisp_run_base = (
+        Path(cnisp_paths["output_basedir"])
+        / cfg["cnisp_model_name"]
+        / "runs"
+        / args.cnisp_sweep_source
+    )
+    sweep_pkl = cnisp_run_base / "sweep_results.pkl"
+    # Backward compat: pre-Option-C runs wrote sweep_results.pkl directly
+    # under output_basedir/<model>/ without a runs/<run_tag>/ wrapper.
+    if not sweep_pkl.exists():
+        legacy = (Path(cnisp_paths["output_basedir"])
+                  / cfg["cnisp_model_name"] / "sweep_results.pkl")
+        if legacy.exists():
+            print(f"[sparsify_inputs] {sweep_pkl} not found; "
+                  f"falling back to legacy layout at {legacy}")
+            sweep_pkl = legacy
     tol = float(cfg.get("sparse_eff_res_tolerance", 0.05))
 
     source_to_path = work_dir / "source_to_path.json"

@@ -7,6 +7,19 @@ For each test case:
     3. Freeze MLP, optimize z against sparse observations
     4. Dense-sample on full grid → multi-class label map
     5. Export NIfTI + compute metrics
+
+Two test_label_source modes share this code path (see test_default.yaml):
+
+  atlas_gt     latent-opt input = sparsen_volume(canonical GT patch).
+               Dense Dice target = the same GT patch. Ceiling curve.
+
+  nnunet_pred  latent-opt input = per-step canonical-aligned Dataset835
+               sparse-CT pred (one ``label_obs`` patch per (case, step),
+               loaded from aligned_dir/labels_dataset835_step_XX/).
+               Dense Dice target = atlas manual GT for atlas cases or
+               Dataset835 dense pred canonical-aligned for chk_* cases.
+               Output lives in a sibling runs/<run_tag>/ subdir so the
+               two curves never overwrite each other's predictions.
 """
 
 import json
@@ -14,14 +27,14 @@ import pickle
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
 import torch
 
 from models.losses import MultiClassDiceMetric, MultiClassShapeLoss
-from engine.dataset import load_casenames, load_orbital_volumes
+from engine.dataset import load_casenames
 from diagnostics.resolution_sweep import (
     DEFAULT_BUCKET_EDGES_MM,
     print_sweep_summary,
@@ -31,6 +44,13 @@ from diagnostics.resolution_sweep import (
 from engine.train import create_model
 from engine.io_utils import load_latest_checkpoint
 from engine.native_mapping import map_results_to_native
+from engine.test_label_sources import (
+    RunLayout,
+    build_run_layout,
+    dense_target_paths,
+    load_patch_as_label_tensor,
+    step_input_patch_path,
+)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -302,6 +322,94 @@ def _pick_primary_per_case(all_results: List[Dict],
     return picked
 
 
+def _load_labels_dense_per_case(
+    layout: RunLayout, casenames: List[str]
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[str]]:
+    """Load the dense Dice-target patch + spacing for each test case.
+
+    ``layout.test_label_source`` decides which directory each case
+    reads from:
+
+      atlas_gt     - everything from ``layout.labels_dir`` (ceiling).
+      nnunet_pred  - atlas cases from ``layout.labels_dir`` (manual GT
+                     stays put), chk_* cases from
+                     ``layout.labels_dataset835_dir`` (Dataset835 dense
+                     pred canonical-aligned). chk_* cases without a
+                     Dataset835 patch on disk are dropped from the
+                     test set for this run with a printed warning --
+                     the deployment story for that case is undefined
+                     until ``cnisp-prep-dataset835-gt`` runs.
+    """
+    labels: List[torch.Tensor] = []
+    spacings: List[torch.Tensor] = []
+    surviving: List[str] = []
+    n_atlas = n_chk = n_dropped = 0
+    for cn in casenames:
+        label_path, _meta_path = dense_target_paths(layout, cn)
+        if not label_path.exists():
+            print(f"  [drop case] {cn}: dense target missing at {label_path}")
+            n_dropped += 1
+            continue
+        vol, spacing, _offset = load_patch_as_label_tensor(label_path)
+        labels.append(vol)
+        spacings.append(spacing)
+        surviving.append(cn)
+        if cn.startswith("atlas_"):
+            n_atlas += 1
+        else:
+            n_chk += 1
+    print(f"  Dense Dice targets resolved: atlas={n_atlas} chk_*={n_chk} "
+          f"dropped={n_dropped}  (test_label_source={layout.test_label_source})")
+    return labels, spacings, surviving
+
+
+def _build_label_obs_loader(
+    layout: RunLayout,
+) -> Optional[Callable[[str, int],
+                       Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]]:
+    """Return a per-(case, step) override loader, or None for atlas_gt.
+
+    Under ``nnunet_pred`` we read each (case, step) override from
+    ``aligned_dir/labels_dataset835_step_XX/<casename>.nii.gz``. When
+    the file is missing -- e.g. nnUNet failed globe localisation at
+    that sparsity, so the canonical-align step refused to write -- the
+    loader returns ``None`` and ``run_sweep`` skips that row.
+    """
+    if layout.test_label_source != "nnunet_pred":
+        return None
+
+    def _loader(casename: str, step: int):
+        # step=1 is the dense baseline; under the deployment curve the
+        # "step_01" sparse patch is just Dataset835's dense canonical-
+        # aligned pred (same content as labels_dataset835/ for chk_*,
+        # and a fresh canonical_align of the atlas dense pred). We
+        # serve it via the same lookup so the latent-opt input grid
+        # follows the input modality consistently across steps.
+        p = step_input_patch_path(layout, casename, step)
+        if not p.exists():
+            return None
+        vol, spacing, offset = load_patch_as_label_tensor(p)
+        return vol, spacing, offset
+
+    return _loader
+
+
+def _meta_path_for_case(layout: RunLayout) -> Callable[[str], Path]:
+    """Resolver for native_mapping: pick the metadata tree per case.
+
+    For Option C nnunet_pred mode, chk_* cases live in
+    ``metadata_dataset835/`` (the sidecar of the Dataset835 dense
+    canonical-aligned target). atlas cases always read from the
+    existing ``metadata/`` tree.
+    """
+    def _resolve(casename: str) -> Path:
+        if (layout.test_label_source == "nnunet_pred"
+                and not casename.startswith("atlas_")):
+            return layout.metadata_dataset835_dir / f"{casename}.json"
+        return layout.metadata_dir / f"{casename}.json"
+    return _resolve
+
+
 def infer_test_set(params):
     """
     Run controlled reconstruction on the test set with a per-case adaptive
@@ -315,9 +423,12 @@ def infer_test_set(params):
           primary_eff_res_mm: 3.0
           summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
         slice_step_axis: 2
+        # Option C switches:
+        test_label_source: atlas_gt          # or nnunet_pred (deployment)
+        run_tag:           atlas_gt          # output subdir name
 
-    Output structure:
-        output_dir/
+    Output structure (rooted at ``output_basedir/<model>/runs/<run_tag>/``):
+        runs/<run_tag>/
         ├── test_results.csv          (per (case, step), with eff_res bucket)
         ├── average_shape_z0.nii.gz
         ├── step_01/
@@ -337,11 +448,16 @@ def infer_test_set(params):
         └── native_sweep_manifest.json   top-level index over per-step manifests
     """
 
+    layout = build_run_layout(params)
     model_dir = Path(params["model_basedir"]) / params["model_name"]
-    output_dir = Path(params["output_basedir"]) / params["model_name"]
+    output_dir = layout.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Device: {device}")
+    print(f"Run layout:")
+    print(f"  test_label_source = {layout.test_label_source}")
+    print(f"  run_tag           = {layout.run_tag}")
+    print(f"  output_dir        = {output_dir}")
 
     # ── Load model ────────────────────────────────────────────────
     which_ckpt = params.get("checkpoint", "best")
@@ -351,11 +467,24 @@ def infer_test_set(params):
     net.load_state_dict(model_state["net"], strict=True)
     net = net.to(device).eval()
 
-    # ── Load test data (dense) ────────────────────────────────────
-    labels_dir = Path(params["aligned_dir"]) / params.get("labels_dirname", "labels")
+    # ── Load test data (dense Dice targets) ───────────────────────
     casefiles_dir = Path(params["casefiles_dir"])
-    casenames = load_casenames(casefiles_dir / params["test_casefile"])
-    labels_dense, spacings_dense = load_orbital_volumes(labels_dir, casenames)
+    casenames_all = load_casenames(casefiles_dir / params["test_casefile"])
+    labels_dense, spacings_dense, casenames = _load_labels_dense_per_case(
+        layout, casenames_all,
+    )
+    if not casenames:
+        raise SystemExit(
+            f"No test cases have a resolvable dense target under "
+            f"test_label_source={layout.test_label_source}. Did you run "
+            f"the cnisp-prep-dataset835-gt phase?"
+        )
+
+    # ── Per-(case, step) latent-opt input override (deployment only) ─
+    label_obs_loader = _build_label_obs_loader(layout)
+    if label_obs_loader is not None:
+        print(f"  label_obs override : enabled (Dataset835 sparse patches in "
+              f"{layout.labels_dataset835_step_prefix.as_posix()}XX/)")
 
     # ── Sweep configuration (per-case adaptive) ───────────────────
     step_axis = params["slice_step_axis"]
@@ -389,6 +518,7 @@ def infer_test_set(params):
         device=device,
         sweep_cfg=sweep_cfg,
         output_dir=output_dir,
+        label_obs_override_loader=label_obs_loader,
     )
 
     # ── Export predictions per step subdirectory ──────────────────
@@ -497,7 +627,7 @@ def infer_test_set(params):
 
     # ── Map primary-eff_res predictions to native space ───────────
     primary_results = _pick_primary_per_case(all_results, primary_eff_res)
-    meta_dir = Path(params["aligned_dir"]) / "metadata"
+    meta_path_for = _meta_path_for_case(layout)
     if primary_results and params.get("export_predictions", True):
         native_dir = output_dir / "native_space"
         chosen = [(r["casename"], r["step_size"],
@@ -507,7 +637,10 @@ def infer_test_set(params):
               f"(target eff_res {primary_eff_res} mm):")
         for cn, st, er in chosen:
             print(f"  {cn}: step={st}, eff_res={er} mm")
-        native_paths = map_results_to_native(primary_results, meta_dir, native_dir)
+        native_paths = map_results_to_native(
+            primary_results, layout.metadata_dir, native_dir,
+            meta_path_for_casename=meta_path_for,
+        )
         print(f"Native-space predictions: {native_dir} ({len(native_paths)} volumes)")
 
     # ── Map EVERY sweep step to native space ──────────────────────
@@ -526,13 +659,15 @@ def infer_test_set(params):
             step_native_dir = output_dir / f"native_space_step_{step:02d}"
             suffix = f"_cnisp_step{step:02d}"
             step_paths = map_results_to_native(
-                by_step[step], meta_dir, step_native_dir, suffix=suffix,
+                by_step[step], layout.metadata_dir, step_native_dir,
+                suffix=suffix,
+                meta_path_for_casename=meta_path_for,
             )
 
             per_step_manifest: Dict[str, str] = {}
             seen = set()
             for r in by_step[step]:
-                mp = meta_dir / f"{r['casename']}.json"
+                mp = meta_path_for(r["casename"])
                 if not mp.exists():
                     continue
                 with open(mp) as f:
@@ -550,6 +685,8 @@ def infer_test_set(params):
             with open(step_native_dir / "manifest.json", "w") as f:
                 json.dump({
                     "model_name": params["model_name"],
+                    "run_tag": layout.run_tag,
+                    "test_label_source": layout.test_label_source,
                     "step_size": step,
                     "suffix": suffix,
                     "n_sources": len(per_step_manifest),
@@ -562,6 +699,8 @@ def infer_test_set(params):
         with open(output_dir / "native_sweep_manifest.json", "w") as f:
             json.dump({
                 "model_name": params["model_name"],
+                "run_tag": layout.run_tag,
+                "test_label_source": layout.test_label_source,
                 "primary_eff_res_mm": primary_eff_res,
                 "steps": sweep_manifest,
             }, f, indent=2)

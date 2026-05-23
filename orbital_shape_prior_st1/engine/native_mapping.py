@@ -18,7 +18,7 @@ import json
 import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -168,6 +168,7 @@ def map_results_to_native(
     meta_dir: Path,
     output_dir: Path,
     suffix: str = "_cnisp",
+    meta_path_for_casename: Optional[Callable[[str], Path]] = None,
 ) -> List[Path]:
     """
     Map inference results back to native space.
@@ -175,8 +176,17 @@ def map_results_to_native(
     Args:
         results: list of dicts from infer_single_case, each with
             "casename", "pred_class_map", etc.
-        meta_dir: directory containing alignment metadata JSONs
+        meta_dir: directory containing alignment metadata JSONs. Used
+            as ``meta_dir/<casename>.json`` unless
+            ``meta_path_for_casename`` is provided.
         output_dir: where to save _cnisp.nii.gz files
+        meta_path_for_casename: optional resolver
+            ``(casename) -> Path`` to support mixed metadata trees
+            (Option C nnunet_pred mode uses ``metadata/`` for atlas
+            cases and ``metadata_dataset835/`` for chk_* cases since
+            those two share a Dice frame with different canonical
+            crops). When None we fall back to ``meta_dir`` for every
+            case so the legacy single-tree call sites keep working.
 
     Returns:
         list of output file paths
@@ -184,13 +194,19 @@ def map_results_to_native(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _meta_path(casename: str) -> Path:
+        if meta_path_for_casename is not None:
+            return Path(meta_path_for_casename(casename))
+        return Path(meta_dir) / f"{casename}.json"
+
     # Group results by source_id
     source_groups = defaultdict(list)
     for r in results:
         casename = r["casename"]
-        meta_path = Path(meta_dir) / f"{casename}.json"
+        meta_path = _meta_path(casename)
         if not meta_path.exists():
-            print(f"  WARN: metadata not found for {casename}, skipping native mapping")
+            print(f"  WARN: metadata not found for {casename} at {meta_path}, "
+                  f"skipping native mapping")
             continue
         with open(meta_path) as f:
             meta = json.load(f)

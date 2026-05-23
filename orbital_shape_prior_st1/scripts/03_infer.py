@@ -48,6 +48,20 @@ def main():
                         help="Model directory name under model_basedir")
     parser.add_argument("--checkpoint", default="latest", choices=["best", "latest"],
                         help="Which checkpoint to load (default: best)")
+    parser.add_argument(
+        "--test-label-source", default=None,
+        choices=["atlas_gt", "nnunet_pred"],
+        help=("Override test_label_source from the test yaml. "
+              "atlas_gt = ceiling curve (sparsified canonical GT). "
+              "nnunet_pred = deployment curve (canonical-aligned Dataset835 "
+              "sparse-CT pred as latent-opt input; see test_default.yaml)."),
+    )
+    parser.add_argument(
+        "--run-tag", default=None,
+        help=("Override run_tag from the test yaml. Output lands at "
+              "output_basedir/<model_name>/runs/<run_tag>/. Defaults to "
+              "'atlas_gt' which preserves the ceiling-curve layout."),
+    )
     args = parser.parse_args()
 
     # Merge configs: paths → train (architecture) → test (overrides runtime settings)
@@ -60,6 +74,10 @@ def main():
 
     params["model_name"] = args.model_name
     params["checkpoint"] = args.checkpoint
+    if args.test_label_source is not None:
+        params["test_label_source"] = args.test_label_source
+    if args.run_tag is not None:
+        params["run_tag"] = args.run_tag
 
     # infer_test_set writes inference_results.pkl + sweep_results.pkl itself
     infer_test_set(params)

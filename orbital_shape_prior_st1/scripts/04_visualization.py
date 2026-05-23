@@ -49,6 +49,12 @@ def main():
     parser.add_argument("-d", "--recon_dir", default=None,
                         help="Direct path to the reconstruction folder; "
                              "overrides -p/-m.")
+    parser.add_argument(
+        "--run-tag", default=None,
+        help=("Visualize a specific run_tag under "
+              "output_basedir/<model_name>/runs/<run_tag>/. Defaults to "
+              "the value from the test yaml (atlas_gt if unset)."),
+    )
     args = parser.parse_args()
 
     params: dict = {}
@@ -68,6 +74,8 @@ def main():
         params["model_name"] = args.model_name
     else:
         parser.error("Provide either -d/--recon_dir or -m/--model_name.")
+    if args.run_tag is not None:
+        params["run_tag"] = args.run_tag
 
     visualize_results(params)
 

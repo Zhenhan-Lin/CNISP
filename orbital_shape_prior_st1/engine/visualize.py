@@ -414,6 +414,17 @@ def audit_native_sweep(recon_dir: Path) -> Optional[Dict]:
 # ── Top-level entry point ────────────────────────────────────────
 
 def resolve_recon_dir(params: dict) -> Path:
+    """Find the reconstruction directory for this visualization invocation.
+
+    Precedence:
+      1. Explicit ``params['recon_dir']`` wins (the legacy -d flag).
+      2. ``output_basedir/<model_name>/runs/<run_tag>/`` (Option C
+         layout). ``run_tag`` defaults to ``atlas_gt`` so a stock test
+         config keeps pointing at the ceiling-curve run.
+      3. Backwards compatibility: if the runs/<run_tag>/ directory does
+         not exist on disk (e.g. legacy runs that pre-date the run-tag
+         layout), fall back to ``output_basedir/<model_name>/``.
+    """
     if "recon_dir" in params:
         return Path(params["recon_dir"]).resolve()
     base = params.get("output_basedir")
@@ -423,7 +434,18 @@ def resolve_recon_dir(params: dict) -> Path:
             "visualize: provide either params['recon_dir'] or both "
             "params['output_basedir'] and params['model_name']."
         )
-    return Path(base) / name
+    run_tag = str(params.get("run_tag", "atlas_gt"))
+    tagged = Path(base) / name / "runs" / run_tag
+    if tagged.exists():
+        return tagged
+    legacy = Path(base) / name
+    if legacy.exists():
+        print(f"  [visualize] runs/{run_tag}/ not found; falling back to "
+              f"legacy layout at {legacy}")
+        return legacy
+    # Neither layout exists yet -- caller will get the "recon_dir does
+    # not exist" message they expect.
+    return tagged
 
 
 def visualize_results(params: dict) -> Dict:
@@ -492,7 +514,8 @@ def visualize_results(params: dict) -> Dict:
 
     print("\nDice trend / per-class / per-case figures are produced by the\n"
           "`compare` phase (nnunet/engine/build_method_summary.py); they\n"
-          "land at <recon_dir>/viz/CNISP_recon_summary.png and siblings.")
+          "land at <output_basedir>/<model>/viz/<run_tag>/"
+          "<method_label>_recon_summary.png and siblings.")
 
     return {
         "recon_dir": str(recon_dir),

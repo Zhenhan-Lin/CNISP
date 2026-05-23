@@ -14,7 +14,7 @@ import csv
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -120,6 +120,9 @@ def eval_case_at_resolution(
     params: dict,
     device: torch.device,
     use_thick_slices: bool = False,
+    label_obs_override: Optional[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ] = None,
 ) -> Dict:
     """
     Sparsify → optimize latent → predict dense → Dice vs GT.
@@ -134,11 +137,26 @@ def eval_case_at_resolution(
         step_axis: axis to sparsify
         params: config dict (latent_dim, lat_reg_lambda, etc.)
         device: torch device
+        label_obs_override: optional (label_obs, spacing_obs, offset_obs)
+            tuple to use **in place of** the internally-sparsified GT.
+            Used by the Option C deployment curve, where the latent-opt
+            input is a per-step canonical-aligned Dataset835 sparse-CT
+            prediction rather than a sparsified copy of the GT. The
+            override's patch-local mm frame is consumed for latent opt;
+            the dense prediction + Dice are still computed against
+            ``label_dense`` on the GT's voxel grid, so the latent z just
+            transfers between the two patch frames (any centroid jitter
+            between the input patch and the GT patch becomes part of the
+            Dice penalty -- that's the intended deployment signal).
     """
     t0 = time.time()
     offset_dense = spacing_dense / 2.0
 
-    if step_size <= 1:
+    if label_obs_override is not None:
+        # Deployment-mode latent-opt input: skip sparsen_volume entirely
+        # and consume the pre-built override patch as-is.
+        label_obs, spacing_obs, offset_obs = label_obs_override
+    elif step_size <= 1:
         label_obs = label_dense
         spacing_obs = spacing_dense
         offset_obs = offset_dense
@@ -428,6 +446,10 @@ def run_sweep(
     device: torch.device,
     sweep_cfg: Optional[dict] = None,
     output_dir: Optional[Path] = None,
+    label_obs_override_loader: Optional[
+        Callable[[str, int],
+                 Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]
+    ] = None,
 ) -> List[Dict]:
     """
     Per-case adaptive resolution sweep.
@@ -441,6 +463,18 @@ def run_sweep(
         target_eff_res_increment_mm  (default 1.0)
         max_num_steps_per_case       (default 5)
         max_eff_resolution_mm        (default 12.0)
+
+    label_obs_override_loader
+        Optional ``(casename, step) -> (label_obs, spacing_obs, offset_obs)``
+        callable. When provided AND returns a non-None tuple for a given
+        (case, step), ``eval_case_at_resolution`` uses that tuple as the
+        latent-opt input instead of sparsifying ``labels_dense[ci]``. The
+        ceiling-curve path (test_label_source=atlas_gt) sets this to
+        None; the deployment-curve path (test_label_source=nnunet_pred)
+        loads per-step canonical-aligned Dataset835 sparse-CT patches
+        through this hook. Returning ``None`` for a (case, step) causes
+        the sweep to skip that row entirely -- the deployment curve uses
+        this when nnUNet failed to localise a globe at high sparsity.
     """
     cfg = sweep_cfg or {}
     target_inc = float(cfg.get("target_eff_res_increment_mm", 1.0))
@@ -481,6 +515,17 @@ def run_sweep(
                 all_results.append(cached)
                 continue
 
+            override = None
+            if label_obs_override_loader is not None:
+                override = label_obs_override_loader(casename, step)
+                if override is None:
+                    # Deployment-mode signal: skip this (case, step) row
+                    # because we couldn't build a usable input patch
+                    # (e.g. nnUNet missed the globe under high sparsity).
+                    print(f"  step={step:>2d} (eff_res={eff_res:.2f}mm) ... "
+                          f"SKIP (no input patch available)")
+                    continue
+
             print(f"  step={step:>2d} (eff_res={eff_res:.2f}mm) ... ",
                   end="", flush=True)
 
@@ -491,6 +536,7 @@ def run_sweep(
                 step_size=step, step_axis=step_axis,
                 params=params, device=device,
                 use_thick_slices=params.get("use_thick_slices", False),
+                label_obs_override=override,
             )
             result["casename"] = casename
 

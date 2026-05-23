@@ -2,15 +2,26 @@
 
 This folder collects everything that touches the new nnUNet (`Dataset835_PHOTON_CT_QAfiltered`, trained with `nnUNetPlans_iso05` via [run_nnUNet_iso05.sh](../run_nnUNet_iso05.sh)) to compare it against CNISP ([orbital_shape_prior_st1](../orbital_shape_prior_st1)) on the same 62-eye / 31-source test set.
 
-It does **not** re-run CNISP — it reuses CNISP's existing per-step canonical-patch predictions (`output_basedir/<model>/step_XX/`) and `sweep_results.pkl`. New CNISP runs already emit `native_space_step_XX/` and `native_sweep_manifest.json` themselves (see `orbital_shape_prior_st1/engine/infer.py`); the per-step backfill script here only fires for inferences that finished before that change and is otherwise a no-op.
+It does **not** re-run CNISP — it reuses CNISP's per-step predictions under `output_basedir/<model>/runs/<run_tag>/`. New CNISP runs already emit `native_space_step_XX/` and `native_sweep_manifest.json` themselves (see `orbital_shape_prior_st1/engine/infer.py`); `nnunet/engine/build_cnisp_native_sweep.py` only fires for inferences that finished before that change and is otherwise a no-op.
+
+## Option C: two CNISP runs, one nnUNet sweep
+
+For every pipeline invocation CNISP produces **two runs** off the same model weights and the same 62-eye test set:
+
+| run_tag       | method label       | latent-opt input            | dense Dice target                                          | story                |
+| ------------- | ------------------ | --------------------------- | ---------------------------------------------------------- | -------------------- |
+| `atlas_gt`    | `CNISP-atlasGT`    | sparsified canonical GT      | canonical GT                                                | ceiling curve        |
+| `nnunet_pred` | `CNISP-nnUNetPred` | Dataset835 sparse-CT pred, canonical-aligned per step | atlas manual GT (atlas cases) + Dataset835 dense pred canonical-aligned (chk_* cases) | deployment curve     |
+
+`nnUNet-sparse` (image-conditioned) is shared across both stories. Its chk_* Dice target follows the CNISP run it's being compared against (legacy `chk_pseudo` GT for `atlas_gt`; Dataset835 dense pred for `nnunet_pred`) so the head-to-head Dice is always against the same target.
+
+The CNISP side is always GT-conditioned (latent optimization against sparse observations); nnUNet is image-conditioned. The comparison stays asymmetric — surfaced in each `paired_summary__<run_tag>.txt` header.
 
 ## Phases
 
 - **Phase 1 (this folder)** — native-space, per-source full-head Dice (OD + OS merged on the CNISP side). GT only exists in native space, so this is the only meaningful direct Dice comparison.
 - **Phase 1.5 (this folder)** — SMORE the 31 source CTs into `/fs5/p_masi/linz18/data/smore_resolved_images/`. Stand-alone; prep for Phase 2.
 - **Phase 2 (deferred)** — re-predict on the SMORE'd inputs, NN-resample GT to the SMORE grid, and emit an iso-grid paired table.
-
-The CNISP side is GT-conditioned (sparse-slice latent optimization, see [test_default.yaml](../orbital_shape_prior_st1/configs/test_default.yaml)); nnUNet is image-conditioned. The comparison is informative but not symmetric — surfaced in the report header.
 
 ## Layout
 
@@ -27,12 +38,17 @@ nnunet/
 │   ├── sparsify_inputs.py          #   Phase 1b: sparsified CTs (1:1 with CNISP sweep)
 │   └── prepare_smore_inputs.py     #   Phase 1c: symlink SMORE'd CTs
 │
-├── engine/                         # post-inference artifact + visualization builders
-│   ├── upsample_sparse_preds.py    #   Phase 1b: NN-upsample preds to native grid
-│   ├── build_cnisp_native_sweep.py #   compare-side backfill: CNISP step_XX -> native_space_step_XX
-│   │                               #     (no-op when orbital_shape_prior_st1/engine/infer.py already wrote them)
-│   ├── build_smore_test_images.py  #   Phase 1.5: SMORE the 31 source CTs
-│   └── build_method_summary.py     #   per-method by-eff_res CSV + TXT + PNG (CNISP and nnUNet)
+├── engine/                                  # post-inference artifact + visualization builders
+│   ├── upsample_sparse_preds.py             #   Phase 1b: NN-upsample preds to native grid
+│   ├── build_cnisp_native_sweep.py          #   compare-side backfill (run_tag aware):
+│   │                                        #     CNISP step_XX -> runs/<run_tag>/native_space_step_XX
+│   │                                        #     (no-op when infer.py already wrote them)
+│   ├── build_smore_test_images.py           #   Phase 1.5: SMORE the 31 source CTs
+│   ├── build_dataset835_canonical_patches.py  # Option C: chk_* DENSE Dice-target patches
+│   │                                          #   (deployment-curve GT for chk_*)
+│   ├── build_dataset835_sparse_patches.py   #   Option C: per-step Dataset835 SPARSE patches
+│   │                                        #     (deployment-curve latent-opt INPUT)
+│   └── build_method_summary.py              #   per-method by-eff_res CSV + TXT + PNG
 │
 ├── run_predict_native.sh           # Phase 1:  nnUNetv2_predict on original CT (step=1 baseline)
 ├── run_predict_sparse_sweep.sh     # Phase 1b: nnUNetv2_predict per step
@@ -44,47 +60,49 @@ nnunet/
 ## Phase 1: native-space comparison
 
 ```bash
-# one shot
-bash nnunet/run_compare.sh
+# one shot (drives every phase, both runs):
+bash run_pipeline.sh
 
-# or step-by-step:
+# step-by-step (single run_tag at a time):
 python nnunet/data_prep/prepare_inputs.py        --config nnunet/configs.yaml
 bash   nnunet/run_predict_native.sh              # honours $CONFIG
-python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml   # no-op if infer.py already produced native_space_step_XX/
-python nnunet/compare_native.py                  --config nnunet/configs.yaml
+python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml --run-tag atlas_gt
+python nnunet/compare_native.py                  --config nnunet/configs.yaml --cnisp-run-tag atlas_gt
+# Repeat the last two lines with --run-tag nnunet_pred / --cnisp-run-tag nnunet_pred
+# for the deployment-curve comparison (requires Option C prep below).
 ```
 
 Inputs the scripts expect:
 
 - `configs.yaml::cnisp_paths_yaml` -> `orbital_shape_prior_st1/configs/paths.yaml` (`aligned_dir`, `casefiles_dir`, `output_basedir`).
-- CNISP must have already run inference: `output_basedir/<model_name>/sweep_results.pkl` and `step_XX/pred/*.nii.gz` exist.
-  - Recent inferences also have `native_space_step_XX/` + `native_sweep_manifest.json`; `compare_native.py` will consume them directly.
-  - Legacy inferences only have `step_XX/`; in that case `engine/build_cnisp_native_sweep.py` reconstructs `native_space_step_XX/` from `sweep_results.pkl`.
+- CNISP must have already inferred the requested run: `output_basedir/<model_name>/runs/<run_tag>/sweep_results.pkl` and `runs/<run_tag>/step_XX/pred/*.nii.gz` exist.
+  - Recent inferences also have `runs/<run_tag>/native_space_step_XX/` + `runs/<run_tag>/native_sweep_manifest.json`; `compare_native.py` consumes them directly.
+  - Legacy inferences only have `step_XX/`; `engine/build_cnisp_native_sweep.py --run-tag <T>` reconstructs `runs/<T>/native_space_step_XX/` from `sweep_results.pkl`.
 - CT image discovery is driven by `atlas_image_dir` and `pivot_csv`; missing CTs fail loudly with a per-source list.
 
-Outputs (under `configs.yaml::work_dir`):
+Outputs (under `configs.yaml::work_dir`, one set per `cnisp_runs_to_compare` entry):
 
 - `nnunet_input/<source_id>_0000.nii.gz` — symlink, channel-0 named for nnUNetv2.
 - `source_to_path.json` — for downstream traceability.
 - `nnunet_pred_native/<source_id>.nii.gz` — fold-0 prediction, native CT spacing (step=1 dense baseline).
-- `paired_per_source.csv` — long: `(source_id, gt_source, method, step_size, eff_res_mm, structure, dice)`. Each method now contributes one row per (source, step, structure).
-- `paired_summary.csv` — long aggregate: `(bucket, structure, mean_dice, std_dice, n_sources)` where `bucket` is `nnUNet (lo, hi]` or `CNISP (lo, hi]` per eff-res bucket from `summary_bucket_edges_mm`. nnUNet and CNISP appear side-by-side per bucket.
-- `paired_summary.txt` — pretty-printed table with the asymmetry / OOD / pseudo-GT caveats.
+- `paired_per_source__<run_tag>.csv` — long: `(source_id, gt_source, method, step_size, eff_res_mm, structure, dice)`. `method` is `nnUNet-sparse` plus the CNISP method label for this run (e.g. `CNISP-atlasGT` or `CNISP-nnUNetPred`).
+- `paired_summary__<run_tag>.csv` — long aggregate: `(bucket, structure, mean_dice, std_dice, n_sources)` where `bucket` is `nnUNet-sparse (lo, hi]` or `<cnisp_method_label> (lo, hi]` per eff-res bucket. The two methods appear side-by-side per bucket.
+- `paired_summary__<run_tag>.txt` — pretty-printed table with the asymmetry / OOD / chk_* GT-mode caveats.
 
-Outputs (CNISP side, under `cnisp_paths.output_basedir/<model_name>/`):
+Outputs (CNISP side, under `cnisp_paths.output_basedir/<model_name>/runs/<run_tag>/`):
 
 - `native_space_step_XX/<original_stem>_cnisp_stepXX.nii.gz` — full-head OD+OS merge per CNISP sweep step.
-- `native_space_step_XX/manifest.json` — `(source_id -> nifti path)` map.
-- `native_sweep_manifest.json` — summary across all steps.
+- `native_space_step_XX/manifest.json` — `(source_id -> nifti path)` map (also records `run_tag` + `test_label_source`).
+- `native_sweep_manifest.json` — summary across all steps (used by `compare_native.py` to decide which chk_* GT to use).
 
-The `chk_*` rows in `paired_per_source.csv` carry `gt_source=chk_pseudo`; filter to `gt_source=='atlas'` for the manual-GT-only view.
+For `paired_per_source__atlas_gt.csv`, `chk_*` rows carry `gt_source=chk_pseudo` (legacy QA-kept pseudo-GT). For `paired_per_source__nnunet_pred.csv`, `chk_*` rows carry `gt_source=chk_pseudo_dataset835` (Dataset835's dense pred). Filter on `gt_source=='atlas'` for the manual-GT-only view in either file.
 
 ### Per-method by-eff_res summary bundle
 
-`compare_native.py` finishes by running `engine/build_method_summary.py` once for each method. Same script, same `paired_per_source.csv` -> nnUNet and CNISP get a matched bundle:
+For each run_tag, `compare` calls `engine/build_method_summary.py` once per method. Same script, same `paired_per_source__<run_tag>.csv` -> the nnUNet and CNISP halves of that comparison get a matched bundle:
 
-- `${work_dir}/viz/nnUNet/nnUNet_per_source.csv | _summary_by_eff_res.csv | .txt | _recon_summary.png`
-- `${cnisp_output_basedir}/<model>/viz/CNISP_per_source.csv | _summary_by_eff_res.csv | .txt | _recon_summary.png`
+- `${work_dir}/viz/nnUNet-sparse__<run_tag>/nnUNet-sparse_*` (per-source CSV / summary CSV / TXT / PNG)
+- `${cnisp_output_basedir}/<model>/viz/<run_tag>/<cnisp_method_label>_*` (same four artifacts)
 
 Each `_recon_summary.png` is three stacked subplots:
 
@@ -94,9 +112,28 @@ Each `_recon_summary.png` is three stacked subplots:
 
 CNISP's old `recon_summary.png` from `cnisp-viz` plotted a separate "observed-only" line; that line is intentionally **omitted** here because `paired_per_source.csv` only carries dense Dice. Keeping both methods on the same single-curve layout makes side-by-side comparison honest.
 
+## Option C deployment-curve prep
+
+These two phases produce the canonical-aligned Dataset835 artifacts CNISP needs to render the deployment curve (`run_tag=nnunet_pred`). Both are stamped into the `cnisp-prep-dataset835-*` phases of `run_pipeline.sh`, but you can also drive them by hand:
+
+```bash
+# chk_* DENSE Dice target + sidecar metadata
+python nnunet/engine/build_dataset835_canonical_patches.py --config nnunet/configs.yaml
+# per-step SPARSE latent-opt input (step_01 falls back to the dense pred above)
+python nnunet/engine/build_dataset835_sparse_patches.py    --config nnunet/configs.yaml
+```
+
+Outputs (under `${cnisp_paths.aligned_dir}`):
+
+- `labels_dataset835/<casename>.nii.gz` — canonical-aligned Dataset835 dense pred (chk_* dense Dice target in deployment mode; atlas patches written too for symmetric step-01 input).
+- `metadata_dataset835/<casename>.json` — sidecar so `native_mapping.invert_alignment_single_eye` can place chk_* CNISP predictions back into the source's native head volume.
+- `labels_dataset835_step_{XX}/<casename>.nii.gz` — Dataset835 sparse-CT pred canonical-aligned per step. CNISP's latent-opt input in deployment mode.
+
+When nnUNet at high sparsity drops a globe entirely the canonical-align step refuses to write that eye / step; `engine/infer.py` logs and skips the missing rows so the deployment curve surfaces nnUNet's failure rather than papering over it.
+
 ## Phase 1b: native-space sparse-CT sweep
 
-Mirrors CNISP's per-step inference on the nnUNet side: feed nnUNet a sparsified copy of each source CT (drop every Nth axial slice along the through-plane axis), then NN-upsample the prediction back to the original native grid for Dice. The `(source_id, step_size)` set is read directly from `${cnisp_output_basedir}/<model>/sweep_results.pkl`, so the two methods cannot drift out of sync across runs.
+Mirrors CNISP's per-step inference on the nnUNet side: feed nnUNet a sparsified copy of each source CT (drop every Nth axial slice along the through-plane axis), then NN-upsample the prediction back to the original native grid for Dice. The `(source_id, step_size)` set is read directly from `${cnisp_output_basedir}/<model>/runs/atlas_gt/sweep_results.pkl` (override with `--cnisp-sweep-source <run_tag>` on `sparsify_inputs.py` if you'd rather track a different CNISP run's sweep). Both Option C stories then re-use the same nnUNet sparse-CT predictions, so the two methods cannot drift out of sync across runs.
 
 > **What "sparsified" means here:** the CT is **subsampled along the through-plane axis** — every Nth slice is kept verbatim and the rest are dropped, then the NIfTI affine's through-plane column is multiplied by `step_size` so the header reports the new (coarser) spacing. **No interpolation, no super-resolution.** This is distinct from Phase 1c, which feeds nnUNet SMORE-super-resolved CTs (every voxel is a neural-network output). CNISP's sweep, in contrast, sparsifies the *GT label* (not the CT image), so on a given `(source, step)` row the two methods consume strictly aligned "information content" (same kept-slice indices, same eff_res) from two different modalities.
 
@@ -183,11 +220,21 @@ In `nnunet/configs.yaml`:
 | --- | --- |
 | `dataset_id`, `plan`, `configuration`, `trainer`, `folds`, `gpu_id` | nnUNetv2 predict identity, must match training |
 | `cnisp_paths_yaml`, `cnisp_model_name` | which CNISP run to compare against |
+| `cnisp_runs_to_compare` | list of `{run_tag, method_label}` entries; `compare` renders one paired bundle per entry. Defaults to atlas_gt + nnunet_pred. |
+| `deployment_gt_dirname_for_chk` | chk_* GT directory under `${work_dir}` when a run uses `test_label_source=nnunet_pred`. Default `nnunet_pred_native`. |
 | `atlas_image_dir` | where atlas CT images live (sibling to atlas_label_dir from CNISP's paths.yaml) |
 | `pivot_csv`, `pivot_image_path_columns` | PHOTON pivot table for `chk_*` CT discovery |
 | `work_dir` | Phase 1 / 1b / 1c working dir |
 | `smore_out_root`, `smore_suffix` | Phase 1.5 SMORE shared output (flat layout: `<smore_out_root>/<sid><smore_suffix>.nii.gz`) |
 | `sparse_eff_res_tolerance` | Phase 1b axis-detection tolerance (relative); default 0.05 |
 | `summary_bucket_edges_mm` | eff-res buckets, inherited from `test_default.yaml` so reports line up with CNISP's `test_results.csv` `eff_res_bucket` column |
+
+In `orbital_shape_prior_st1/configs/paths.yaml` (Option C staging dirs, default to safe names — only override if you renamed the subtrees):
+
+| key | meaning |
+| --- | --- |
+| `labels_dataset835_dirname` | chk_* DENSE Dice-target patches (default `labels_dataset835`) |
+| `metadata_dataset835_dirname` | sidecar metadata for the above (default `metadata_dataset835`) |
+| `labels_dataset835_step_prefix` | per-step SPARSE latent-opt input prefix (default `labels_dataset835_step_`; subdirs become `labels_dataset835_step_03`, ...) |
 
 CLI flags override the corresponding yaml fields when set.
