@@ -6,9 +6,55 @@ This module is used both in training (to create sparse input from dense GT)
 and in the diagnostic pipeline (to create controlled test conditions).
 """
 
-from typing import Tuple
+from typing import List, Sequence, Tuple, Union
 
 import torch
+
+
+SliceStepAxisCfg = Union[int, str]
+
+
+def resolve_slice_step_axes(
+    slice_step_axis_cfg: SliceStepAxisCfg,
+    spacings_dense: Sequence[torch.Tensor],
+) -> List[int]:
+    """Resolve the per-case sparsification axis from a config value.
+
+    Modes
+    -----
+    * ``int`` (0/1/2): uniform RAS axis across all cases. Equivalent to
+      the legacy behaviour where every patch was sparsified along the
+      same canonical axis (default 2 = S-I in RAS).
+    * ``"auto"``: per-case axis. For each case, pick
+      ``argmax(patch_spacing)`` — i.e. the patch voxel axis with the
+      largest spacing, which after canonical alignment is the patch's
+      *natural through-plane axis* (the direction that was already thick
+      in the original acquisition). This makes the simulated thick-slice
+      sparsification match each scan's actual acquisition geometry: an
+      axial-acquired scan keeps degrading S-I (patch axis 2), a sagittal
+      scan degrades L-R (patch axis 0), and so on. Use this mode when
+      you want simulation realism per case; use the int mode when you
+      want a single fixed direction across the whole cohort.
+
+    Returns
+    -------
+    A list of ints (one per case), length == ``len(spacings_dense)``.
+    """
+    n = len(spacings_dense)
+    if isinstance(slice_step_axis_cfg, str):
+        mode = slice_step_axis_cfg.lower()
+        if mode != "auto":
+            raise ValueError(
+                f"slice_step_axis must be an int (0/1/2) or 'auto'; got "
+                f"{slice_step_axis_cfg!r}."
+            )
+        return [int(torch.argmax(s[:3])) for s in spacings_dense]
+    axis = int(slice_step_axis_cfg)
+    if axis not in (0, 1, 2):
+        raise ValueError(
+            f"slice_step_axis int must be 0/1/2; got {slice_step_axis_cfg!r}."
+        )
+    return [axis] * n
 
 
 def sparsen_volume(

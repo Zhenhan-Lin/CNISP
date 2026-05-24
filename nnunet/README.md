@@ -157,7 +157,10 @@ Outputs (under `${work_dir}`):
 Caveats:
 
 - The nnUNet plan was trained at iso 0.5 mm, so large `step_size` rows (z-spacing up to ~11 mm) are intentionally out-of-distribution. That OOD curve is the whole point of this phase.
-- `data_prep/sparsify_inputs.py` asserts `spacing[argmax_axis] * step ≈ CNISP eff_res` within `sparse_eff_res_tolerance` (default 5 %). If a CT was acquired sagittally / coronally and its largest-spacing voxel axis is not the through-plane axis, the script refuses to write rather than sparsify the wrong direction.
+- `data_prep/sparsify_inputs.py` picks the sparsification axis from the raw CT's affine (not from `argmax(zooms)`), so non-axial acquisitions are degraded along the same physical direction CNISP did. Two checks then gate every write:
+  1. **Axis selection + obliqueness check** (per source): for each source, the script reads CNISP's per-row `step_axis` field from `sweep_results.pkl` to know which RAS direction CNISP sparsified that source along (a single int for legacy `slice_step_axis: <int>` runs, a per-source value for `slice_step_axis: auto` runs). It then picks the raw CT voxel axis whose physical direction best aligns with that RAS direction via `argmax(|affine[ras_axis, :3]|)`. For an axial CT under the default RAS axis 2 (S-I) this is the thick S-I axis; for a sagittal CT (under either `auto` mode or a legacy uniform S-I config) it's the thin in-plane axis pointing S-I (not the thick L-R one). If CNISP's sweep predates the per-row `step_axis` write-out, the fallback is the `cnisp_slice_step_axis` config knob (default 2). If the best alignment is below `sparse_axis_alignment_min` (default 0.95) the voxel grid is too oblique to RAS for any single-axis sparsification to be physically meaningful, and the source is dropped.
+  2. **Magnitude check** (per source × step): the script compares `zooms[step_axis] * step` against CNISP's `effective_resolution_mm`. Differences within `sparse_eff_res_tolerance` (default 5 %) are silently OK; differences within `sparse_eff_res_max_drift` (default 30 %) are warned about but still written (these typically come from CNISP's canonical patch living on a different grid than the raw CT — e.g. `chk_*` QA-kept old-nnUNet preds on a ~1.25 mm iso grid); differences above the drift cap are dropped.
+- The resulting `nnunet_input_sparse_manifest.json` lists only the surviving `(source, step)` pairs. Downstream phases (`run_predict_sparse_sweep.sh`, `upsample_sparse_preds.py`, `build_dataset835_sparse_patches.py`, `compare_native.py`) iterate over the manifest, so dropped sources/steps naturally yield fewer rows in the final paired CSVs without breaking anything else.
 
 ## Phase 1c: nnUNet on SMORE'd CTs
 
@@ -226,7 +229,10 @@ In `nnunet/configs.yaml`:
 | `pivot_csv`, `pivot_image_path_columns` | PHOTON pivot table for `chk_*` CT discovery |
 | `work_dir` | Phase 1 / 1b / 1c working dir |
 | `smore_out_root`, `smore_suffix` | Phase 1.5 SMORE shared output (flat layout: `<smore_out_root>/<sid><smore_suffix>.nii.gz`) |
-| `sparse_eff_res_tolerance` | Phase 1b axis-detection tolerance (relative); default 0.05 |
+| `cnisp_slice_step_axis` | Phase 1b fallback canonical RAS direction (default 2 = S-I); used only when `sweep_results.pkl` rows don't carry a per-row `step_axis` field. New CNISP runs (per-case or uniform) always emit this field, so the knob mainly matters for legacy sweeps. |
+| `sparse_axis_alignment_min` | Phase 1b minimum projection (default 0.95) of the chosen voxel axis onto the canonical RAS direction; sources with oblique grids below this are dropped |
+| `sparse_eff_res_tolerance` | Phase 1b soft eff-res tolerance (relative); default 0.05 — drifts below this are silent |
+| `sparse_eff_res_max_drift` | Phase 1b hard eff-res cap (relative); default 0.30 — drifts above this drop the (source, step) |
 | `summary_bucket_edges_mm` | eff-res buckets, inherited from `test_default.yaml` so reports line up with CNISP's `test_results.csv` `eff_res_bucket` column |
 
 In `orbital_shape_prior_st1/configs/paths.yaml` (Option C staging dirs, default to safe names — only override if you renamed the subtrees):

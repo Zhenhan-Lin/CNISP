@@ -487,7 +487,16 @@ def infer_test_set(params):
               f"{layout.labels_dataset835_step_prefix.as_posix()}XX/)")
 
     # ── Sweep configuration (per-case adaptive) ───────────────────
-    step_axis = params["slice_step_axis"]
+    # slice_step_axis can be an int (uniform RAS axis across all cases,
+    # legacy) or "auto" (per-case argmax(patch_spacing), so each scan is
+    # sparsified along its own natural through-plane direction). The
+    # resolver returns one int per case regardless; runs serialize that
+    # full list to disk so downstream code (compare_native, native
+    # mapping, nnUNet sparsify) can mirror the same per-case choices.
+    from data_prep.sparsify import resolve_slice_step_axes  # local import; avoid cycles
+    step_axes = resolve_slice_step_axes(
+        params["slice_step_axis"], spacings_dense,
+    )
     sweep_cfg = dict(params.get("adaptive_step_sweep", {}))
     primary_eff_res = float(sweep_cfg.get("primary_eff_res_mm", 3.0))
     bucket_edges = tuple(sweep_cfg.get(
@@ -496,6 +505,8 @@ def infer_test_set(params):
 
     print(f"\nTest cases: {len(casenames)}")
     print(f"Sweep cfg: {sweep_cfg}")
+    print(f"slice_step_axis: {params['slice_step_axis']!r} "
+          f"-> per-case axes: {step_axes}")
     print(f"Primary eff_res target: {primary_eff_res} mm")
 
     # ── Average shape ─────────────────────────────────────────────
@@ -513,7 +524,7 @@ def infer_test_set(params):
         casenames=casenames,
         labels_dense=labels_dense,
         spacings_dense=spacings_dense,
-        step_axis=step_axis,
+        step_axis=step_axes,
         params=params,
         device=device,
         sweep_cfg=sweep_cfg,
@@ -539,12 +550,13 @@ def infer_test_set(params):
             aff = np.diag([*sp, 1.0])
             casename = result["casename"]
 
+            case_axis = int(result["step_axis"])
             step_metadata[step].append({
                 "casename": casename,
                 "spacing_xyz_mm": [float(s) for s in sp],
                 "effective_through_plane_mm": result["effective_resolution_mm"],
                 "step_size": step,
-                "step_axis": step_axis,
+                "step_axis": case_axis,
                 "n_observed_slices": result["n_observed_slices"],
                 "n_total_slices": result["n_total_slices"],
                 "dice_dense_mean": round(result["dice"]["mean"], 4),
@@ -567,7 +579,7 @@ def infer_test_set(params):
                 result["pred_class_map"],
                 slice_step_size=step,
                 slice_start_id=0,
-                slice_axis=step_axis,
+                slice_axis=case_axis,
             )
             nib.save(
                 nib.Nifti1Image(obs_vs_recon.astype(np.uint8), aff),
@@ -602,10 +614,16 @@ def infer_test_set(params):
         for step, cases_meta in step_metadata.items():
             step_dir = output_dir / f"step_{step:02d}"
             meta_path = step_dir / "metadata.json"
+            # step_axis may differ per case under slice_step_axis: auto;
+            # surface the full mapping here as well as the top-level value
+            # (set only if all cases agree) for legacy readers.
+            unique_axes = sorted({int(c["step_axis"]) for c in cases_meta})
             with open(meta_path, "w") as f:
                 json.dump({
                     "step_size": step,
-                    "step_axis": step_axis,
+                    "step_axis": (unique_axes[0]
+                                  if len(unique_axes) == 1 else None),
+                    "step_axes_unique": unique_axes,
                     "n_cases": len(cases_meta),
                     "cases": cases_meta,
                 }, f, indent=2)
@@ -702,6 +720,13 @@ def infer_test_set(params):
                 "run_tag": layout.run_tag,
                 "test_label_source": layout.test_label_source,
                 "primary_eff_res_mm": primary_eff_res,
+                # Recorded so downstream (nnUNet sparsify, native mapping)
+                # can mirror per-case axes; sweep_results.pkl rows hold
+                # the authoritative per-(case, step) value.
+                "slice_step_axis_cfg": params["slice_step_axis"],
+                "slice_step_axes_per_case": {
+                    cn: int(ax) for cn, ax in zip(casenames, step_axes)
+                },
                 "steps": sweep_manifest,
             }, f, indent=2)
 

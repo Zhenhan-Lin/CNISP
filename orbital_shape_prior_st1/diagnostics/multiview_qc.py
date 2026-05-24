@@ -124,7 +124,10 @@ def _compute_multiview_accuracy(net, dataset, latents, device, num_classes,
         accuracy                = correct[mask].mean()
     """
     net.eval()
-    axis = dataset.slice_step_axis
+    # Per-case axes (length == number of scans loaded); under legacy
+    # ``slice_step_axis: <int>`` every entry is the same, under ``auto``
+    # they vary per scan.
+    axes = dataset.slice_step_axes
     step = dataset.slice_step_size
     results = []
 
@@ -132,6 +135,7 @@ def _compute_multiview_accuracy(net, dataset, latents, device, num_classes,
         gt = dataset.labels_dense[scan_id]
         spacing = dataset.spacings_dense[scan_id]
         target_shape = torch.tensor(gt.shape)
+        axis = int(axes[scan_id])
 
         offsets_used = []
         preds = []

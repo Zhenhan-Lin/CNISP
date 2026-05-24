@@ -14,7 +14,7 @@ import csv
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import nibabel as nib
 import numpy as np
@@ -342,6 +342,7 @@ def eval_case_at_resolution(
         "latent_missing": False,
         "spacing": spacing_dense.numpy(),
         "step_size": step_size,
+        "step_axis": int(step_axis),
         "effective_resolution_mm": float(spacing_dense[step_axis]) * step_size,
         "n_observed_slices": n_obs,
         "n_total_slices": n_total,
@@ -425,6 +426,7 @@ def _try_load_cached(output_dir, casename, step, step_axis,
         "latent_missing": latent_missing,
         "spacing": sp,
         "step_size": step,
+        "step_axis": int(step_axis),
         "effective_resolution_mm": float(sp[step_axis]) * step,
         "n_observed_slices": len(range(0, n_total, max(step, 1))),
         "n_total_slices": n_total,
@@ -441,7 +443,7 @@ def run_sweep(
     casenames: List[str],
     labels_dense: List[torch.Tensor],
     spacings_dense: List[torch.Tensor],
-    step_axis: int,
+    step_axis: Union[int, Sequence[int]],
     params: dict,
     device: torch.device,
     sweep_cfg: Optional[dict] = None,
@@ -455,9 +457,12 @@ def run_sweep(
     Per-case adaptive resolution sweep.
 
     Each case's step list is computed from its own through-plane spacing
-    via ``adaptive_steps_for_case`` (Rule A). All cases share the same
-    ``step_axis`` but may have different step lists, so on-disk
-    ``step_XX/`` directories may contain different subsets of cases.
+    via ``adaptive_steps_for_case`` (Rule A). Cases can either share a
+    single ``step_axis`` (legacy ``slice_step_axis: <int>`` mode) or use
+    per-case axes (``slice_step_axis: auto`` mode, where each scan is
+    sparsified along its own natural through-plane direction). On-disk
+    ``step_XX/`` directories may contain different subsets of cases
+    either way, since step lists are adaptive.
 
     sweep_cfg keys (all optional; defaults reproduce the original behaviour):
         target_eff_res_increment_mm  (default 1.0)
@@ -481,9 +486,23 @@ def run_sweep(
     max_count = int(cfg.get("max_num_steps_per_case", 5))
     max_eff = float(cfg.get("max_eff_resolution_mm", 12.0))
 
+    # Normalize step_axis to a per-case list. Legacy callers pass a
+    # single int; "auto" callers pass a sequence resolved from each
+    # case's patch spacing (see data_prep.sparsify.resolve_slice_step_axes).
+    if isinstance(step_axis, int):
+        step_axes: List[int] = [int(step_axis)] * len(casenames)
+    else:
+        step_axes = [int(a) for a in step_axis]
+        if len(step_axes) != len(casenames):
+            raise ValueError(
+                f"step_axis sequence length {len(step_axes)} does not match "
+                f"number of cases {len(casenames)}."
+            )
+
     all_results: List[Dict] = []
     for ci, casename in enumerate(casenames):
-        spacing_axis = float(spacings_dense[ci][step_axis])
+        case_axis = step_axes[ci]
+        spacing_axis = float(spacings_dense[ci][case_axis])
         steps = adaptive_steps_for_case(
             spacing_axis,
             target_eff_res_increment_mm=target_inc,
@@ -494,7 +513,7 @@ def run_sweep(
 
         print(f"\n{'='*60}")
         print(f"Case {ci+1}/{len(casenames)}: {casename}")
-        print(f"  spacing[axis={step_axis}] = {spacing_axis:.3f} mm")
+        print(f"  spacing[axis={case_axis}] = {spacing_axis:.3f} mm")
         print(f"  adaptive steps = {steps}")
         print(f"  eff_res (mm)   = [" + ", ".join(f"{e:.2f}" for e in eff_res_list) + "]")
         print(f"{'='*60}")
@@ -503,7 +522,7 @@ def run_sweep(
             eff_res = step * spacing_axis
 
             cached = _try_load_cached(
-                output_dir, casename, step, step_axis,
+                output_dir, casename, step, case_axis,
                 labels_dense[ci], spacings_dense[ci], net.num_classes,
             ) if output_dir else None
 
@@ -533,7 +552,7 @@ def run_sweep(
                 net=net, optimize_fn=optimize_fn,
                 label_dense=labels_dense[ci],
                 spacing_dense=spacings_dense[ci],
-                step_size=step, step_axis=step_axis,
+                step_size=step, step_axis=case_axis,
                 params=params, device=device,
                 use_thick_slices=params.get("use_thick_slices", False),
                 label_obs_override=override,

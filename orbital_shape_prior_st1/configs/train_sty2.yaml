@@ -22,7 +22,9 @@ test_fraction: 0.2
 # --- Sparsification (synthetic anisotropy for training) ---
 # Keep every Nth slice along this axis to simulate thick-slice acquisition
 slice_step_size: 4
-# 0=sagittal, 1=coronal, 2=axial (in RAS after canonical alignment)
+# slice_step_axis: int (0/1/2 = sag/cor/axial in RAS, uniform across cases)
+# or "auto" (per-case argmax(patch_spacing); each scan's own through-plane
+# direction). See test_default.yaml for full notes.
 slice_step_axis: 2
 use_thick_slices: false
 

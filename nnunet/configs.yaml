@@ -66,12 +66,35 @@ smore_out_root: /fs5/p_masi/linz18/data/smore_resolved_images
 smore_suffix: _smore
 
 # ── Sparse-CT sweep ───────────────────────────────────────────────
-# Tolerance (relative) for data_prep/sparsify_inputs.py's axis-detection check:
-# the new through-plane spacing after sparsifying along voxel argmax(spacing)
-# must match CNISP's effective_resolution_mm for the same (source, step)
-# within this fraction. Failures usually mean a non-axial acquisition
-# whose largest-spacing voxel axis isn't the through-plane axis.
+# data_prep/sparsify_inputs.py uses four knobs to gate every write.
+#
+# 1. cnisp_slice_step_axis (RAS world axis: 0=R-L, 1=A-P, 2=S-I):
+#    Fallback canonical direction CNISP sparsifies along on the
+#    canonical patch. New CNISP runs write a per-(case, step)
+#    ``step_axis`` field into sweep_results.pkl, so sparsify_inputs.py
+#    normally reads the RAS direction directly per source -- this
+#    matches even ``slice_step_axis: auto`` runs that vary the axis
+#    per case. This knob is consulted only when the sweep predates
+#    that field. Default 2 matches CNISP's legacy axial convention.
+# 2. sparse_axis_alignment_min (relative; 0..1):
+#    Minimum |affine[canonical_axis, :]| / col_norm projection required
+#    for the chosen voxel axis. Below this, the raw CT's grid is too
+#    oblique to RAS for any single-axis sparsification to be physically
+#    meaningful, and the source is dropped. Default 0.95.
+# 3. sparse_eff_res_tolerance (relative):
+#    Soft threshold. zooms[step_axis] * step within this fraction of
+#    CNISP's effective_resolution_mm is silently OK.
+# 4. sparse_eff_res_max_drift (relative):
+#    Hard upper bound. Drift in (tolerance, max_drift] is recorded as a
+#    warning but the (source, step) is still written -- this handles
+#    cases where CNISP's canonical patch was derived from a resampled
+#    label (e.g. chk_* QA-kept old-nnUNet preds on a ~1.25 mm iso grid)
+#    while the raw CT is at a different iso. Above max_drift, the
+#    (source, step) is dropped.
+cnisp_slice_step_axis: 2
+sparse_axis_alignment_min: 0.95
 sparse_eff_res_tolerance: 0.05
+sparse_eff_res_max_drift: 0.30
 
 # ── Aggregation ───────────────────────────────────────────────────
 # Inherit from test_default.yaml so the report buckets line up with

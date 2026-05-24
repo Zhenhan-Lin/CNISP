@@ -31,7 +31,7 @@ import numpy as np
 import torch
 from torch.utils import data
 
-from data_prep.sparsify import sparsen_volume
+from data_prep.sparsify import resolve_slice_step_axes, sparsen_volume
 
 SPRSF_SEED = 1
 SPLIT_SEED = 2
@@ -117,6 +117,8 @@ class OrbitalImplicitDataset(data.Dataset):
             raise ValueError("slice_step_size must be >= 2")
 
         self.slice_step_size = slice_step_size
+        # Keep the raw config (int or "auto") for diagnostics + downstream
+        # plumbing that wants to know the sweep MODE rather than per-case axes.
         self.slice_step_axis = slice_step_axis
         self.num_sparsify_offsets = num_sparsify_offsets
         self.phase_type = phase_type
@@ -124,6 +126,15 @@ class OrbitalImplicitDataset(data.Dataset):
         # ── Load dense volumes (kept for diagnostics + INF) ───────
         labels_dense, spacings_dense = load_orbital_volumes(labels_dir, casenames)
         offsets_dense = [s / 2.0 for s in spacings_dense]
+
+        # Per-case axes: int -> uniform list; "auto" -> argmax(patch_spacing).
+        # After canonical alignment the patch is in RAS with diagonal affine,
+        # so axis k IS RAS world axis k. "auto" therefore picks each scan's
+        # natural through-plane direction (S-I for axial, L-R for sagittal,
+        # A-P for coronal), mirroring its original acquisition geometry.
+        self.slice_step_axes: List[int] = resolve_slice_step_axes(
+            slice_step_axis, spacings_dense
+        )
 
         # image_size = max physical extent across all patches
         image_sizes = [
@@ -140,13 +151,13 @@ class OrbitalImplicitDataset(data.Dataset):
         if use_legacy_split:
             self._init_strategy_a(
                 labels_dense, spacings_dense, offsets_dense, casenames,
-                slice_step_size, slice_step_axis, use_thick_slices,
+                slice_step_size, self.slice_step_axes, use_thick_slices,
                 val_fraction, phase_type,
             )
         else:
             self._init_multi_offset(
                 labels_dense, spacings_dense, offsets_dense, casenames,
-                slice_step_size, slice_step_axis, use_thick_slices,
+                slice_step_size, self.slice_step_axes, use_thick_slices,
                 num_sparsify_offsets, phase_type,
             )
 
@@ -166,16 +177,23 @@ class OrbitalImplicitDataset(data.Dataset):
     # ── Strategy A init (backward compatible) ─────────────────────
 
     def _init_strategy_a(self, labels_dense, spacings_dense, offsets_dense,
-                         casenames, step_size, step_axis, thick_slices,
+                         casenames, step_size, step_axes, thick_slices,
                          val_fraction, phase_type):
-        """Original Amiranashvili logic: 1 offset per scan, val split from train."""
+        """Original Amiranashvili logic: 1 offset per scan, val split from train.
+
+        ``step_axes`` is a per-case list (length == len(casenames)); under
+        legacy ``slice_step_axis`` int configs all entries are the same.
+        """
         n = len(casenames)
 
         # Initial sparsification (random start per scan)
         gen = torch.Generator().manual_seed(SPRSF_SEED)
         starts = torch.randint(0, step_size, [n], generator=gen).tolist()
-        res = [sparsen_volume(v, s, o, step_axis, step_size, st, thick_slices)
-               for v, s, o, st in zip(labels_dense, spacings_dense, offsets_dense, starts)]
+        res = [sparsen_volume(v, s, o, ax, step_size, st, thick_slices)
+               for v, s, o, ax, st in zip(
+                   labels_dense, spacings_dense, offsets_dense,
+                   step_axes, starts,
+               )]
 
         self.labels_sparse = [r[0] for r in res]
         self.spacings_sparse = [r[1] for r in res]
@@ -191,7 +209,7 @@ class OrbitalImplicitDataset(data.Dataset):
             self.labels_sparse[cid], self.spacings_sparse[cid], \
                 self.offsets_sparse[cid] = sparsen_volume(
                 self.labels_sparse[cid], self.spacings_sparse[cid],
-                self.offsets_sparse[cid], step_axis, 2, sid, False)
+                self.offsets_sparse[cid], step_axes[cid], 2, sid, False)
 
         # Dense references (for INF / diagnostics)
         self.labels_dense = labels_dense
@@ -216,9 +234,13 @@ class OrbitalImplicitDataset(data.Dataset):
     # ── Strategy B init (multi-offset) ────────────────────────────
 
     def _init_multi_offset(self, labels_dense, spacings_dense, offsets_dense,
-                           casenames, step_size, step_axis, thick_slices,
+                           casenames, step_size, step_axes, thick_slices,
                            num_offsets, phase_type):
-        """Each scan × each offset → one training item with its own latent."""
+        """Each scan × each offset → one training item with its own latent.
+
+        ``step_axes`` is a per-case list; under legacy ``slice_step_axis``
+        int configs all entries are the same.
+        """
         self.labels_sparse = []
         self.spacings_sparse = []
         self.offsets_sparse = []
@@ -237,6 +259,7 @@ class OrbitalImplicitDataset(data.Dataset):
 
         for scan_idx in range(len(casenames)):
             v, s, o = labels_dense[scan_idx], spacings_dense[scan_idx], offsets_dense[scan_idx]
+            step_axis = step_axes[scan_idx]
             for off in offsets_to_use:
                 sv, ss, so = sparsen_volume(v, s, o, step_axis, step_size,
                                             off, thick_slices)
