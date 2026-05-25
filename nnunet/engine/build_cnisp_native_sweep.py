@@ -213,8 +213,12 @@ def main() -> int:
         # ── source_id <-> output path manifest ────────────────────
         # map_results_to_native names files by the source's
         # ``original_nifti_path`` stem. To make compare_native happy we
-        # rebuild the (source_id -> native path) map here.
-        path_by_stem = {_stem_of(p): p for p in native_paths}
+        # rebuild the (source_id -> native filename) map here. Only the
+        # **basename** is stored: consumers anchor it against the
+        # manifest's own directory so the artefact survives any data
+        # move (only the location of the manifest matters, not what
+        # absolute path was current at write time).
+        path_by_stem = {_stem_of(p): Path(p).name for p in native_paths}
         step_manifest: Dict[str, str] = {}
         seen_sources = set()
         for r in step_results:
@@ -234,12 +238,12 @@ def main() -> int:
             # ``map_results_to_native`` writes "{stem}{suffix}.nii.gz"
             output_stem = stem + suffix
             if output_stem in path_by_stem:
-                step_manifest[source_id] = str(path_by_stem[output_stem])
+                step_manifest[source_id] = path_by_stem[output_stem]
             else:
-                # Fall back to constructed path (catches odd suffix cases)
-                candidate = step_dir / f"{stem}{suffix}.nii.gz"
-                if candidate.exists():
-                    step_manifest[source_id] = str(candidate)
+                # Fall back to constructed name (catches odd suffix cases)
+                fname = f"{stem}{suffix}.nii.gz"
+                if (step_dir / fname).exists():
+                    step_manifest[source_id] = fname
                 else:
                     print(f"    [warn] no native file for {source_id} (stem={stem})")
 

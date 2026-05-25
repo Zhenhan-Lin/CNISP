@@ -151,6 +151,10 @@ def main() -> int:
     out_steps: Dict[str, Dict[str, str]] = {}
 
     # ── step_01: just symlink the dense baseline ────────────────
+    # ``sweep_manifest.json`` stores **basename only** in by_source_id;
+    # consumers anchor it against
+    # ``${work_dir}/prediction/sparse_step_{XX}_upsampled/`` so the
+    # manifest stays valid through any data move.
     if dense_pred_dir.exists():
         out_01 = pred_root / "sparse_step_01_upsampled"
         out_01.mkdir(parents=True, exist_ok=True)
@@ -165,7 +169,7 @@ def main() -> int:
             if dst.is_symlink() or dst.exists():
                 dst.unlink()
             dst.symlink_to(src_pred.resolve())
-            step_01_map[sid] = str(dst)
+            step_01_map[sid] = dst.name
         out_steps["01"] = step_01_map
         print(f"[upsample_sparse_preds] step_01: symlinked "
               f"{len(step_01_map)} dense baseline(s) into {out_01}")
@@ -194,7 +198,7 @@ def main() -> int:
             dst = up_dir / f"{sid}.nii.gz"
             if dst.exists():
                 n_skipped += 1
-                step_map[sid] = str(dst)
+                step_map[sid] = dst.name
                 continue
 
             ct_path = Path(src_to_path[sid]["ct_image_path"])
@@ -224,7 +228,7 @@ def main() -> int:
             out_img.set_sform(target_affine)
             nib.save(out_img, str(dst))
             n_written += 1
-            step_map[sid] = str(dst)
+            step_map[sid] = dst.name
 
         if step_map:
             out_steps[step_tag] = step_map

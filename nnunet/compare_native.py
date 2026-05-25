@@ -374,6 +374,12 @@ def main() -> int:
               f"{expected_labels}")
 
     # ── CNISP per-step manifest loader ────────────────────────────
+    # ``by_source_id`` is read as basename + anchored at the manifest's
+    # own directory: the manifest lives next to its NIfTI siblings, so
+    # whatever subtree it sits in IS the current file tree for that
+    # step. ``Path(raw).name`` makes this work for both fresh manifests
+    # (basename only) and legacy manifests (full absolute path baked in
+    # at write time) without any branching.
     step_dirs = sorted(output_base.glob("native_space_step_*"))
     cnisp_step_paths: Dict[int, Dict[str, Path]] = {}
     for d in step_dirs:
@@ -388,7 +394,8 @@ def main() -> int:
         with open(manifest) as f:
             m = json.load(f)
         cnisp_step_paths[step] = {
-            sid: Path(p) for sid, p in m.get("by_source_id", {}).items()
+            sid: d / Path(raw).name
+            for sid, raw in m.get("by_source_id", {}).items()
         }
     if not cnisp_step_paths:
         print(f"[compare_native] no CNISP step manifests under {output_base}.",
@@ -399,6 +406,11 @@ def main() -> int:
     print(f"[compare_native] CNISP steps available: {sorted(cnisp_step_paths)}")
 
     # ── nnUNet per-step manifest loader ───────────────────────────
+    # Same idea as the CNISP loader: basenames anchored against the
+    # canonical upsampled-output convention written by
+    # ``nnunet/engine/upsample_sparse_preds.py``:
+    #     ${work_dir}/prediction/sparse_step_{XX}_upsampled/{sid}.nii.gz
+    nn_upsampled_root = work_dir / "prediction"
     with open(nnunet_sweep_manifest) as f:
         nn_m = json.load(f)
     nnunet_step_paths: Dict[int, Dict[str, Path]] = {}
@@ -407,7 +419,11 @@ def main() -> int:
             step = int(step_tag)
         except ValueError:
             continue
-        nnunet_step_paths[step] = {sid: Path(p) for sid, p in sid_map.items()}
+        canonical_dir = nn_upsampled_root / f"sparse_step_{step:02d}_upsampled"
+        nnunet_step_paths[step] = {
+            sid: canonical_dir / Path(raw).name
+            for sid, raw in sid_map.items()
+        }
     if not nnunet_step_paths:
         print(f"[compare_native] nnUNet sweep manifest has no usable steps: "
               f"{nnunet_sweep_manifest}", file=sys.stderr)

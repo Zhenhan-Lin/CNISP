@@ -682,6 +682,11 @@ def infer_test_set(params):
                 meta_path_for_casename=meta_path_for,
             )
 
+            # ``by_source_id`` stores **basename only** -- consumers
+            # (compare_native.py, visualize.py audit) anchor it against
+            # the manifest's own directory. This makes the manifest
+            # location-independent: moving runs/<run_tag>/ around keeps
+            # the manifest valid, no path rewrite needed.
             per_step_manifest: Dict[str, str] = {}
             seen = set()
             for r in by_step[step]:
@@ -696,9 +701,7 @@ def infer_test_set(params):
                 seen.add(sid)
                 stem = (Path(m["original_nifti_path"]).name
                         .replace(".nii.gz", "").replace(".nii", ""))
-                per_step_manifest[sid] = str(
-                    step_native_dir / f"{stem}{suffix}.nii.gz"
-                )
+                per_step_manifest[sid] = f"{stem}{suffix}.nii.gz"
 
             with open(step_native_dir / "manifest.json", "w") as f:
                 json.dump({
