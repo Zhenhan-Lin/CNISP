@@ -131,6 +131,7 @@ def resolve_sources(
     pivot_image_path_columns: Optional[List[str]] = None,
     detect_atlas_offset: bool = True,
     require_ct: bool = False,
+    resolve_ct: bool = True,
 ) -> Tuple[List[SourceInfo], List[str]]:
     """Build a SourceInfo per unique source_id.
 
@@ -140,31 +141,41 @@ def resolve_sources(
         If True, peek into each atlas GT NIfTI to detect the -1000 offset.
         Disable when you only need the canonical scheme (e.g. for the
         SMORE prep script which doesn't touch labels).
+    resolve_ct
+        If True (default), look up ``ct_image_path`` for every source
+        (atlas via ``atlas_image_dir``, chk_* via ``pivot_csv``). Set
+        False on the GT-only paths (e.g. ``compare_native.py``) so the
+        function never opens ``pivot_csv`` -- a file that doesn't have
+        to exist outside the nnUNet input-staging hosts. CT lookup
+        failures are recorded in ``missing`` only when ``resolve_ct=True``.
     require_ct
-        If True, fail with a clear list of missing CTs when any cannot be
-        resolved. Set False for stages that don't yet need CT paths.
+        If True (and ``resolve_ct=True``), exclude a source from the
+        returned list when its CT could not be located. Ignored when
+        ``resolve_ct=False`` since CT was never attempted.
 
     Returns
     -------
     sources, missing
         ``sources``: list of SourceInfo (sorted by source_id).
         ``missing``: list of human-readable strings, one per source whose
-        CT could not be located. Empty when every source resolved.
+        CT could not be located. Always empty when ``resolve_ct=False``.
     """
     grouped = parse_test_cases(test_cases_path)
 
-    # Lazy CSV read for chk_* lookups.
     pivot_index: Dict[str, Dict[str, str]] = {}
     pivot_columns_available: List[str] = []
-    # Reported in chk_* error messages even when the CSV path is missing.
     subject_col = pivot_subject_column
-    if pivot_csv is not None and pivot_csv.exists():
+
+    # Lazy CSV read for chk_* CT lookups. Skip entirely on GT-only
+    # callers so we don't surface a spurious "pivot CSV missing" trail
+    # in their logs (the CSV path is an nnUNet-input-staging concern,
+    # not a Dice-time concern).
+    if resolve_ct and pivot_csv is not None and pivot_csv.exists():
         df = pd.read_csv(pivot_csv)
         pivot_columns_available = list(df.columns)
         # Resolve subject column with a small fallback chain so common
         # variants ("subject" vs "subject_label" vs "subj_id") all work
         # even when the config still has the default.
-        subject_col = pivot_subject_column
         if subject_col not in df.columns:
             fallbacks = [
                 "subject", "subject_label", "subj", "subj_id",
@@ -220,62 +231,63 @@ def resolve_sources(
 
         gt_source = "atlas" if source_id.startswith("atlas_") else "chk_pseudo"
 
-        # ── locate CT image ─────────────────────────────────────────
+        # ── locate CT image (only when the caller asked for it) ─────
         ct_image_path: Optional[Path] = None
-        if source_id.startswith("atlas_"):
-            if atlas_image_dir is None:
-                missing.append(f"{source_id}: atlas_image_dir not set in config")
-            else:
-                # atlas source_id = "atlas_" + stem; image dir holds {stem}.nii.gz
-                stem = source_id[len("atlas_"):].split("_")[0]
-                candidate = Path(atlas_image_dir) / f"{stem}.nii.gz"
-                if candidate.exists():
-                    ct_image_path = candidate
+        if resolve_ct:
+            if source_id.startswith("atlas_"):
+                if atlas_image_dir is None:
+                    missing.append(f"{source_id}: atlas_image_dir not set in config")
                 else:
-                    # Fall back: try the GT label's parent .. /atlas_images/
-                    sibling = gt_label_path.parent.parent / "atlas_images" / f"{stem}.nii.gz"
-                    if sibling.exists():
-                        ct_image_path = sibling
+                    # atlas source_id = "atlas_" + stem; image dir holds {stem}.nii.gz
+                    stem = source_id[len("atlas_"):].split("_")[0]
+                    candidate = Path(atlas_image_dir) / f"{stem}.nii.gz"
+                    if candidate.exists():
+                        ct_image_path = candidate
+                    else:
+                        # Fall back: try the GT label's parent .. /atlas_images/
+                        sibling = gt_label_path.parent.parent / "atlas_images" / f"{stem}.nii.gz"
+                        if sibling.exists():
+                            ct_image_path = sibling
+                        else:
+                            missing.append(
+                                f"{source_id}: atlas CT not found. Tried\n"
+                                f"  {candidate}\n  {sibling}"
+                            )
+            elif source_id.startswith("chk_"):
+                subj = source_id[len("chk_"):]
+                row = pivot_index.get(subj)
+                if row is None:
+                    missing.append(
+                        f"{source_id}: subject {subj!r} not found in pivot CSV "
+                        f"(searched column {subject_col!r}). "
+                        f"Available columns: {pivot_columns_available}"
+                    )
+                else:
+                    found = None
+                    tried = []
+                    for col in probe_cols:
+                        if col not in row:
+                            continue
+                        val = row[col]
+                        tried.append(f"{col}={val}")
+                        if val and Path(val).exists():
+                            found = Path(val)
+                            break
+                    if found is not None:
+                        ct_image_path = found
                     else:
                         missing.append(
-                            f"{source_id}: atlas CT not found. Tried\n"
-                            f"  {candidate}\n  {sibling}"
+                            f"{source_id}: no readable CT in pivot row. "
+                            f"Probed: {tried or probe_cols}"
                         )
-        elif source_id.startswith("chk_"):
-            subj = source_id[len("chk_"):]
-            row = pivot_index.get(subj)
-            if row is None:
-                missing.append(
-                    f"{source_id}: subject {subj!r} not found in pivot CSV "
-                    f"(searched column {subject_col!r}). "
-                    f"Available columns: {pivot_columns_available}"
-                )
             else:
-                found = None
-                tried = []
-                for col in probe_cols:
-                    if col not in row:
-                        continue
-                    val = row[col]
-                    tried.append(f"{col}={val}")
-                    if val and Path(val).exists():
-                        found = Path(val)
-                        break
-                if found is not None:
-                    ct_image_path = found
-                else:
-                    missing.append(
-                        f"{source_id}: no readable CT in pivot row. "
-                        f"Probed: {tried or probe_cols}"
-                    )
-        else:
-            missing.append(
-                f"{source_id}: unknown source prefix (expected atlas_ or chk_)"
-            )
+                missing.append(
+                    f"{source_id}: unknown source prefix (expected atlas_ or chk_)"
+                )
 
-        if require_ct and ct_image_path is None:
-            # missing already recorded above
-            continue
+            if require_ct and ct_image_path is None:
+                # missing already recorded above
+                continue
 
         out.append(
             SourceInfo(

@@ -56,7 +56,10 @@ _CNISP_SRC = _REPO_ROOT / "orbital_shape_prior_st1"
 if str(_CNISP_SRC) not in sys.path:
     sys.path.insert(0, str(_CNISP_SRC))
 
-from data_prep.canonical_align import align_single_case  # noqa: E402
+from data_prep.canonical_align import (  # noqa: E402
+    align_single_case,
+    infer_patch_size_mm,
+)
 
 
 def _load_yaml(p: Path) -> Dict:
@@ -79,13 +82,50 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="Re-write patches even if both label + metadata "
                          "already exist on disk.")
-    ap.add_argument("--patch-size", type=float, default=64.0)
+    ap.add_argument(
+        "--patch-size",
+        type=float,
+        default=None,
+        help="Physical extent (mm) of the canonical-aligned cubic patch. "
+             "Defaults to the value recorded in the existing CNISP training "
+             "metadata under aligned_dir/metadata/ so this script can't drift "
+             "away from the value used by orbital_shape_prior_st1/scripts/"
+             "run_01_prepare.sh. Override only when you intentionally want a "
+             "different physical extent than the trained model expects.",
+    )
     args = ap.parse_args()
 
     cfg = _load_yaml(Path(args.config))
     cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
     work_dir = Path(cfg["work_dir"])
     aligned_dir = Path(cnisp_paths["aligned_dir"])
+
+    # Pin the patch size to whatever the model was trained on, unless
+    # the caller explicitly overrides it. This is the entire reason
+    # this script previously produced misaligned masks: the older
+    # default of 64 mm mismatched the 80 mm patches used to train the
+    # AutoDecoder.
+    train_meta_dir = aligned_dir / "metadata"
+    if args.patch_size is None:
+        patch_size_mm = infer_patch_size_mm(train_meta_dir)
+        print(f"[dataset835_canonical] patch_size_mm auto-detected from "
+              f"{train_meta_dir} -> {patch_size_mm:.3f} mm")
+    else:
+        patch_size_mm = float(args.patch_size)
+        try:
+            detected = infer_patch_size_mm(train_meta_dir)
+        except (FileNotFoundError, ValueError):
+            detected = None
+        if detected is not None and abs(detected - patch_size_mm) > 1e-3:
+            print(
+                f"[dataset835_canonical] WARNING: --patch-size "
+                f"{patch_size_mm:.3f} mm differs from the training-time "
+                f"patch_size_mm={detected:.3f} mm recorded in "
+                f"{train_meta_dir}. The MLP's latent_coords were learned "
+                f"at {detected:.3f} mm/2 so these patches will be "
+                f"centred at a different physical offset.",
+                file=sys.stderr,
+            )
 
     layout = _aligned_dir_layout(cnisp_paths, aligned_dir)
     layout["labels_dir"].mkdir(parents=True, exist_ok=True)
@@ -144,7 +184,7 @@ def main() -> int:
                 seg_path=str(seg_path),
                 source_id=sid,
                 source="dataset835",
-                patch_size_mm=args.patch_size,
+                patch_size_mm=patch_size_mm,
             )
         except Exception as e:  # noqa: BLE001
             n_failed += 1

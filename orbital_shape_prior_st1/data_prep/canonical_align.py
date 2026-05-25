@@ -33,7 +33,7 @@ import glob
 import pandas as pd
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -49,6 +49,121 @@ LABELFUSION_MAP_CT = {1: "ON", 3: "Recti", 5: "Globe", 7: "Fat"}
 CANONICAL_LABELS = {"BG": 0, "ON": 1, "Globe": 2, "Fat": 3, "Recti": 4}
 CANONICAL_LABEL_NAMES = {v: k for k, v in CANONICAL_LABELS.items()}
 NUM_CLASSES = len(CANONICAL_LABELS)
+
+
+# ── Patch-size sanity helpers ─────────────────────────────────────
+# Every canonical-aligned crop on disk (training labels, atlas GT,
+# Dataset835 dense / sparse patches) MUST use the same patch_size_mm
+# as the MLP was trained on; otherwise the implicit MLP's internal
+# ``latent_coords = image_size / 2`` no longer lines up with the
+# centroid of the canonical crop and predictions get shifted by
+# (training_patch_size - new_patch_size) / 2 millimetres. The helper
+# below lets new build scripts read the value off an existing
+# metadata tree instead of hard-coding a default that can silently
+# drift away from the training-time setting.
+
+# Numerical tolerance for "all the training metadata agree on this
+# patch size". Anything beyond this and we surface the disagreement
+# so the caller fixes the inconsistency rather than picking one.
+_PATCH_SIZE_MM_TOL = 1e-3
+
+
+def infer_patch_size_mm(
+    meta_dir: Path,
+    *,
+    max_scan: Optional[int] = None,
+) -> float:
+    """Return the ``patch_size_mm`` recorded in an existing metadata tree.
+
+    Used by downstream scripts that need to canonical-align *new*
+    NIfTIs into the same physical frame as the model's training data
+    (e.g. ``nnunet/engine/build_dataset835_*_patches.py``). Reading
+    the value from disk avoids the silent-drift class of bug where a
+    new script ships a different ``--patch-size`` default than
+    ``orbital_shape_prior_st1/scripts/run_01_prepare.sh`` used.
+
+    Parameters
+    ----------
+    meta_dir : Path
+        Directory containing AlignmentMetadata JSONs (one per eye
+        casename). Typically ``aligned_dir/metadata/``.
+    max_scan : int, optional
+        Bound on the number of metadata files to inspect (every read
+        is a small JSON load, so the default ``None`` scans them all
+        and is still cheap on the 31-source CNISP setup). Pass a
+        small int (e.g. ``8``) on huge cohorts to short-circuit.
+
+    Returns
+    -------
+    float
+        The agreed ``patch_size_mm`` value.
+
+    Raises
+    ------
+    FileNotFoundError
+        ``meta_dir`` is absent or empty.
+    ValueError
+        Metadata files disagree on ``patch_size_mm`` (data tree was
+        produced by multiple runs with different settings -- the
+        caller must pick one explicitly via ``--patch-size`` rather
+        than have us guess).
+    """
+    meta_dir = Path(meta_dir)
+    if not meta_dir.is_dir():
+        raise FileNotFoundError(
+            f"infer_patch_size_mm: {meta_dir} does not exist. Run the "
+            f"CNISP canonical-align step (run_preprocessing.sh "
+            f"cnisp-align) first so the training metadata is on disk."
+        )
+
+    json_paths = sorted(meta_dir.glob("*.json"))
+    if not json_paths:
+        raise FileNotFoundError(
+            f"infer_patch_size_mm: no *.json metadata files under "
+            f"{meta_dir}. Run cnisp-align first to populate it."
+        )
+
+    if max_scan is not None and max_scan > 0:
+        json_paths = json_paths[:max_scan]
+
+    sizes: Dict[float, str] = {}
+    for p in json_paths:
+        try:
+            with open(p) as f:
+                meta = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise ValueError(
+                f"infer_patch_size_mm: failed to read {p}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
+        if "patch_size_mm" not in meta:
+            raise ValueError(
+                f"infer_patch_size_mm: {p} has no 'patch_size_mm' field. "
+                f"Was this metadata produced by an old align_single_case "
+                f"that predates the field? Re-run cnisp-align."
+            )
+        v = float(meta["patch_size_mm"])
+        sizes.setdefault(v, p.name)  # remember a representative file per value
+
+    if len(sizes) == 1:
+        return next(iter(sizes))
+
+    # More than one value present: only OK if they're within tolerance
+    # of each other (floating-point jitter in the JSON dump). Otherwise
+    # the tree is genuinely heterogeneous and we refuse to guess.
+    values = sorted(sizes)
+    if values[-1] - values[0] <= _PATCH_SIZE_MM_TOL:
+        return float(np.mean(values))
+
+    sample = ", ".join(
+        f"{sz:.3f} mm (e.g. {sizes[sz]})" for sz in values
+    )
+    raise ValueError(
+        f"infer_patch_size_mm: {meta_dir} contains metadata with "
+        f"disagreeing patch_size_mm values: {sample}. Pick one "
+        f"explicitly via --patch-size and re-run, or clean up the "
+        f"stale metadata."
+    )
 
 
 @dataclass

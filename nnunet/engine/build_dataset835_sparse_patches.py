@@ -59,7 +59,10 @@ _CNISP_SRC = _REPO_ROOT / "orbital_shape_prior_st1"
 if str(_CNISP_SRC) not in sys.path:
     sys.path.insert(0, str(_CNISP_SRC))
 
-from data_prep.canonical_align import align_single_case  # noqa: E402
+from data_prep.canonical_align import (  # noqa: E402
+    align_single_case,
+    infer_patch_size_mm,
+)
 
 
 def _load_yaml(p: Path) -> Dict:
@@ -108,7 +111,16 @@ def main() -> int:
     ap.add_argument("--config", default="nnunet/configs.yaml")
     ap.add_argument("--force", action="store_true",
                     help="Re-canonical-align even when patch already exists.")
-    ap.add_argument("--patch-size", type=float, default=64.0)
+    ap.add_argument(
+        "--patch-size",
+        type=float,
+        default=None,
+        help="Physical extent (mm) of the canonical-aligned cubic patch. "
+             "Defaults to the value recorded in the existing CNISP training "
+             "metadata under aligned_dir/metadata/ so the sparse latent-opt "
+             "input grid matches the size the MLP was trained on. Override "
+             "only when you intentionally want a different physical extent.",
+    )
     ap.add_argument("--skip-step-01", action="store_true",
                     help="Don't emit step_01/ patches (e.g. when the "
                          "dense baseline isn't part of this run).")
@@ -121,6 +133,33 @@ def main() -> int:
     prefix = cnisp_paths.get(
         "labels_dataset835_step_prefix", "labels_dataset835_step_"
     )
+
+    # Pin the patch size to whatever the model was trained on, unless
+    # the caller explicitly overrides it. Mismatching patch sizes
+    # between the latent-opt input and the trained MLP's coordinate
+    # frame would translate the predicted globe by
+    # (training_patch - this_patch) / 2 millimetres per axis.
+    train_meta_dir = aligned_dir / "metadata"
+    if args.patch_size is None:
+        patch_size_mm = infer_patch_size_mm(train_meta_dir)
+        print(f"[dataset835_sparse] patch_size_mm auto-detected from "
+              f"{train_meta_dir} -> {patch_size_mm:.3f} mm")
+    else:
+        patch_size_mm = float(args.patch_size)
+        try:
+            detected = infer_patch_size_mm(train_meta_dir)
+        except (FileNotFoundError, ValueError):
+            detected = None
+        if detected is not None and abs(detected - patch_size_mm) > 1e-3:
+            print(
+                f"[dataset835_sparse] WARNING: --patch-size "
+                f"{patch_size_mm:.3f} mm differs from the training-time "
+                f"patch_size_mm={detected:.3f} mm recorded in "
+                f"{train_meta_dir}. The MLP's latent_coords were learned "
+                f"at {detected:.3f} mm/2 so the sparse latent-opt input "
+                f"will sit at a different physical offset.",
+                file=sys.stderr,
+            )
 
     sparse_manifest_path = work_dir / "input" / "sparse_manifest.json"
     if not sparse_manifest_path.exists():
@@ -185,7 +224,7 @@ def main() -> int:
                 seg_path=str(seg_path),
                 source_id=sid,
                 source=f"dataset835_step_{step:02d}",
-                patch_size_mm=args.patch_size,
+                patch_size_mm=patch_size_mm,
             )
         except Exception as e:  # noqa: BLE001
             n_failed += 1

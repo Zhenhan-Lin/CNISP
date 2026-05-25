@@ -311,20 +311,21 @@ def main() -> int:
     print(f"[compare_native] output suffix            = {out_suffix}")
 
     # ── Resolve the 31 sources ────────────────────────────────────
+    # GT-only: Dice never reads the raw CT, so we explicitly opt out
+    # of CT-path resolution. This keeps compare_native independent of
+    # the nnUNet-side pivot CSV / atlas_image_dir config (those are
+    # only needed by the input-staging phases, not by Dice).
     sources, missing = resolve_sources(
         test_cases_path=test_cases,
         meta_dir=meta_dir,
-        atlas_image_dir=Path(cfg["atlas_image_dir"]),
-        pivot_csv=Path(cfg["pivot_csv"]),
-        pivot_subject_column=cfg.get("pivot_subject_column", "subject"),
-        pivot_image_path_columns=cfg.get("pivot_image_path_columns"),
         detect_atlas_offset=True,
-        require_ct=False,            # comparison doesn't strictly need CT
+        resolve_ct=False,
     )
     if missing:
-        # Non-fatal here; just print.
+        # Any entries here come from metadata-scheme problems, not CT
+        # lookup (resolve_ct=False suppressed those). Still non-fatal.
         print(f"[compare_native] note: {len(missing)} source(s) had "
-              f"CT-resolution problems; comparison itself uses GT only.",
+              f"metadata problems; comparison itself uses GT only.",
               file=sys.stderr)
         for m in missing[:5]:
             print(f"  - {m}", file=sys.stderr)

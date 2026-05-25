@@ -67,7 +67,12 @@
 #                         ${aligned_dir}/metadata_dataset835/. Atlas sources
 #                         are aligned too (no-op for Dice but used as the
 #                         step_01 latent-opt input in deployment mode).
-#                         Requires: nnunet-predict.
+#                         Patch size is auto-pinned to the training-time
+#                         ``patch_size_mm`` recorded in
+#                         ${aligned_dir}/metadata/*.json so it can never
+#                         drift away from what the model was trained on.
+#                         Requires: nnunet-predict + cnisp-align (so the
+#                         training metadata exists).
 #                         (nnunet/engine/build_dataset835_canonical_patches.py)
 #
 #   cnisp-prep-dataset835-sparse
@@ -79,7 +84,11 @@
 #                         rows -- e.g. where nnUNet dropped a globe at
 #                         high sparsity -- are silently absent on disk;
 #                         engine/infer.py logs and skips them at run-time.
-#                         Requires: nnunet-predict + nnunet-predict-sweep.
+#                         Patch size is auto-pinned to the same value as
+#                         cnisp-prep-dataset835-gt (training-time
+#                         ``patch_size_mm``).
+#                         Requires: nnunet-predict + nnunet-predict-sweep
+#                         + cnisp-align.
 #                         (nnunet/engine/build_dataset835_sparse_patches.py)
 #
 #   cnisp-infer-nnunet-pred
@@ -321,6 +330,35 @@ META835_DIRNAME="${META835_DIRNAME:-metadata_dataset835}"
 SPARSE835_PREFIX="$(read_yaml_field "$CNISP_PATHS_YAML" "labels_dataset835_step_prefix")"
 SPARSE835_PREFIX="${SPARSE835_PREFIX:-labels_dataset835_step_}"
 
+# Resolve the patch_size_mm that the model was trained on so we can
+# echo it in the run banner and so the two `cnisp-prep-dataset835-*`
+# phases inherit the *same* physical extent as the original CNISP
+# training crops. This closes the silent-drift hole that previously
+# let build_dataset835_*_patches.py default to 64 mm even when
+# run_01_prepare.sh used 80 mm -- a mismatch that translated the
+# nnunet_pred predictions by (80-64)/2 = 8 mm per axis. We treat
+# absence of training metadata as an early-fail (`unset`) for the
+# dataset835 phases; other phases don't need it.
+TRAINING_META_DIR="$CNISP_ALIGNED_DIR/metadata"
+CNISP_PATCH_SIZE_MM="$(
+    python3 - "$TRAINING_META_DIR" <<'PY' 2>/dev/null || true
+import json, sys
+from pathlib import Path
+meta_dir = Path(sys.argv[1])
+if not meta_dir.is_dir():
+    sys.exit(0)
+sizes = set()
+for p in sorted(meta_dir.glob("*.json")):
+    try:
+        v = float(json.load(open(p)).get("patch_size_mm"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        continue
+    sizes.add(round(v, 3))
+if len(sizes) == 1:
+    print(f"{next(iter(sizes)):.3f}")
+PY
+)"
+
 # Snapshot the (run_tag, method_label) list once so every phase uses
 # the same order (cnisp-viz, compare, and run-summary at the bottom).
 CNISP_RUNS_RAW="$(read_cnisp_runs_to_compare "$CONFIG")"
@@ -346,6 +384,11 @@ echo "  cnisp_model_name:    $CNISP_MODEL_NAME"
 echo "  cnisp_model_dir:     $CNISP_MODEL_BASEDIR/$CNISP_MODEL_NAME"
 echo "  cnisp_output_dir:    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME"
 echo "  cnisp_aligned_dir:   $CNISP_ALIGNED_DIR"
+if [[ -n "$CNISP_PATCH_SIZE_MM" ]]; then
+    echo "  cnisp_patch_size_mm: $CNISP_PATCH_SIZE_MM (from $TRAINING_META_DIR)"
+else
+    echo "  cnisp_patch_size_mm: <unresolved> (no aligned/metadata/ yet)"
+fi
 echo "  nnunet work_dir:     $WORK_DIR"
 echo "  cnisp runs:"
 for i in "${!CNISP_RUN_TAGS[@]}"; do
@@ -477,6 +520,23 @@ phase_cnisp_infer() {
     _run_cnisp_infer_for "atlas_gt" "atlas_gt"
 }
 
+_require_training_patch_size() {
+    # Both dataset835 build scripts inherit patch_size_mm from
+    # $TRAINING_META_DIR. If that directory is empty / missing we
+    # bail out here with a precise hint -- silently letting the
+    # python scripts default to some other value is exactly the bug
+    # the auto-detect path was added to prevent.
+    if [[ -z "$CNISP_PATCH_SIZE_MM" ]]; then
+        echo "[run_pipeline] $1: cannot resolve training-time patch_size_mm" >&2
+        echo "  searched: $TRAINING_META_DIR" >&2
+        echo "  Run 'bash run_preprocessing.sh cnisp-align' first so the" >&2
+        echo "  CNISP training metadata is on disk, then re-run this phase." >&2
+        exit 2
+    fi
+    echo "  using training patch_size_mm=$CNISP_PATCH_SIZE_MM "\
+         "(auto-detected from $TRAINING_META_DIR)"
+}
+
 phase_cnisp_prep_dataset835_gt() {
     echo ""
     echo "[phase] cnisp-prep-dataset835-gt ----------------------"
@@ -489,8 +549,14 @@ phase_cnisp_prep_dataset835_gt() {
         echo "  -> skipping (pass --force to rebuild)."
         return 0
     fi
+    _require_training_patch_size "cnisp-prep-dataset835-gt"
+    # The python script reads the same $TRAINING_META_DIR so passing
+    # --patch-size explicitly is redundant; we still forward it to
+    # surface a single value in the log and so a future user can
+    # override it from the shell without editing python.
     python3 "$REPO_ROOT/nnunet/engine/build_dataset835_canonical_patches.py" \
-            --config "$CONFIG"
+            --config "$CONFIG" \
+            --patch-size "$CNISP_PATCH_SIZE_MM"
 }
 
 phase_cnisp_prep_dataset835_sparse() {
@@ -505,8 +571,10 @@ phase_cnisp_prep_dataset835_sparse() {
         echo "  -> skipping (pass --force to rebuild)."
         return 0
     fi
+    _require_training_patch_size "cnisp-prep-dataset835-sparse"
     python3 "$REPO_ROOT/nnunet/engine/build_dataset835_sparse_patches.py" \
-            --config "$CONFIG"
+            --config "$CONFIG" \
+            --patch-size "$CNISP_PATCH_SIZE_MM"
 }
 
 phase_cnisp_infer_nnunet_pred() {
