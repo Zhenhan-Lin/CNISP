@@ -4,9 +4,9 @@
 For each ``(source_id, step_size)`` that CNISP actually evaluated in
 ``sweep_results.pkl``, drop every Nth axial slice of that source's CT
 along its through-plane axis (the axis with the largest voxel spacing),
-write the result as ``{work_dir}/nnunet_input_step_{XX}/{sid}_0000.nii.gz``
+write the result as ``{work_dir}/input/sparse_step_{XX}/{sid}_0000.nii.gz``
 (nnUNetv2's channel-0 naming convention), and bookkeep everything in
-``{work_dir}/nnunet_input_sparse_manifest.json``.
+``{work_dir}/input/sparse_manifest.json``.
 
 step_size == 1 is intentionally skipped: that's the dense baseline and
 nnunet/run_predict_native.sh already produces it under
@@ -24,9 +24,9 @@ Inputs
 
 Outputs
 -------
-* ``${work_dir}/nnunet_input_step_{XX}/{sid}_0000.nii.gz`` (one per
+* ``${work_dir}/input/sparse_step_{XX}/{sid}_0000.nii.gz`` (one per
   source, per non-trivial step)
-* ``${work_dir}/nnunet_input_sparse_manifest.json``
+* ``${work_dir}/input/sparse_manifest.json``
 
 Safety
 ------
@@ -239,6 +239,8 @@ def main() -> int:
     cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     work_dir = Path(cfg["work_dir"])
+    input_root = work_dir / "input"
+    input_root.mkdir(parents=True, exist_ok=True)
     cnisp_run_base = (
         Path(cnisp_paths["output_basedir"])
         / cfg["cnisp_model_name"]
@@ -366,7 +368,7 @@ def main() -> int:
         base_spacing_axis = float(zooms[step_axis])
 
         for step in steps:
-            step_dir = work_dir / f"nnunet_input_step_{step:02d}"
+            step_dir = input_root / f"sparse_step_{step:02d}"
             step_dir.mkdir(parents=True, exist_ok=True)
             dst = step_dir / f"{sid}_0000.nii.gz"
 
@@ -456,7 +458,7 @@ def main() -> int:
     # Convert defaultdicts back to plain dict for JSON.
     out_manifest["by_step"] = dict(out_manifest["by_step"])
 
-    manifest_path = work_dir / "nnunet_input_sparse_manifest.json"
+    manifest_path = input_root / "sparse_manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(out_manifest, f, indent=2)
 

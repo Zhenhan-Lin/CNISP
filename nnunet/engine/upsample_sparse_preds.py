@@ -2,7 +2,7 @@
 """NN-upsample nnUNet sparse-CT predictions back to the native CT grid.
 
 For each ``(source_id, step)`` in
-``${work_dir}/nnunet_input_sparse_manifest.json`` (written by
+``${work_dir}/input/sparse_manifest.json`` (written by
 ``data_prep/sparsify_inputs.py``):
 
 1. Read the sparse prediction from
@@ -127,7 +127,7 @@ def main() -> int:
     cfg = _load_yaml(Path(args.config))
     work_dir = Path(cfg["work_dir"])
 
-    sparse_manifest = work_dir / "nnunet_input_sparse_manifest.json"
+    sparse_manifest = work_dir / "input" / "sparse_manifest.json"
     if not sparse_manifest.exists():
         print(f"[upsample_sparse_preds] missing {sparse_manifest} -- "
               f"run nnunet/data_prep/sparsify_inputs.py first.",

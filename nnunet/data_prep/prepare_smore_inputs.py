@@ -5,7 +5,7 @@ For every source in ``${work_dir}/source_to_path.json`` (written by
 ``data_prep/prepare_inputs.py``), look up the canonical SMORE output at
 ``${smore_out_root}/<source_id>_smore.nii.gz`` (flat layout produced by
 the latest ``engine/build_smore_test_images.py``) and symlink it as
-``${work_dir}/nnunet_input_smore/<source_id>_0000.nii.gz`` for nnUNetv2.
+``${work_dir}/input/smore/<source_id>_0000.nii.gz`` for nnUNetv2.
 
 Sources missing the SMORE file get listed in a warning block at the end
 with a hint to run ``nnunet/engine/build_smore_test_images.py`` first.
@@ -73,12 +73,12 @@ def main() -> int:
     with open(source_to_path) as f:
         manifest_in = json.load(f)
 
-    nnunet_input_smore = work_dir / "nnunet_input_smore"
-    nnunet_input_smore.mkdir(parents=True, exist_ok=True)
+    smore_input_dir = work_dir / "input" / "smore"
+    smore_input_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[prepare_smore_inputs] sources:         {len(manifest_in)}")
     print(f"[prepare_smore_inputs] smore_out_root:  {smore_out_root}")
-    print(f"[prepare_smore_inputs] out_dir:         {nnunet_input_smore}")
+    print(f"[prepare_smore_inputs] out_dir:         {smore_input_dir}")
 
     staged: List[str] = []
     missing: List[str] = []
@@ -88,7 +88,7 @@ def main() -> int:
         if not (smore_path.exists() or smore_path.is_symlink()):
             missing.append(f"{sid}: not found at {smore_path}")
             continue
-        dst = nnunet_input_smore / f"{sid}_0000.nii.gz"
+        dst = smore_input_dir / f"{sid}_0000.nii.gz"
         _safe_symlink(smore_path.resolve(), dst)
         staged.append(sid)
 

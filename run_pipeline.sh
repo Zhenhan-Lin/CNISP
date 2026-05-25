@@ -22,7 +22,7 @@
 #                         pass --force-train to override.
 #
 #   nnunet-predict        Run nnUNetv2_predict on the staged native CT inputs
-#                         under $work_dir/nnunet_input/. This is the
+#                         under $work_dir/input/native/. This is the
 #                         step=1 dense baseline for the sweep.
 #                         (nnunet/run_predict_native.sh)
 #

@@ -7,7 +7,7 @@ Inputs
   Dataset835 prediction on the sparsified CT for one source, on the
   sparse CT's voxel grid (through-plane spacing already multiplied by
   step). Produced by ``nnunet/run_predict_sparse_sweep.sh``.
-* ``${work_dir}/nnunet_input_sparse_manifest.json`` -- per-(source, step)
+* ``${work_dir}/input/sparse_manifest.json`` -- per-(source, step)
   sparsification bookkeeping from ``nnunet/data_prep/sparsify_inputs.py``.
 * ``${work_dir}/prediction/sweep_manifest.json`` (optional) --
   consulted only to fill in step_01, since step_01 is symlinked, not
@@ -122,7 +122,7 @@ def main() -> int:
         "labels_dataset835_step_prefix", "labels_dataset835_step_"
     )
 
-    sparse_manifest_path = work_dir / "nnunet_input_sparse_manifest.json"
+    sparse_manifest_path = work_dir / "input" / "sparse_manifest.json"
     if not sparse_manifest_path.exists():
         print(f"[dataset835_sparse] {sparse_manifest_path} missing -- "
               f"run nnunet/data_prep/sparsify_inputs.py first.",

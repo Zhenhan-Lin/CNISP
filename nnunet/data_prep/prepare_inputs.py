@@ -3,7 +3,7 @@
 
 Reads CNISP's test_cases.txt, resolves the source CT image path for each
 of the 31 unique source scans, and symlinks them into
-``{work_dir}/nnunet_input/{source_id}_0000.nii.gz`` (nnUNetv2's
+``{work_dir}/input/native/{source_id}_0000.nii.gz`` (nnUNetv2's
 channel-0 naming convention).
 
 Also writes ``{work_dir}/source_to_path.json`` so downstream scripts
@@ -71,14 +71,14 @@ def main() -> int:
     test_cases = casefiles_dir / "test_cases.txt"
     meta_dir = Path(cnisp_paths["aligned_dir"]) / "metadata"
 
-    nnunet_input = work_dir / "nnunet_input"
-    nnunet_input.mkdir(parents=True, exist_ok=True)
+    input_dir = work_dir / "input" / "native"
+    input_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[prepare_inputs] test_cases: {test_cases}")
     print(f"[prepare_inputs] meta_dir:   {meta_dir}")
     print(f"[prepare_inputs] atlas img:  {atlas_image_dir}")
     print(f"[prepare_inputs] pivot csv:  {pivot_csv}")
-    print(f"[prepare_inputs] out dir:    {nnunet_input}")
+    print(f"[prepare_inputs] out dir:    {input_dir}")
 
     sources, missing = resolve_sources(
         test_cases_path=test_cases,
@@ -99,7 +99,7 @@ def main() -> int:
     for src in sources:
         if src.ct_image_path is None:  # safety; require_ct already enforced
             continue
-        dst = nnunet_input / f"{src.source_id}_0000.nii.gz"
+        dst = input_dir / f"{src.source_id}_0000.nii.gz"
         _safe_symlink(src.ct_image_path, dst)
         manifest[src.source_id] = {
             "ct_image_path": str(src.ct_image_path),
@@ -108,7 +108,7 @@ def main() -> int:
             "gt_source": src.gt_source,
             "casenames": list(src.casenames),
             "metadata_jsons": [str(p) for p in src.metadata_json_paths],
-            "nnunet_input_symlink": str(dst),
+            "input_symlink": str(dst),
         }
 
     manifest_path = work_dir / "source_to_path.json"

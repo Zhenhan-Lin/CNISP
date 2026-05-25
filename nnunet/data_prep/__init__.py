@@ -2,7 +2,7 @@
 
 Each script in this folder turns a list of source CTs into a directory
 of ``{source_id}_0000.nii.gz`` symlinks (or freshly written NIfTIs)
-under ``${work_dir}/nnunet_input*/`` that nnUNetv2's CLI can consume
+under ``${work_dir}/input/`` that nnUNetv2's CLI can consume
 directly.
 
   * ``prepare_inputs.py``        - stage the original CTs (dense baseline)

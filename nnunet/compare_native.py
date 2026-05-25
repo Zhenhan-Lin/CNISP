@@ -12,7 +12,7 @@ the pipeline calls this script once per entry in
 
 Inputs
 ------
-* ``{work_dir}/nnunet_input/{source_id}_0000.nii.gz``     - staged input CT
+* ``{work_dir}/input/native/{source_id}_0000.nii.gz``    - staged input CT
 * ``{work_dir}/prediction/sparse_step_{XX}_upsampled/{source_id}.nii.gz``
   - nnUNet per-step prediction NN-upsampled back to the native CT grid
   (step_01 is a symlink to the dense baseline ``prediction/native/``).

@@ -6,7 +6,7 @@
 #
 # These paths are typically NOT mounted on the GPU server. Run this
 # script on the data-side machine first, then move the produced
-# directories (aligned_dir, work_dir/nnunet_input/, SMORE outputs) to
+# directories (aligned_dir, work_dir/input/native/, SMORE outputs) to
 # the GPU host -- or mount them via a shared filesystem -- before
 # running ./run_pipeline.sh there.
 #
@@ -14,9 +14,9 @@
 #   cnisp-align    paths.yaml::checklist_csv, paths.yaml::atlas_label_dir
 #                  -> writes paths.yaml::aligned_dir
 #   nnunet-stage   configs.yaml::atlas_image_dir, configs.yaml::pivot_csv
-#                  -> writes configs.yaml::work_dir/nnunet_input/
+#                  -> writes configs.yaml::work_dir/input/native/
 #                  NOTE: data_prep/prepare_inputs.py *symlinks* the
-#                  original CTs into nnunet_input/. The GPU host must
+#                  original CTs into input/native/. The GPU host must
 #                  still resolve those symlinks at predict time. Either
 #                  keep the source CTs on a shared filesystem, copy
 #                  them onto the GPU host first, or edit
@@ -177,7 +177,7 @@ echo ""
 echo "  destinations these phases WRITE:"
 echo "    aligned_dir        $ALIGNED_DIR"
 echo "    casefiles_dir      $CASEFILES_DIR"
-echo "    nnunet_input/      ${WORK_DIR%/}/nnunet_input"
+echo "    input/native/      ${WORK_DIR%/}/input/native"
 echo "    smore_out_root     $SMORE_OUT_ROOT"
 echo ""
 echo "  phases:              ${PHASES[*]}"
@@ -215,7 +215,7 @@ phase_nnunet_stage() {
     python3 "$REPO_ROOT/nnunet/data_prep/prepare_inputs.py" --config "$CONFIG"
     echo ""
     echo "  Staged inputs (symlinks pointing at the source CTs):"
-    echo "    ${WORK_DIR%/}/nnunet_input/"
+    echo "    ${WORK_DIR%/}/input/native/"
     echo "    ${WORK_DIR%/}/source_to_path.json"
     echo ""
     echo "  Reminder: the GPU host must be able to follow these symlinks."
@@ -252,7 +252,7 @@ echo ""
 echo "What to move to the GPU host before running ./run_pipeline.sh:"
 echo "  CNISP aligned patches:    $ALIGNED_DIR"
 echo "  CNISP caselists:          $CASEFILES_DIR"
-echo "  nnUNet staged inputs:     ${WORK_DIR%/}/nnunet_input/"
+echo "  nnUNet staged inputs:     ${WORK_DIR%/}/input/native/"
 echo "                            ${WORK_DIR%/}/source_to_path.json"
 echo "  (if smore was run)        $SMORE_OUT_ROOT   # already on shared FS"
 echo "============================================================"

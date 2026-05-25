@@ -34,7 +34,7 @@ nnunet/
 │   └── smore.py                    # SMORE compat-check, local + container backends
 │
 ├── data_prep/                      # stage inputs for nnUNetv2_predict
-│   ├── prepare_inputs.py           #   Phase 1:  symlink CTs into nnunet_input/
+│   ├── prepare_inputs.py           #   Phase 1:  symlink CTs into input/native/
 │   ├── sparsify_inputs.py          #   Phase 1b: sparsified CTs (1:1 with CNISP sweep)
 │   └── prepare_smore_inputs.py     #   Phase 1c: symlink SMORE'd CTs
 │
@@ -82,7 +82,7 @@ Inputs the scripts expect:
 
 Outputs (under `configs.yaml::work_dir`, one set per `cnisp_runs_to_compare` entry):
 
-- `nnunet_input/<source_id>_0000.nii.gz` — symlink, channel-0 named for nnUNetv2.
+- `input/native/<source_id>_0000.nii.gz` — symlink, channel-0 named for nnUNetv2.
 - `source_to_path.json` — for downstream traceability.
 - `prediction/native/<source_id>.nii.gz` — fold-0 prediction, native CT spacing (step=1 dense baseline).
 - `comparison/paired_per_source__<run_tag>.csv` — long: `(source_id, gt_source, method, step_size, eff_res_mm, structure, dice)`. `method` is `nnUNet-sparse` plus the CNISP method label for this run (e.g. `CNISP-atlasGT` or `CNISP-nnUNetPred`).
@@ -148,8 +148,8 @@ Pipeline-level prereqs: `nnunet-predict` (provides the step_01 dense baseline th
 
 Outputs (under `${work_dir}`):
 
-- `nnunet_input_step_XX/<sid>_0000.nii.gz` — sparsified CT; the affine's through-plane column is scaled by step_size, the other two columns and the origin are untouched.
-- `nnunet_input_sparse_manifest.json` — `{step_axis_per_source, by_step: {XX: {sid: {input, eff_res_mm, step_axis}}}}`.
+- `input/sparse_step_XX/<sid>_0000.nii.gz` — sparsified CT; the affine's through-plane column is scaled by step_size, the other two columns and the origin are untouched.
+- `input/sparse_manifest.json` — `{step_axis_per_source, by_step: {XX: {sid: {input, eff_res_mm, step_axis}}}}`.
 - `prediction/sparse_step_XX/<sid>.nii.gz` — nnUNet output at the sparse CT's spacing.
 - `prediction/sparse_step_XX_upsampled/<sid>.nii.gz` — same mask NN-upsampled back to the dense native CT grid. step_01 is a symlink to `prediction/native/<sid>.nii.gz`.
 - `prediction/sweep_manifest.json` — `{steps: {XX: {sid: path}}}`, consumed by `compare_native.py`.
@@ -160,7 +160,7 @@ Caveats:
 - `data_prep/sparsify_inputs.py` picks the sparsification axis from the raw CT's affine (not from `argmax(zooms)`), so non-axial acquisitions are degraded along the same physical direction CNISP did. Two checks then gate every write:
   1. **Axis selection + obliqueness check** (per source): for each source, the script reads CNISP's per-row `step_axis` field from `sweep_results.pkl` to know which RAS direction CNISP sparsified that source along (a single int for legacy `slice_step_axis: <int>` runs, a per-source value for `slice_step_axis: auto` runs). It then picks the raw CT voxel axis whose physical direction best aligns with that RAS direction via `argmax(|affine[ras_axis, :3]|)`. For an axial CT under the default RAS axis 2 (S-I) this is the thick S-I axis; for a sagittal CT (under either `auto` mode or a legacy uniform S-I config) it's the thin in-plane axis pointing S-I (not the thick L-R one). If CNISP's sweep predates the per-row `step_axis` write-out, the fallback is the `cnisp_slice_step_axis` config knob (default 2). If the best alignment is below `sparse_axis_alignment_min` (default 0.95) the voxel grid is too oblique to RAS for any single-axis sparsification to be physically meaningful, and the source is dropped.
   2. **Magnitude check** (per source × step): the script compares `zooms[step_axis] * step` against CNISP's `effective_resolution_mm`. Differences within `sparse_eff_res_tolerance` (default 5 %) are silently OK; differences within `sparse_eff_res_max_drift` (default 30 %) are warned about but still written (these typically come from CNISP's canonical patch living on a different grid than the raw CT — e.g. `chk_*` QA-kept old-nnUNet preds on a ~1.25 mm iso grid); differences above the drift cap are dropped.
-- The resulting `nnunet_input_sparse_manifest.json` lists only the surviving `(source, step)` pairs. Downstream phases (`run_predict_sparse_sweep.sh`, `upsample_sparse_preds.py`, `build_dataset835_sparse_patches.py`, `compare_native.py`) iterate over the manifest, so dropped sources/steps naturally yield fewer rows in the final paired CSVs without breaking anything else.
+- The resulting `input/sparse_manifest.json` lists only the surviving `(source, step)` pairs. Downstream phases (`run_predict_sparse_sweep.sh`, `upsample_sparse_preds.py`, `build_dataset835_sparse_patches.py`, `compare_native.py`) iterate over the manifest, so dropped sources/steps naturally yield fewer rows in the final paired CSVs without breaking anything else.
 
 ## Phase 1c: nnUNet on SMORE'd CTs
 
@@ -176,7 +176,7 @@ Prereq: run [Phase 1.5](#phase-15-smore-prep) first; this phase only consumes th
 
 Outputs (under `${work_dir}`):
 
-- `nnunet_input_smore/<sid>_0000.nii.gz` — symlink to the canonical SMORE'd CT.
+- `input/smore/<sid>_0000.nii.gz` — symlink to the canonical SMORE'd CT.
 - `prediction/smore/<sid>.nii.gz` — nnUNet prediction on the SMORE grid.
 
 ## Phase 1.5: SMORE prep

@@ -3,7 +3,7 @@
 # Phase 1c: nnUNetv2_predict on the SMORE-super-resolved CTs
 # staged by nnunet/data_prep/prepare_smore_inputs.py.
 #
-# Input  : ${WORK_DIR}/nnunet_input_smore/<sid>_0000.nii.gz
+# Input  : ${WORK_DIR}/input/smore/<sid>_0000.nii.gz
 # Output : ${WORK_DIR}/prediction/smore/<sid>.nii.gz
 #
 # Mask only. No upsampling, no compare wiring -- downstream analysis is
@@ -41,7 +41,7 @@ if [[ -z "$WORK_DIR" ]]; then
     exit 2
 fi
 
-IN_DIR="${IN_DIR:-${WORK_DIR}/nnunet_input_smore}"
+IN_DIR="${IN_DIR:-${WORK_DIR}/input/smore}"
 OUT_DIR="${OUT_DIR:-${WORK_DIR}/prediction/smore}"
 
 if [[ ! -d "$IN_DIR" ]]; then

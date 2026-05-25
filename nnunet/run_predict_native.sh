@@ -40,7 +40,7 @@ if [[ -z "$WORK_DIR" ]]; then
     exit 2
 fi
 
-IN_DIR="${IN_DIR:-${WORK_DIR}/nnunet_input}"
+IN_DIR="${IN_DIR:-${WORK_DIR}/input/native}"
 OUT_DIR="${OUT_DIR:-${WORK_DIR}/prediction/native}"
 
 if [[ ! -d "$IN_DIR" ]]; then

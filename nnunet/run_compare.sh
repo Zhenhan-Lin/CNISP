@@ -7,7 +7,7 @@
 # (ceiling + deployment), use ../run_pipeline.sh instead -- it
 # orchestrates both stories plus their prereq phases.
 #
-#   1. stage CT inputs                  -> work_dir/nnunet_input/
+#   1. stage CT inputs                  -> work_dir/input/native/
 #   2. nnUNetv2_predict (native)        -> work_dir/prediction/native/
 #   3. CNISP per-step native backfill   -> output_basedir/.../runs/<tag>/native_space_step_XX/
 #      (no-op if infer.py already wrote those dirs; --force to override)

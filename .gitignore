@@ -13,7 +13,7 @@ orbital_shape_prior_st1/scripts/__pycache__
 orbital_shape_prior_st1/probe_inference_shapes.py
 review_checklist.csv
 nnunet/__pycache__
-nnunet/nnunet_input/*
+nnunet/input/*
 nnunet/prediction/*
 nnunet/comparison/*
 nnunet/data_prep/__pycache__

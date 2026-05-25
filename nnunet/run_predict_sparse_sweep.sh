@@ -3,7 +3,7 @@
 # Phase 1b: nnUNetv2_predict on every sparsified CT directory
 # staged by nnunet/data_prep/sparsify_inputs.py.
 #
-# Loops over ${WORK_DIR}/nnunet_input_step_XX/ (each holds the
+# Loops over ${WORK_DIR}/input/sparse_step_XX/ (each holds the
 # 31 sources sparsified along their through-plane axis at
 # step_size = XX), one predict run per step. Outputs land at
 # ${WORK_DIR}/prediction/sparse_step_XX/ at the sparse CT's
@@ -14,7 +14,7 @@
 #
 # Already-complete step directories are skipped: a step is
 # considered complete if every source listed in
-# ${WORK_DIR}/nnunet_input_sparse_manifest.json for that step
+# ${WORK_DIR}/input/sparse_manifest.json for that step
 # already has a prediction file. Partial outputs are recomputed.
 # ============================================================
 set -euo pipefail
@@ -48,16 +48,16 @@ if [[ -z "$WORK_DIR" ]]; then
     exit 2
 fi
 
-MANIFEST="${WORK_DIR}/nnunet_input_sparse_manifest.json"
+MANIFEST="${WORK_DIR}/input/sparse_manifest.json"
 if [[ ! -f "$MANIFEST" ]]; then
     echo "[ERROR] sparse manifest missing: $MANIFEST" >&2
     echo "        run nnunet/data_prep/sparsify_inputs.py first." >&2
     exit 2
 fi
 
-mapfile -t STEP_DIRS < <(ls -d "${WORK_DIR}"/nnunet_input_step_*/ 2>/dev/null | sort)
+mapfile -t STEP_DIRS < <(ls -d "${WORK_DIR}"/input/sparse_step_*/ 2>/dev/null | sort)
 if [[ ${#STEP_DIRS[@]} -eq 0 ]]; then
-    echo "[ERROR] no nnunet_input_step_*/ directories under $WORK_DIR" >&2
+    echo "[ERROR] no input/sparse_step_*/ directories under $WORK_DIR" >&2
     echo "        run nnunet/data_prep/sparsify_inputs.py first." >&2
     exit 2
 fi
@@ -70,7 +70,7 @@ echo "[run_predict_sparse_sweep] discovered ${#STEP_DIRS[@]} step dir(s)."
 
 for in_dir in "${STEP_DIRS[@]}"; do
     in_dir="${in_dir%/}"
-    step_tag="$(basename "$in_dir" | sed 's/^nnunet_input_step_//')"
+    step_tag="$(basename "$in_dir" | sed 's/^sparse_step_//')"
     out_dir="${WORK_DIR}/prediction/sparse_step_${step_tag}"
     mkdir -p "$out_dir"
 
