@@ -25,7 +25,7 @@ Visualization / summary builders:
   * ``build_method_summary.py``       - per-method (CNISP or nnUNet)
                                         by-eff_res Dice tables and
                                         the configured PNG. Driven from
-                                        ``${work_dir}/paired_per_source.csv``
+                                        ``${work_dir}/comparison/paired_per_source__<run_tag>.csv``
                                         so both methods share one
                                         source of truth.
 """

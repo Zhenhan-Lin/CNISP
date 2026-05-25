@@ -41,7 +41,7 @@ if [[ -z "$WORK_DIR" ]]; then
 fi
 
 IN_DIR="${IN_DIR:-${WORK_DIR}/nnunet_input}"
-OUT_DIR="${OUT_DIR:-${WORK_DIR}/nnunet_pred_native}"
+OUT_DIR="${OUT_DIR:-${WORK_DIR}/prediction/native}"
 
 if [[ ! -d "$IN_DIR" ]]; then
     echo "[ERROR] input dir not found: $IN_DIR (did you run nnunet/data_prep/prepare_inputs.py?)" >&2

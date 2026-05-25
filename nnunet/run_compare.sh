@@ -8,10 +8,10 @@
 # orchestrates both stories plus their prereq phases.
 #
 #   1. stage CT inputs                  -> work_dir/nnunet_input/
-#   2. nnUNetv2_predict (native)        -> work_dir/nnunet_pred_native/
+#   2. nnUNetv2_predict (native)        -> work_dir/prediction/native/
 #   3. CNISP per-step native backfill   -> output_basedir/.../runs/<tag>/native_space_step_XX/
 #      (no-op if infer.py already wrote those dirs; --force to override)
-#   4. paired native-space Dice         -> work_dir/paired_*__<tag>.csv|.txt
+#   4. paired native-space Dice         -> work_dir/comparison/paired_*__<tag>.csv|.txt
 #
 # Phase 1.5 (SMORE prep) is NOT invoked here; run
 #   python nnunet/engine/build_smore_test_images.py --config nnunet/configs.yaml
@@ -51,6 +51,6 @@ with open(os.environ.get("CONFIG", "nnunet/configs.yaml")) as f:
     print((yaml.safe_load(f) or {}).get("work_dir", ""))
 PY
 )"
-echo "  ${WORK_DIR}/paired_per_source__${RUN_TAG}.csv"
-echo "  ${WORK_DIR}/paired_summary__${RUN_TAG}.csv"
-echo "  ${WORK_DIR}/paired_summary__${RUN_TAG}.txt"
+echo "  ${WORK_DIR}/comparison/paired_per_source__${RUN_TAG}.csv"
+echo "  ${WORK_DIR}/comparison/paired_summary__${RUN_TAG}.csv"
+echo "  ${WORK_DIR}/comparison/paired_summary__${RUN_TAG}.txt"

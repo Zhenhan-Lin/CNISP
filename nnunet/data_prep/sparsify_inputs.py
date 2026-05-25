@@ -10,8 +10,8 @@ write the result as ``{work_dir}/nnunet_input_step_{XX}/{sid}_0000.nii.gz``
 
 step_size == 1 is intentionally skipped: that's the dense baseline and
 nnunet/run_predict_native.sh already produces it under
-``nnunet_pred_native/``. The upsample script later symlinks step_01 to
-that directory so the sweep manifest is still complete.
+``prediction/native/``. The upsample script later symlinks step_01
+to that directory so the sweep manifest is still complete.
 
 Inputs
 ------

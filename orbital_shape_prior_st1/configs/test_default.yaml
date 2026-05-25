@@ -22,7 +22,7 @@
 #                           prediction at
 #                           ${aligned_dir}/labels_dataset835_step_XX/<casename>.nii.gz.
 #                           (built by nnunet/engine/build_dataset835_sparse_patches.py
-#                           from ${work_dir}/nnunet_pred_native_step_XX/<sid>.nii.gz.)
+#                           from ${work_dir}/prediction/sparse_step_XX/<sid>.nii.gz.)
 #     - Dense Dice target : for atlas cases, atlas manual GT
 #                           (${aligned_dir}/labels/atlas_*.nii.gz, unchanged).
 #                           For chk_* cases, canonical-aligned Dataset835

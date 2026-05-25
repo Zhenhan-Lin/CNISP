@@ -3,7 +3,7 @@
 
 Inputs
 ------
-* ``${work_dir}/nnunet_pred_native/<sid>.nii.gz`` -- dense Dataset835
+* ``${work_dir}/prediction/native/<sid>.nii.gz`` -- dense Dataset835
   prediction per source on the native CT grid (Phase 1 output of the
   ``nnunet-predict`` pipeline phase). Same label scheme as the nnUNet
   training plan: {0:BG, 1:ON, 2:Recti, 3:Globe, 4:Fat}.
@@ -100,7 +100,7 @@ def main() -> int:
     with open(source_manifest) as f:
         src_to_path = json.load(f)
 
-    dense_pred_dir = work_dir / "nnunet_pred_native"
+    dense_pred_dir = work_dir / "prediction" / "native"
     if not dense_pred_dir.is_dir():
         print(f"[dataset835_canonical] {dense_pred_dir} missing -- "
               f"did you run the `nnunet-predict` phase?",

@@ -6,13 +6,13 @@ For each ``(source_id, step)`` in
 ``data_prep/sparsify_inputs.py``):
 
 1. Read the sparse prediction from
-   ``${work_dir}/nnunet_pred_native_step_{XX}/{sid}.nii.gz``.
+   ``${work_dir}/prediction/sparse_step_{XX}/{sid}.nii.gz``.
 2. Resample it onto the original CT's voxel grid using nearest-neighbour.
 3. Write the result to
-   ``${work_dir}/nnunet_pred_native_step_{XX}_upsampled/{sid}.nii.gz``.
+   ``${work_dir}/prediction/sparse_step_{XX}_upsampled/{sid}.nii.gz``.
 
 step_01 (the dense baseline) is special-cased: no actual upsampling --
-just symlink ``nnunet_pred_native/{sid}.nii.gz`` into the step_01
+just symlink ``prediction/native/{sid}.nii.gz`` into the step_01
 upsampled directory so the manifest is complete.
 
 Why this exists
@@ -27,10 +27,10 @@ neighbour is the only honest choice for a discrete label map.
 
 Output
 ------
-* ``${work_dir}/nnunet_pred_native_step_{XX}_upsampled/{sid}.nii.gz``
-* ``${work_dir}/nnunet_pred_native_sweep_manifest.json`` mirroring
-  CNISP's ``native_sweep_manifest.json`` so ``compare_native.py`` can
-  index nnUNet identically to how it indexes CNISP.
+* ``${work_dir}/prediction/sparse_step_{XX}_upsampled/{sid}.nii.gz``
+* ``${work_dir}/prediction/sweep_manifest.json`` mirroring CNISP's
+  ``native_sweep_manifest.json`` so ``compare_native.py`` can index
+  nnUNet identically to how it indexes CNISP.
 
 Usage
 -----
@@ -145,13 +145,14 @@ def main() -> int:
     with open(source_to_path) as f:
         src_to_path = json.load(f)
 
-    dense_pred_dir = work_dir / "nnunet_pred_native"
+    pred_root = work_dir / "prediction"
+    dense_pred_dir = pred_root / "native"
 
     out_steps: Dict[str, Dict[str, str]] = {}
 
     # ── step_01: just symlink the dense baseline ────────────────
     if dense_pred_dir.exists():
-        out_01 = work_dir / "nnunet_pred_native_step_01_upsampled"
+        out_01 = pred_root / "sparse_step_01_upsampled"
         out_01.mkdir(parents=True, exist_ok=True)
         step_01_map: Dict[str, str] = {}
         for sid in src_to_path:
@@ -178,8 +179,8 @@ def main() -> int:
     n_skipped = 0
     for step_tag in sorted(sparse_m.get("by_step", {}).keys()):
         step = int(step_tag)
-        sparse_pred_dir = work_dir / f"nnunet_pred_native_step_{step_tag}"
-        up_dir = work_dir / f"nnunet_pred_native_step_{step_tag}_upsampled"
+        sparse_pred_dir = pred_root / f"sparse_step_{step_tag}"
+        up_dir = pred_root / f"sparse_step_{step_tag}_upsampled"
         up_dir.mkdir(parents=True, exist_ok=True)
 
         step_map: Dict[str, str] = {}
@@ -230,7 +231,8 @@ def main() -> int:
             print(f"[upsample_sparse_preds] step_{step_tag}: "
                   f"{len(step_map)} upsampled in {up_dir}")
 
-    sweep_manifest_path = work_dir / "nnunet_pred_native_sweep_manifest.json"
+    pred_root.mkdir(parents=True, exist_ok=True)
+    sweep_manifest_path = pred_root / "sweep_manifest.json"
     with open(sweep_manifest_path, "w") as f:
         json.dump({"steps": out_steps}, f, indent=2)
 

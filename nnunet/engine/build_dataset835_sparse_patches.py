@@ -3,15 +3,15 @@
 
 Inputs
 ------
-* ``${work_dir}/nnunet_pred_native_step_{XX}/<sid>.nii.gz`` -- Dataset835
-  prediction on the sparsified CT for one source, on the sparse
-  CT's voxel grid (through-plane spacing already multiplied by step).
-  Produced by ``nnunet/run_predict_sparse_sweep.sh``.
+* ``${work_dir}/prediction/sparse_step_{XX}/<sid>.nii.gz`` --
+  Dataset835 prediction on the sparsified CT for one source, on the
+  sparse CT's voxel grid (through-plane spacing already multiplied by
+  step). Produced by ``nnunet/run_predict_sparse_sweep.sh``.
 * ``${work_dir}/nnunet_input_sparse_manifest.json`` -- per-(source, step)
   sparsification bookkeeping from ``nnunet/data_prep/sparsify_inputs.py``.
-* ``${work_dir}/nnunet_pred_native_sweep_manifest.json`` (optional) --
+* ``${work_dir}/prediction/sweep_manifest.json`` (optional) --
   consulted only to fill in step_01, since step_01 is symlinked, not
-  sparsified, and lives under ``nnunet_pred_native/``.
+  sparsified, and lives under ``prediction/native/``.
 
 Outputs
 -------
@@ -73,9 +73,10 @@ def _iter_sparse_inputs(
 ) -> Iterable[Tuple[int, str, Path]]:
     """Yield ``(step_size, source_id, sparse_pred_path)`` for steps >= 2."""
     by_step = sparse_manifest.get("by_step", {})
+    pred_root = work_dir / "prediction"
     for step_tag in sorted(by_step.keys()):
         step = int(step_tag)
-        step_pred_dir = work_dir / f"nnunet_pred_native_step_{step_tag}"
+        step_pred_dir = pred_root / f"sparse_step_{step_tag}"
         for sid in sorted(by_step[step_tag]):
             sparse_pred = step_pred_dir / f"{sid}.nii.gz"
             if not sparse_pred.exists():
@@ -97,7 +98,7 @@ def _iter_step_01(
     loader in ``engine/infer.py`` does a single uniform lookup per
     (case, step) without branching on step==1.
     """
-    dense_dir = work_dir / "nnunet_pred_native"
+    dense_dir = work_dir / "prediction" / "native"
     for sid in sorted(source_ids):
         yield 1, sid, dense_dir / f"{sid}.nii.gz"
 

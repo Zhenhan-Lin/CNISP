@@ -4,7 +4,7 @@
 # staged by nnunet/data_prep/prepare_smore_inputs.py.
 #
 # Input  : ${WORK_DIR}/nnunet_input_smore/<sid>_0000.nii.gz
-# Output : ${WORK_DIR}/nnunet_pred_smore/<sid>.nii.gz
+# Output : ${WORK_DIR}/prediction/smore/<sid>.nii.gz
 #
 # Mask only. No upsampling, no compare wiring -- downstream analysis is
 # TBD; this phase exists so the SMORE-grid prediction is always on hand
@@ -42,7 +42,7 @@ if [[ -z "$WORK_DIR" ]]; then
 fi
 
 IN_DIR="${IN_DIR:-${WORK_DIR}/nnunet_input_smore}"
-OUT_DIR="${OUT_DIR:-${WORK_DIR}/nnunet_pred_smore}"
+OUT_DIR="${OUT_DIR:-${WORK_DIR}/prediction/smore}"
 
 if [[ ! -d "$IN_DIR" ]]; then
     echo "[ERROR] input dir not found: $IN_DIR" >&2

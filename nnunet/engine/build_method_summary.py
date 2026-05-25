@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Per-method Dice summary by effective-resolution bucket.
 
-Reads ``{work_dir}/paired_per_source__<run_tag>.csv`` (one row per
-``(source_id, method, step_size, structure, dice)``, written by
-``nnunet/compare_native.py``) and produces, for the requested method
+Reads ``{work_dir}/comparison/paired_per_source__<run_tag>.csv`` (one
+row per ``(source_id, method, step_size, structure, dice)``, written
+by ``nnunet/compare_native.py``) and produces, for the requested method
 label (e.g. ``nnUNet-sparse`` / ``CNISP-atlasGT`` / ``CNISP-nnUNetPred``),
 a matched set of artifacts:
 
@@ -18,12 +18,13 @@ a matched set of artifacts:
 
 Why every method shares one driver
 ----------------------------------
-``compare_native.py`` already emits ``paired_per_source__<run_tag>.csv``
-with both methods' rows interleaved -- same source set, same eff_res
-values, same bucket edges. Driving the per-method viz off that file
-guarantees the CNISP and nnUNet summaries never drift out of sync
-(same n_sources, same axis), and the same plotting code renders any
-method just by changing ``--method``.
+``compare_native.py`` already emits
+``comparison/paired_per_source__<run_tag>.csv`` with both methods'
+rows interleaved -- same source set, same eff_res values, same bucket
+edges. Driving the per-method viz off that file guarantees the CNISP
+and nnUNet summaries never drift out of sync (same n_sources, same
+axis), and the same plotting code renders any method just by changing
+``--method``.
 
 Notes
 -----
@@ -40,14 +41,14 @@ Usage
     python nnunet/engine/build_method_summary.py \\
         --config nnunet/configs.yaml \\
         --method nnUNet-sparse \\
-        --paired-csv work_dir/paired_per_source__nnunet_pred.csv \\
-        --out-dir    work_dir/viz/nnUNet-sparse__nnunet_pred
+        --paired-csv work_dir/comparison/paired_per_source__nnunet_pred.csv \\
+        --out-dir    work_dir/comparison/viz/nnUNet-sparse__nnunet_pred
 
     # CNISP-atlasGT
     python nnunet/engine/build_method_summary.py \\
         --config nnunet/configs.yaml \\
         --method CNISP-atlasGT \\
-        --paired-csv work_dir/paired_per_source__atlas_gt.csv \\
+        --paired-csv work_dir/comparison/paired_per_source__atlas_gt.csv \\
         --out-dir    cnisp_output_basedir/<model>/viz/atlas_gt
 """
 
@@ -408,12 +409,13 @@ def main() -> int:
                          "CNISP-nnUNetPred).")
     ap.add_argument("--paired-csv", required=True,
                     help="Path to the paired CSV for this CNISP run "
-                         "(e.g. ${work_dir}/paired_per_source__atlas_gt.csv).")
+                         "(e.g. ${work_dir}/comparison/paired_per_source"
+                         "__atlas_gt.csv).")
     ap.add_argument(
         "--out-dir", required=True,
         help="Where to write outputs. Pipeline conventions: "
-             "${work_dir}/viz/<method>__<run_tag>/ for nnUNet rows, "
-             "${cnisp_output_basedir}/<model>/viz/<run_tag>/ for CNISP rows.",
+             "${work_dir}/comparison/viz/<method>__<run_tag>/ for nnUNet "
+             "rows, ${cnisp_output_basedir}/<model>/viz/<run_tag>/ for CNISP rows.",
     )
     args = ap.parse_args()
 

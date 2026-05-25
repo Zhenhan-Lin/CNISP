@@ -40,8 +40,8 @@
 #                         through-plane axis, runs nnUNetv2_predict per
 #                         step, then NN-upsamples back to the native
 #                         CT grid. Writes
-#                         nnunet_pred_native_step_XX_upsampled/ and
-#                         nnunet_pred_native_sweep_manifest.json.
+#                         prediction/sparse_step_XX_upsampled/ and
+#                         prediction/sweep_manifest.json.
 #                         Requires: nnunet-predict (step_01 baseline)
 #                                   + cnisp-infer (sweep set).
 #                         (nnunet/data_prep/sparsify_inputs.py
@@ -52,7 +52,7 @@
 #                         out-of-band by
 #                         nnunet/engine/build_smore_test_images.py; this
 #                         phase only consumes them). Output is
-#                         nnunet_pred_smore/<sid>.nii.gz on the SMORE
+#                         prediction/smore/<sid>.nii.gz on the SMORE
 #                         grid -- mask only, no downstream comparison yet.
 #                         (nnunet/data_prep/prepare_smore_inputs.py
 #                          + nnunet/run_predict_smore.sh)
@@ -61,8 +61,8 @@
 #                         Build the chk_* DENSE Dice-target patches for the
 #                         deployment curve: canonical-align Dataset835's
 #                         per-source dense prediction
-#                         (${work_dir}/nnunet_pred_native/<sid>.nii.gz) and
-#                         write the per-eye patches + sidecar metadata to
+#                         (${work_dir}/prediction/native/<sid>.nii.gz)
+#                         and write the per-eye patches + sidecar metadata to
 #                         ${aligned_dir}/labels_dataset835/ and
 #                         ${aligned_dir}/metadata_dataset835/. Atlas sources
 #                         are aligned too (no-op for Dice but used as the
@@ -108,7 +108,7 @@
 #
 #   compare               Per CNISP run declared in
 #                         configs.yaml::cnisp_runs_to_compare:
-#                          (a) paired Dice tables under ${work_dir}:
+#                          (a) paired Dice tables under ${work_dir}/comparison/:
 #                                paired_per_source__<run_tag>.csv
 #                                paired_summary__<run_tag>.csv
 #                                paired_summary__<run_tag>.txt
@@ -121,7 +121,7 @@
 #                                {method}_summary_by_eff_res.txt
 #                                {method}_recon_summary.png
 #                              Output dirs:
-#                                nnUNet -> ${work_dir}/viz/<method>__<run_tag>/
+#                                nnUNet -> ${work_dir}/comparison/viz/<method>__<run_tag>/
 #                                CNISP  -> ${cnisp_output_basedir}/<model>/viz/<run_tag>/
 #                         build_cnisp_native_sweep.py is a no-op for
 #                         runs whose native_space_step_XX/ already exist.
@@ -147,11 +147,11 @@
 #   existence tests so they are essentially free (~ms total) compared
 #   to the GPU work they gate. Markers used:
 #     cnisp-train                       best_checkpoint.pth
-#     nnunet-predict                    nnunet_pred_native/ has 1 file per source
+#     nnunet-predict                    prediction/native/ has 1 file per source
 #     cnisp-infer (atlas_gt)            runs/atlas_gt/sweep_results.pkl
 #                                       + runs/atlas_gt/native_sweep_manifest.json
-#     nnunet-predict-sweep              nnunet_pred_native_sweep_manifest.json
-#     nnunet-predict-smore              nnunet_pred_smore/ has 1 file per source
+#     nnunet-predict-sweep              prediction/sweep_manifest.json
+#     nnunet-predict-smore              prediction/smore/ has 1 file per source
 #     cnisp-prep-dataset835-gt          labels_dataset835/ + metadata_dataset835/
 #                                       cover every source (OD + OS)
 #     cnisp-prep-dataset835-sparse      labels_dataset835_step_01/ covers every source
@@ -409,8 +409,8 @@ phase_cnisp_train() {
 phase_nnunet_predict() {
     echo ""
     echo "[phase] nnunet-predict --------------------------------"
-    if [[ $FORCE -eq 0 ]] && _predict_dir_complete "${WORK_DIR}/nnunet_pred_native"; then
-        echo "  ${WORK_DIR}/nnunet_pred_native/ already covers every source"
+    if [[ $FORCE -eq 0 ]] && _predict_dir_complete "${WORK_DIR}/prediction/native"; then
+        echo "  ${WORK_DIR}/prediction/native/ already covers every source"
         echo "  -> skipping (pass --force to re-predict)."
         return 0
     fi
@@ -420,7 +420,7 @@ phase_nnunet_predict() {
 phase_nnunet_predict_sweep() {
     echo ""
     echo "[phase] nnunet-predict-sweep --------------------------"
-    local marker="${WORK_DIR}/nnunet_pred_native_sweep_manifest.json"
+    local marker="${WORK_DIR}/prediction/sweep_manifest.json"
     if [[ $FORCE -eq 0 && -f "$marker" ]]; then
         echo "  sweep manifest already present:"
         echo "    $marker"
@@ -435,8 +435,8 @@ phase_nnunet_predict_sweep() {
 phase_nnunet_predict_smore() {
     echo ""
     echo "[phase] nnunet-predict-smore --------------------------"
-    if [[ $FORCE -eq 0 ]] && _predict_dir_complete "${WORK_DIR}/nnunet_pred_smore"; then
-        echo "  ${WORK_DIR}/nnunet_pred_smore/ already covers every source"
+    if [[ $FORCE -eq 0 ]] && _predict_dir_complete "${WORK_DIR}/prediction/smore"; then
+        echo "  ${WORK_DIR}/prediction/smore/ already covers every source"
         echo "  -> skipping (pass --force to re-predict)."
         return 0
     fi
@@ -552,10 +552,10 @@ phase_compare() {
         # 3) Per-method by-eff_res viz bundle. We render two methods per
         #    run: the CNISP rows under viz/<run_tag>/, and the nnUNet
         #    rows (Diced against the same chk_* GT mode as this run)
-        #    under viz/nnUNet-sparse__<run_tag>/.
-        local paired_csv="$WORK_DIR/paired_per_source__${run_tag}.csv"
+        #    under comparison/viz/nnUNet-sparse__<run_tag>/.
+        local paired_csv="$WORK_DIR/comparison/paired_per_source__${run_tag}.csv"
         local cnisp_viz_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$run_tag"
-        local nnunet_viz_dir="$WORK_DIR/viz/nnUNet-sparse__${run_tag}"
+        local nnunet_viz_dir="$WORK_DIR/comparison/viz/nnUNet-sparse__${run_tag}"
 
         python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
                 --config "$CONFIG" \
@@ -607,16 +607,16 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
     echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$rt/${ml}_recon_summary.png"
 done
 echo "  nnUNet sparse-CT sweep (per-step preds on native CT grid):"
-echo "    $WORK_DIR/nnunet_pred_native_step_XX_upsampled/"
-echo "    $WORK_DIR/nnunet_pred_native_sweep_manifest.json"
+echo "    $WORK_DIR/prediction/sparse_step_XX_upsampled/"
+echo "    $WORK_DIR/prediction/sweep_manifest.json"
 echo "  nnUNet on SMORE'd CTs (mask only):"
-echo "    $WORK_DIR/nnunet_pred_smore/"
+echo "    $WORK_DIR/prediction/smore/"
 echo "  Paired comparison tables (one set per CNISP run):"
 for i in "${!CNISP_RUN_TAGS[@]}"; do
     rt="${CNISP_RUN_TAGS[$i]}"
-    echo "    $WORK_DIR/paired_per_source__${rt}.csv"
-    echo "    $WORK_DIR/paired_summary__${rt}.csv"
-    echo "    $WORK_DIR/paired_summary__${rt}.txt"
-    echo "    $WORK_DIR/viz/nnUNet-sparse__${rt}/nnUNet-sparse_recon_summary.png"
+    echo "    $WORK_DIR/comparison/paired_per_source__${rt}.csv"
+    echo "    $WORK_DIR/comparison/paired_summary__${rt}.csv"
+    echo "    $WORK_DIR/comparison/paired_summary__${rt}.txt"
+    echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${rt}/nnUNet-sparse_recon_summary.png"
 done
 echo "============================================================"

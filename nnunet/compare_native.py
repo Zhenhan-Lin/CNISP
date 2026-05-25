@@ -13,10 +13,10 @@ the pipeline calls this script once per entry in
 Inputs
 ------
 * ``{work_dir}/nnunet_input/{source_id}_0000.nii.gz``     - staged input CT
-* ``{work_dir}/nnunet_pred_native_step_{XX}_upsampled/{source_id}.nii.gz``
+* ``{work_dir}/prediction/sparse_step_{XX}_upsampled/{source_id}.nii.gz``
   - nnUNet per-step prediction NN-upsampled back to the native CT grid
-  (step_01 is a symlink to the dense baseline ``nnunet_pred_native/``).
-  Indexed via ``{work_dir}/nnunet_pred_native_sweep_manifest.json``.
+  (step_01 is a symlink to the dense baseline ``prediction/native/``).
+  Indexed via ``{work_dir}/prediction/sweep_manifest.json``.
 * ``output_basedir/{model}/runs/{run_tag}/native_space_step_{XX}/...``
   -- CNISP per-step predictions for this run, produced by
   ``orbital_shape_prior_st1/engine/infer.py`` (or backfilled by
@@ -42,8 +42,8 @@ Comparison
   unaffected (they always Dice against atlas manual GT).
 * Same effective-resolution bucket edges apply to both methods.
 
-Outputs (under ``{work_dir}``)
-------------------------------
+Outputs (under ``{work_dir}/comparison/``)
+------------------------------------------
 For ``--cnisp-run-tag <T>``:
 * ``paired_per_source__<T>.csv`` -- long, one row per
   (source, method, step_size, structure, dice).
@@ -275,7 +275,7 @@ def main() -> int:
     casefiles_dir = Path(cnisp_paths["casefiles_dir"])
     test_cases = casefiles_dir / "test_cases.txt"
 
-    nnunet_sweep_manifest = work_dir / "nnunet_pred_native_sweep_manifest.json"
+    nnunet_sweep_manifest = work_dir / "prediction" / "sweep_manifest.json"
     if not nnunet_sweep_manifest.exists():
         print(f"[compare_native] nnUNet sweep manifest not found: "
               f"{nnunet_sweep_manifest}", file=sys.stderr)
@@ -298,7 +298,7 @@ def main() -> int:
         except (OSError, json.JSONDecodeError):
             pass
     deployment_dirname = cfg.get(
-        "deployment_gt_dirname_for_chk", "nnunet_pred_native"
+        "deployment_gt_dirname_for_chk", "prediction/native"
     )
 
     bucket_edges = list(cfg.get("summary_bucket_edges_mm",
@@ -519,8 +519,9 @@ def main() -> int:
           f"skipped: gt={n_skipped_gt} nnUNet={n_skipped_nnunet}")
 
     # ── Write per-source CSV ──────────────────────────────────────
-    work_dir.mkdir(parents=True, exist_ok=True)
-    per_source_csv = work_dir / f"paired_per_source{out_suffix}.csv"
+    out_dir = work_dir / "comparison"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    per_source_csv = out_dir / f"paired_per_source{out_suffix}.csv"
     with open(per_source_csv, "w", newline="") as f:
         fieldnames = ["source_id", "gt_source", "method", "step_size",
                       "eff_res_mm", "structure", "dice"]
@@ -594,7 +595,7 @@ def main() -> int:
                                             float(arr.std()),
                                             int(len(arr)))
 
-    summary_csv = work_dir / f"paired_summary{out_suffix}.csv"
+    summary_csv = out_dir / f"paired_summary{out_suffix}.csv"
     with open(summary_csv, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["bucket", "structure", "mean_dice", "std_dice", "n_sources"])
@@ -610,11 +611,11 @@ def main() -> int:
     print(f"[compare_native] wrote {summary_csv}")
 
     # ── Plaintext table ───────────────────────────────────────────
-    txt_path = work_dir / f"paired_summary{out_suffix}.txt"
+    txt_path = out_dir / f"paired_summary{out_suffix}.txt"
     if cnisp_test_label_source == "nnunet_pred":
         chk_note = (
             "  - DEPLOYMENT MODE: chk_* sources are Diced against\n"
-            "    Dataset835's dense pred (nnunet_pred_native/), shared\n"
+            "    Dataset835's dense pred (prediction/native/), shared\n"
             "    between both methods; atlas sources Dice against the\n"
             "    atlas manual GT.\n")
     else:

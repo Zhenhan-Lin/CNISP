@@ -35,10 +35,11 @@ cnisp_runs_to_compare:
 # When CNISP runs in test_label_source=nnunet_pred mode, the chk_* dense
 # Dice target switches from the legacy chk_pred (input_label_scheme on
 # disk) to Dataset835's dense pred on the same chk_* CT. compare_native.py
-# reads the swap target from ${work_dir}/nnunet_pred_native/<sid>.nii.gz
+# reads the swap target from ${work_dir}/prediction/native/<sid>.nii.gz
 # for chk_* rows belonging to a "deployment" run (run_tag != atlas_gt).
 # Atlas rows always Dice against the atlas manual GT regardless of run_tag.
-deployment_gt_dirname_for_chk: nnunet_pred_native
+# Path is relative to ${work_dir} (slashes allowed for subdirs).
+deployment_gt_dirname_for_chk: prediction/native
 
 # ── Source CT discovery ───────────────────────────────────────────
 # atlas: sibling 'atlas_images' folder next to atlas_label_dir from

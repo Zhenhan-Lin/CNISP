@@ -84,10 +84,10 @@ Outputs (under `configs.yaml::work_dir`, one set per `cnisp_runs_to_compare` ent
 
 - `nnunet_input/<source_id>_0000.nii.gz` — symlink, channel-0 named for nnUNetv2.
 - `source_to_path.json` — for downstream traceability.
-- `nnunet_pred_native/<source_id>.nii.gz` — fold-0 prediction, native CT spacing (step=1 dense baseline).
-- `paired_per_source__<run_tag>.csv` — long: `(source_id, gt_source, method, step_size, eff_res_mm, structure, dice)`. `method` is `nnUNet-sparse` plus the CNISP method label for this run (e.g. `CNISP-atlasGT` or `CNISP-nnUNetPred`).
-- `paired_summary__<run_tag>.csv` — long aggregate: `(bucket, structure, mean_dice, std_dice, n_sources)` where `bucket` is `nnUNet-sparse (lo, hi]` or `<cnisp_method_label> (lo, hi]` per eff-res bucket. The two methods appear side-by-side per bucket.
-- `paired_summary__<run_tag>.txt` — pretty-printed table with the asymmetry / OOD / chk_* GT-mode caveats.
+- `prediction/native/<source_id>.nii.gz` — fold-0 prediction, native CT spacing (step=1 dense baseline).
+- `comparison/paired_per_source__<run_tag>.csv` — long: `(source_id, gt_source, method, step_size, eff_res_mm, structure, dice)`. `method` is `nnUNet-sparse` plus the CNISP method label for this run (e.g. `CNISP-atlasGT` or `CNISP-nnUNetPred`).
+- `comparison/paired_summary__<run_tag>.csv` — long aggregate: `(bucket, structure, mean_dice, std_dice, n_sources)` where `bucket` is `nnUNet-sparse (lo, hi]` or `<cnisp_method_label> (lo, hi]` per eff-res bucket. The two methods appear side-by-side per bucket.
+- `comparison/paired_summary__<run_tag>.txt` — pretty-printed table with the asymmetry / OOD / chk_* GT-mode caveats.
 
 Outputs (CNISP side, under `cnisp_paths.output_basedir/<model_name>/runs/<run_tag>/`):
 
@@ -95,13 +95,13 @@ Outputs (CNISP side, under `cnisp_paths.output_basedir/<model_name>/runs/<run_ta
 - `native_space_step_XX/manifest.json` — `(source_id -> nifti path)` map (also records `run_tag` + `test_label_source`).
 - `native_sweep_manifest.json` — summary across all steps (used by `compare_native.py` to decide which chk_* GT to use).
 
-For `paired_per_source__atlas_gt.csv`, `chk_*` rows carry `gt_source=chk_pseudo` (legacy QA-kept pseudo-GT). For `paired_per_source__nnunet_pred.csv`, `chk_*` rows carry `gt_source=chk_pseudo_dataset835` (Dataset835's dense pred). Filter on `gt_source=='atlas'` for the manual-GT-only view in either file.
+For `comparison/paired_per_source__atlas_gt.csv`, `chk_*` rows carry `gt_source=chk_pseudo` (legacy QA-kept pseudo-GT). For `comparison/paired_per_source__nnunet_pred.csv`, `chk_*` rows carry `gt_source=chk_pseudo_dataset835` (Dataset835's dense pred). Filter on `gt_source=='atlas'` for the manual-GT-only view in either file.
 
 ### Per-method by-eff_res summary bundle
 
-For each run_tag, `compare` calls `engine/build_method_summary.py` once per method. Same script, same `paired_per_source__<run_tag>.csv` -> the nnUNet and CNISP halves of that comparison get a matched bundle:
+For each run_tag, `compare` calls `engine/build_method_summary.py` once per method. Same script, same `comparison/paired_per_source__<run_tag>.csv` -> the nnUNet and CNISP halves of that comparison get a matched bundle:
 
-- `${work_dir}/viz/nnUNet-sparse__<run_tag>/nnUNet-sparse_*` (per-source CSV / summary CSV / TXT / PNG)
+- `${work_dir}/comparison/viz/nnUNet-sparse__<run_tag>/nnUNet-sparse_*` (per-source CSV / summary CSV / TXT / PNG)
 - `${cnisp_output_basedir}/<model>/viz/<run_tag>/<cnisp_method_label>_*` (same four artifacts)
 
 Each `_recon_summary.png` is three stacked subplots:
@@ -110,7 +110,7 @@ Each `_recon_summary.png` is three stacked subplots:
 2. Per-class Dice vs effective resolution (ON / Globe / Fat / Recti).
 3. Per-case mean-Dice boxplot per eff_res bucket.
 
-CNISP's old `recon_summary.png` from `cnisp-viz` plotted a separate "observed-only" line; that line is intentionally **omitted** here because `paired_per_source.csv` only carries dense Dice. Keeping both methods on the same single-curve layout makes side-by-side comparison honest.
+CNISP's old `recon_summary.png` from `cnisp-viz` plotted a separate "observed-only" line; that line is intentionally **omitted** here because `comparison/paired_per_source__<run_tag>.csv` only carries dense Dice. Keeping both methods on the same single-curve layout makes side-by-side comparison honest.
 
 ## Option C deployment-curve prep
 
@@ -150,9 +150,9 @@ Outputs (under `${work_dir}`):
 
 - `nnunet_input_step_XX/<sid>_0000.nii.gz` — sparsified CT; the affine's through-plane column is scaled by step_size, the other two columns and the origin are untouched.
 - `nnunet_input_sparse_manifest.json` — `{step_axis_per_source, by_step: {XX: {sid: {input, eff_res_mm, step_axis}}}}`.
-- `nnunet_pred_native_step_XX/<sid>.nii.gz` — nnUNet output at the sparse CT's spacing.
-- `nnunet_pred_native_step_XX_upsampled/<sid>.nii.gz` — same mask NN-upsampled back to the dense native CT grid. step_01 is a symlink to `nnunet_pred_native/<sid>.nii.gz`.
-- `nnunet_pred_native_sweep_manifest.json` — `{steps: {XX: {sid: path}}}`, consumed by `compare_native.py`.
+- `prediction/sparse_step_XX/<sid>.nii.gz` — nnUNet output at the sparse CT's spacing.
+- `prediction/sparse_step_XX_upsampled/<sid>.nii.gz` — same mask NN-upsampled back to the dense native CT grid. step_01 is a symlink to `prediction/native/<sid>.nii.gz`.
+- `prediction/sweep_manifest.json` — `{steps: {XX: {sid: path}}}`, consumed by `compare_native.py`.
 
 Caveats:
 
@@ -177,7 +177,7 @@ Prereq: run [Phase 1.5](#phase-15-smore-prep) first; this phase only consumes th
 Outputs (under `${work_dir}`):
 
 - `nnunet_input_smore/<sid>_0000.nii.gz` — symlink to the canonical SMORE'd CT.
-- `nnunet_pred_smore/<sid>.nii.gz` — nnUNet prediction on the SMORE grid.
+- `prediction/smore/<sid>.nii.gz` — nnUNet prediction on the SMORE grid.
 
 ## Phase 1.5: SMORE prep
 
@@ -224,7 +224,7 @@ In `nnunet/configs.yaml`:
 | `dataset_id`, `plan`, `configuration`, `trainer`, `folds`, `gpu_id` | nnUNetv2 predict identity, must match training |
 | `cnisp_paths_yaml`, `cnisp_model_name` | which CNISP run to compare against |
 | `cnisp_runs_to_compare` | list of `{run_tag, method_label}` entries; `compare` renders one paired bundle per entry. Defaults to atlas_gt + nnunet_pred. |
-| `deployment_gt_dirname_for_chk` | chk_* GT directory under `${work_dir}` when a run uses `test_label_source=nnunet_pred`. Default `nnunet_pred_native`. |
+| `deployment_gt_dirname_for_chk` | chk_* GT directory under `${work_dir}` when a run uses `test_label_source=nnunet_pred` (slashes OK for subdirs). Default `prediction/native`. |
 | `atlas_image_dir` | where atlas CT images live (sibling to atlas_label_dir from CNISP's paths.yaml) |
 | `pivot_csv`, `pivot_image_path_columns` | PHOTON pivot table for `chk_*` CT discovery |
 | `work_dir` | Phase 1 / 1b / 1c working dir |

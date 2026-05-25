@@ -6,7 +6,7 @@
 # Loops over ${WORK_DIR}/nnunet_input_step_XX/ (each holds the
 # 31 sources sparsified along their through-plane axis at
 # step_size = XX), one predict run per step. Outputs land at
-# ${WORK_DIR}/nnunet_pred_native_step_XX/ at the sparse CT's
+# ${WORK_DIR}/prediction/sparse_step_XX/ at the sparse CT's
 # spacing (nnUNetv2 resamples to plan and back internally).
 # nnunet/engine/upsample_sparse_preds.py is the next step; it NN-resamples
 # each prediction back to the dense native CT grid so Dice can
@@ -71,7 +71,7 @@ echo "[run_predict_sparse_sweep] discovered ${#STEP_DIRS[@]} step dir(s)."
 for in_dir in "${STEP_DIRS[@]}"; do
     in_dir="${in_dir%/}"
     step_tag="$(basename "$in_dir" | sed 's/^nnunet_input_step_//')"
-    out_dir="${WORK_DIR}/nnunet_pred_native_step_${step_tag}"
+    out_dir="${WORK_DIR}/prediction/sparse_step_${step_tag}"
     mkdir -p "$out_dir"
 
     expected_sources=$(python3 - "$MANIFEST" "$step_tag" <<'PY'
