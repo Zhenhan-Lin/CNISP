@@ -132,6 +132,8 @@ def resolve_sources(
     detect_atlas_offset: bool = True,
     require_ct: bool = False,
     resolve_ct: bool = True,
+    atlas_label_dir: Optional[Path] = None,
+    chk_pred_dir: Optional[Path] = None,
 ) -> Tuple[List[SourceInfo], List[str]]:
     """Build a SourceInfo per unique source_id.
 
@@ -152,6 +154,19 @@ def resolve_sources(
         If True (and ``resolve_ct=True``), exclude a source from the
         returned list when its CT could not be located. Ignored when
         ``resolve_ct=False`` since CT was never attempted.
+    atlas_label_dir
+        If set, atlas GT paths are derived as
+        ``atlas_label_dir / basename(meta["original_nifti_path"])`` instead
+        of trusting the absolute path stored in metadata. This makes
+        compare-time lookup robust to data moves: only ``paths.yaml`` has
+        to be updated when the file tree changes (the metadata JSONs --
+        and any softlinks they reference -- can stay frozen).
+    chk_pred_dir
+        Same idea for ``chk_*`` sources. The canonical value is
+        ``Path(paths_yaml["checklist_csv"]).parent / "fold_0" / "predictions"``,
+        which follows the standard nnUNet inference output layout. Pass
+        ``None`` (default) to fall back to the absolute path baked into
+        metadata.
 
     Returns
     -------
@@ -215,7 +230,20 @@ def resolve_sources(
         # Both eyes share the same source GT; reading either metadata works.
         meta_paths = [meta_dir / f"{c}.json" for c in casenames]
         meta = load_metadata(meta_dir, casenames[0])
-        gt_label_path = Path(meta["original_nifti_path"])
+        meta_gt_path = Path(meta["original_nifti_path"])
+        # GT path resolution: prefer the directory from paths.yaml
+        # (current file tree) joined with the basename baked into
+        # metadata. Falls back to the metadata path verbatim only when
+        # the caller didn't pass a root -- that keeps prepare_inputs and
+        # build_smore_test_images on their existing behaviour while
+        # letting compare_native point at the live data without having
+        # to rewrite every metadata JSON.
+        if source_id.startswith("atlas_") and atlas_label_dir is not None:
+            gt_label_path = Path(atlas_label_dir) / meta_gt_path.name
+        elif source_id.startswith("chk_") and chk_pred_dir is not None:
+            gt_label_path = Path(chk_pred_dir) / meta_gt_path.name
+        else:
+            gt_label_path = meta_gt_path
         scheme = meta["input_label_scheme"]
 
         if scheme not in ("labelfusion", "nnunet"):

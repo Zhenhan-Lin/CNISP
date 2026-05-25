@@ -315,11 +315,33 @@ def main() -> int:
     # of CT-path resolution. This keeps compare_native independent of
     # the nnUNet-side pivot CSV / atlas_image_dir config (those are
     # only needed by the input-staging phases, not by Dice).
+    #
+    # GT roots come from the CURRENT paths.yaml -- not from whatever
+    # absolute path was baked into the metadata JSONs at align time.
+    # Compare therefore stays correct after a data move as long as
+    # paths.yaml is updated; the metadata JSONs (and any /home-local
+    # softlinks they happen to reference) can stay frozen.
+    atlas_label_dir = cnisp_paths.get("atlas_label_dir")
+    checklist_csv_str = cnisp_paths.get("checklist_csv")
+    chk_pred_dir = (
+        Path(checklist_csv_str).parent / "fold_0" / "predictions"
+        if checklist_csv_str else None
+    )
+    print(
+        f"[compare_native] atlas GT root            = "
+        f"{atlas_label_dir or '<unset; falling back to metadata>'}"
+    )
+    print(
+        f"[compare_native] chk_*  GT root            = "
+        f"{chk_pred_dir or '<unset; falling back to metadata>'}"
+    )
     sources, missing = resolve_sources(
         test_cases_path=test_cases,
         meta_dir=meta_dir,
         detect_atlas_offset=True,
         resolve_ct=False,
+        atlas_label_dir=Path(atlas_label_dir) if atlas_label_dir else None,
+        chk_pred_dir=chk_pred_dir,
     )
     if missing:
         # Any entries here come from metadata-scheme problems, not CT
