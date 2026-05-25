@@ -15,7 +15,7 @@ folds: [0]
 gpu_id: 0
 
 # ── CNISP-side artefacts to reuse (no re-inference) ───────────────
-cnisp_paths_yaml: orbital_shape_prior_st1/configs/paths.yaml
+cnisp_paths_yaml: /home-local/linz18/CNISP/orbital_shape_prior_st1/configs/paths.yaml
 cnisp_model_name: orbital_ad_v3
 
 # ── Option C: which CNISP runs to compare against nnUNet ──────────
