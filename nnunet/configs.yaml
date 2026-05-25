@@ -46,7 +46,7 @@ deployment_gt_dirname_for_chk: prediction/native
 # CNISP's paths.yaml. Override here if the real layout differs.
 atlas_image_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_images
 # chk_*: subjects are looked up in the PHOTON_CP_QA pivot table.
-pivot_csv: /home-local/linz18/eye_segmentation/table_collection/PHOTON_CP_QA/PHOTON_CP_QA_pivot_table.csv
+pivot_csv: /fs5/p_masi/linz18/QA_record/table_collection/PHOTON_CP_QA_pivot_table.csv
 # Columns probed in order; first existing column whose value is a
 # readable file path wins.
 pivot_image_path_columns: [ct_image_path, image_path, image, ct, t1]
