@@ -16,6 +16,8 @@ nnunet/__pycache__
 nnunet/input/*
 nnunet/prediction/*
 nnunet/comparison/*
+nnunet/input
+nnunet/prediction
 nnunet/data_prep/__pycache__
 nnunet/engine/__pycache__
 nnunet/helpers/__pycache__
