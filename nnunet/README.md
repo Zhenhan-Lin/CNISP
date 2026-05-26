@@ -101,14 +101,23 @@ For `comparison/paired_per_source__atlas_gt.csv`, `chk_*` rows carry `gt_source=
 
 For each run_tag, `compare` calls `engine/build_method_summary.py` once per method. Same script, same `comparison/paired_per_source__<run_tag>.csv` -> the nnUNet and CNISP halves of that comparison get a matched bundle:
 
-- `${work_dir}/comparison/viz/nnUNet-sparse__<run_tag>/nnUNet-sparse_*` (per-source CSV / summary CSV / TXT / PNG)
-- `${cnisp_output_basedir}/<model>/viz/<run_tag>/<cnisp_method_label>_*` (same four artifacts)
+- `${work_dir}/comparison/viz/nnUNet-sparse__<run_tag>/nnUNet-sparse_*` (per-source CSV / summary CSV / TXT / combined PNG + three stand-alone subplot PNGs)
+- `${cnisp_output_basedir}/<model>/viz/<run_tag>/<cnisp_method_label>_*` (same artifacts for the CNISP method)
+- `${work_dir}/comparison/viz/paired__<run_tag>/paired_*` (head-to-head paired plots that overlay both methods on shared axes; this is the dir to read if you want to actually SEE the comparison)
 
-Each `_recon_summary.png` is three stacked subplots:
+Each `_recon_summary.png` is three stacked subplots, and each subplot is also written as a stand-alone PNG so the labels stay legible:
 
 1. Overall mean Dice vs effective resolution (errorbar over sources in each bucket).
 2. Per-class Dice vs effective resolution (ON / Globe / Fat / Recti).
 3. Per-case mean-Dice boxplot per eff_res bucket.
+
+The titles deliberately read "{method}: Dice vs effective resolution" -- nnUNet-sparse is image-conditioned segmentation, not reconstruction, so the per-method panels share neutral wording with the paired comparison plot.
+
+The paired plot bundle is delta-focused:
+
+1. Overall mean Dice vs eff_res, both methods overlaid as two errorbar lines.
+2. Per-class Dice vs eff_res as a 2x2 grid (one panel per foreground class), both methods overlaid in every panel.
+3. `(CNISP - nnUNet)` Dice delta vs eff_res bucket on the mean row -- positive bars => CNISP wins in that bucket.
 
 CNISP's old `recon_summary.png` from `cnisp-viz` plotted a separate "observed-only" line; that line is intentionally **omitted** here because `comparison/paired_per_source__<run_tag>.csv` only carries dense Dice. Keeping both methods on the same single-curve layout makes side-by-side comparison honest.
 

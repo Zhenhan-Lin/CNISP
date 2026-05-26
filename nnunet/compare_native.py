@@ -85,12 +85,46 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from nnunet.resolve_gt import (  # noqa: E402
-    NNUNET_LABELS, build_struct_to_value, resolve_sources,
+    build_struct_to_value, resolve_sources,
 )
 
 
 STRUCT_ORDER = ["ON", "Globe", "Fat", "Recti"]
 NNUNET_METHOD_LABEL = "nnUNet-sparse"
+
+
+def _detect_pred_offset(arr: np.ndarray, scheme: str) -> int:
+    """Recover the additive label offset baked into a saved prediction.
+
+    Atlas GT may carry a -1000 (or other negative) offset on every label.
+    When CNISP's ``native_mapping.remap_canonical_to_original`` is unable
+    to look up ``meta["original_nifti_path"]`` at inference time (e.g.
+    after a data move), the saved prediction is written WITHOUT that
+    offset even though the GT keeps it. Comparing them with the GT
+    scheme map then yields all-zero Dice for atlas sources.
+
+    To make Dice robust to that mismatch we recover the offset directly
+    from the prediction array. The canonical foreground value for "ON"
+    is 1 in both LABELFUSION_LABELS and NNUNET_LABELS, so any negative
+    label present means ``offset = min(neg_values) - 1``. When no
+    negative labels are present we assume the prediction uses the bare
+    scheme (``offset = 0``).
+
+    Parameters
+    ----------
+    arr : ndarray
+        Prediction volume as loaded by ``_load_label_volume``.
+    scheme : str
+        Source GT scheme name (``"labelfusion"`` or ``"nnunet"``); kept
+        for signature symmetry with ``build_struct_to_value`` even though
+        the detection itself is scheme-agnostic.
+    """
+    del scheme  # detection is scheme-agnostic (ON canonical value is 1 in both)
+    if arr.size == 0:
+        return 0
+    if np.any(arr < 0):
+        return int(arr[arr < 0].min()) - 1
+    return 0
 
 
 # ── Generic helpers ──────────────────────────────────────────────
@@ -440,7 +474,7 @@ def main() -> int:
     n_done = 0
     n_skipped_gt = 0
     n_skipped_nnunet = 0
-    nnunet_struct_map = {n: NNUNET_LABELS[n] for n in STRUCT_ORDER}
+    n_pred_offset_fixed = 0
 
     for src in sources:
         sid = src.source_id
@@ -485,9 +519,15 @@ def main() -> int:
                     return 3
                 print(f"  [skip nnUNet step{step:02d}] {msg}", file=sys.stderr)
                 continue
+            # nnUNet predictions are always written in the bare nnunet
+            # scheme {ON:1, Recti:2, Globe:3, Fat:4} with no offset, so
+            # the pred scheme map is fixed regardless of source / GT
+            # offset. (Dice still works against an offset GT because
+            # ``_dice_for_source`` uses each side's own scheme map.)
+            nnunet_pred_struct_map = build_struct_to_value("nnunet", 0)
             dices = _dice_for_source(
                 nn_pred, gt,
-                pred_scheme_map=nnunet_struct_map,
+                pred_scheme_map=nnunet_pred_struct_map,
                 gt_scheme_map=src.gt_struct_to_value,
             )
             eff_res = eff_res_idx.get((sid, step))
@@ -504,13 +544,16 @@ def main() -> int:
 
         # ── CNISP per step ────────────────────────────────────────
         # CNISP's native_mapping.remap_canonical_to_original emits labels
-        # in the SAME scheme as the source GT, so the same struct->value
-        # map works for both. (When in deployment mode and the source is
-        # chk_*, both GT and CNISP pred use the nnunet scheme; when the
-        # source is atlas, both use the atlas scheme. No re-mapping
-        # needed -- the chk_* swap above already moved GT into the
-        # nnunet scheme.)
-        cnisp_pred_struct_map = src.gt_struct_to_value
+        # in the SAME scheme as the source GT, but the additive offset
+        # (e.g. atlas's -1000) is detected at *inference time* by peeking
+        # at ``meta["original_nifti_path"]``. If that path was stale on
+        # the inference host (data move, missing softlink, ...) the
+        # saved pred ends up in the bare scheme (e.g. {1,3,5,7}) even
+        # though the GT keeps the offset (e.g. {-999,-997,-995,-993}).
+        # We recover the prediction's actual offset per-file below so
+        # the Dice match is correct regardless of inference-time path
+        # availability. The bare scheme always works when offset == 0,
+        # so this also covers chk_* sources and deployment-mode runs.
         for step in sorted(cnisp_step_paths):
             path_map = cnisp_step_paths[step]
             if sid not in path_map:
@@ -535,6 +578,26 @@ def main() -> int:
                 print(f"  [skip CNISP step{step:02d}] {msg}", file=sys.stderr)
                 continue
 
+            pred_offset = _detect_pred_offset(cn_pred, src.gt_scheme)
+            if pred_offset != src.gt_label_offset:
+                # Inference-time offset detection disagreed with GT-time
+                # detection; rebuild the pred scheme map from what the
+                # file actually contains so Dice doesn't silently zero
+                # out. Logged once per (source, step) so a healthy run
+                # stays quiet but a broken pipeline is immediately
+                # visible.
+                n_pred_offset_fixed += 1
+                if n_pred_offset_fixed <= 3:
+                    print(
+                        f"  [info CNISP step{step:02d}] {sid}: pred offset "
+                        f"{pred_offset} != GT offset {src.gt_label_offset}; "
+                        f"using pred-detected offset for Dice.",
+                        file=sys.stderr,
+                    )
+            cnisp_pred_struct_map = build_struct_to_value(
+                src.gt_scheme, pred_offset,
+            )
+
             dices = _dice_for_source(
                 cn_pred, gt,
                 pred_scheme_map=cnisp_pred_struct_map,
@@ -556,6 +619,11 @@ def main() -> int:
 
     print(f"\n[compare_native] processed {n_done} source(s); "
           f"skipped: gt={n_skipped_gt} nnUNet={n_skipped_nnunet}")
+    if n_pred_offset_fixed:
+        print(f"[compare_native] CNISP pred offset auto-corrected for "
+              f"{n_pred_offset_fixed} (source, step) row(s) -- pred file's "
+              f"label range disagreed with GT's; re-run CNISP infer.py "
+              f"after fixing paths.yaml to silence this.")
 
     # ── Write per-source CSV ──────────────────────────────────────
     out_dir = work_dir / "comparison"

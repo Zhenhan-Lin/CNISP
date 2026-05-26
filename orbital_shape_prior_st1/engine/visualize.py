@@ -13,6 +13,11 @@ This module owns the artifacts that are **specific to CNISP** and that
                                 Dice between CNISP's own predictions at
                                 different sparsities, on its canonical
                                 iso patch grid. nnUNet has no analogue.
+                                Aggregates over the entire test set, AND
+                                a ``per_sample/<source_id>/`` bundle is
+                                emitted per scan (OD+OS averaged) so
+                                outliers can be inspected without
+                                re-running anything.
     native_sweep_summary.json   per-step audit of native_space_step_XX/
                                 outputs (source coverage, file presence).
     stdout pickle summary       inference_results.pkl / sweep_results.pkl
@@ -224,13 +229,33 @@ def _compute_pairwise_dice(preds, step_sizes, casenames, num_classes):
     return mean_per_class, per_case
 
 
+def _source_id_of(casename: str) -> str:
+    """Strip the trailing eye tag (``_OD`` / ``_OS``) from a casename."""
+    if casename.endswith("_OD") or casename.endswith("_OS"):
+        return casename[:-3]
+    return casename
+
+
+def _group_indices_by_source(casenames: List[str]) -> Dict[str, List[int]]:
+    """source_id -> list of indices into ``casenames`` (one per eye)."""
+    out: Dict[str, List[int]] = {}
+    for ci, cn in enumerate(casenames):
+        out.setdefault(_source_id_of(cn), []).append(ci)
+    return out
+
+
 def _plot_heatmap(matrix, step_sizes, spacings_per_step, save_path, title):
     n = len(step_sizes)
     labels = [f"step={s}\n({spacings_per_step.get(s, 0):.1f}mm)"
              for s in step_sizes]
 
     fig, ax = plt.subplots(figsize=(2.0 + 0.9 * n, 1.6 + 0.9 * n))
-    vmin = max(0.6, np.nanmin(matrix) - 0.02)
+    # Per-sample matrices can be entirely NaN when the case is missing
+    # most steps -- guard the colour range so the figure still renders.
+    if np.all(np.isnan(matrix)):
+        vmin = 0.6
+    else:
+        vmin = max(0.6, float(np.nanmin(matrix)) - 0.02)
     im = ax.imshow(matrix, cmap="RdYlGn", vmin=vmin, vmax=1.0,
                    interpolation="nearest", aspect="equal")
     for i in range(n):
@@ -253,6 +278,86 @@ def _plot_heatmap(matrix, step_sizes, spacings_per_step, save_path, title):
     plt.tight_layout()
     fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def _write_per_sample_matrix_csv(
+    matrix: np.ndarray,
+    step_sizes: List[int],
+    csv_path: Path,
+) -> None:
+    """Dump a single (m x m) heatmap matrix to CSV for downstream inspection."""
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([""] + [f"step_{s}" for s in step_sizes])
+        for si, s1 in enumerate(step_sizes):
+            row = [f"step_{s1}"]
+            for sj in range(len(step_sizes)):
+                val = matrix[si, sj]
+                row.append("" if np.isnan(val) else f"{val:.4f}")
+            w.writerow(row)
+
+
+def _emit_per_sample_heatmaps(
+    per_case: np.ndarray,
+    casenames: List[str],
+    step_sizes: List[int],
+    spacings_per_step: Dict[int, float],
+    num_classes: int,
+    out_root: Path,
+) -> int:
+    """Write a 5-heatmap bundle (mean + per-structure) per source_id.
+
+    Cases for the two eyes (OD/OS) of the same scan are averaged together
+    so each source contributes ONE per-class heatmap, matching the user's
+    "one heatmap per scan" expectation. NaN entries (missing iso pred for
+    that step) propagate via ``np.nanmean`` so a case that's missing one
+    step still renders with whatever was computed.
+
+    Returns the number of source_ids written.
+    """
+    if per_case.size == 0:
+        return 0
+
+    groups = _group_indices_by_source(casenames)
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    n_written = 0
+    for source_id in sorted(groups):
+        idxs = groups[source_id]
+        # Average over eyes for this source: shape [K, M, M].
+        per_class_matrix = np.nanmean(per_case[idxs], axis=0)
+        if np.all(np.isnan(per_class_matrix)):
+            continue
+
+        sample_dir = out_root / source_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+
+        # mean over foreground classes -> [M, M]
+        mean_matrix = np.nanmean(per_class_matrix, axis=0)
+        _plot_heatmap(
+            mean_matrix, step_sizes, spacings_per_step,
+            sample_dir / "cross_res_dice_mean.png",
+            f"Cross-Resolution Dice (mean) -- {source_id}",
+        )
+        _write_per_sample_matrix_csv(
+            mean_matrix, step_sizes,
+            sample_dir / "pairwise_dice_matrix_mean.csv",
+        )
+
+        for cls_id in range(1, num_classes):
+            name = _STRUCT_NAMES.get(cls_id, f"class_{cls_id}")
+            _plot_heatmap(
+                per_class_matrix[cls_id - 1],
+                step_sizes, spacings_per_step,
+                sample_dir / f"cross_res_dice_{name}.png",
+                f"Cross-Resolution Dice -- {name} -- {source_id}",
+            )
+            _write_per_sample_matrix_csv(
+                per_class_matrix[cls_id - 1], step_sizes,
+                sample_dir / f"pairwise_dice_matrix_{name}.csv",
+            )
+        n_written += 1
+    return n_written
 
 
 def run_cross_resolution_analysis(output_dir: Path, step_sizes: List[int],
@@ -302,7 +407,7 @@ def run_cross_resolution_analysis(output_dir: Path, step_sizes: List[int],
         print(f"    step={step}: {len(preds[step])}/{len(casenames)} loaded")
 
     print("  Computing pairwise Dice...")
-    mean_per_class, _ = _compute_pairwise_dice(
+    mean_per_class, per_case = _compute_pairwise_dice(
         preds, available_steps, casenames, num_classes,
     )
     matrix = mean_per_class.mean(axis=0)  # mean over foreground classes
@@ -346,11 +451,28 @@ def run_cross_resolution_analysis(output_dir: Path, step_sizes: List[int],
                           for sj in range(len(available_steps))])
     print(f"  Matrix CSV: {csv_path}")
 
+    # ── Per-sample (per-source) heatmaps ─────────────────────────
+    # The aggregate heatmaps above mean over every test case. We also
+    # emit one bundle per source_id (OD+OS averaged for the same scan)
+    # so reviewers can inspect outliers without re-running anything.
+    per_sample_dir = analysis_dir / "per_sample"
+    n_per_sample = _emit_per_sample_heatmaps(
+        per_case, casenames, available_steps, spacings_per_step,
+        num_classes, per_sample_dir,
+    )
+    if n_per_sample:
+        print(f"  Per-sample heatmaps: {per_sample_dir}/ "
+              f"({n_per_sample} source(s); each holds mean + per-structure)")
+    else:
+        print("  Per-sample heatmaps: <none emitted; per_case was empty>")
+
     return {
         "matrix": matrix,
         "per_class_matrix": mean_per_class,
         "step_sizes": available_steps,
         "spacings_per_step": spacings_per_step,
+        "per_sample_dir": str(per_sample_dir),
+        "n_per_sample": n_per_sample,
     }
 
 

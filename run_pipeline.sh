@@ -121,22 +121,35 @@
 #                                paired_per_source__<run_tag>.csv
 #                                paired_summary__<run_tag>.csv
 #                                paired_summary__<run_tag>.txt
-#                          (b) per-method by-eff_res viz bundle: one
-#                              for the nnUNet rows (Diced against the
-#                              same chk_* GT as that CNISP run), one for
-#                              the CNISP rows. Each bundle =
-#                                {method}_per_source.csv
-#                                {method}_summary_by_eff_res.csv
-#                                {method}_summary_by_eff_res.txt
-#                                {method}_recon_summary.png
+#                          (b) per-method by-eff_res viz bundle (single-
+#                              method curves; one per method). Each
+#                              bundle = {method}_per_source.csv +
+#                              {method}_summary_by_eff_res.csv +
+#                              {method}_summary_by_eff_res.txt +
+#                              {method}_recon_summary.png +
+#                              {method}_overall_dice_vs_eff_res.png +
+#                              {method}_per_class_dice_vs_eff_res.png +
+#                              {method}_per_case_dice_distribution.png.
 #                              Output dirs:
 #                                nnUNet -> ${work_dir}/comparison/viz/<method>__<run_tag>/
 #                                CNISP  -> ${cnisp_output_basedir}/<model>/viz/<run_tag>/
+#                          (c) head-to-head paired plots that overlay
+#                              both methods on shared axes (this is the
+#                              dir to look at to actually SEE the
+#                              comparison):
+#                                paired_overall_dice_vs_eff_res.png
+#                                paired_per_class_dice_vs_eff_res.png
+#                                paired_delta_dice_vs_eff_res.png
+#                                paired_dice_vs_eff_res.png  (combined)
+#                                paired_summary_by_eff_res.csv
+#                              Output dir:
+#                                ${work_dir}/comparison/viz/paired__<run_tag>/
 #                         build_cnisp_native_sweep.py is a no-op for
 #                         runs whose native_space_step_XX/ already exist.
 #                         (nnunet/engine/build_cnisp_native_sweep.py
 #                          + nnunet/compare_native.py
-#                          + nnunet/engine/build_method_summary.py)
+#                          + nnunet/engine/build_method_summary.py
+#                          + nnunet/engine/build_paired_summary.py)
 #
 # Dependency order (the order phases run when none are specified):
 #   cnisp-train
@@ -624,6 +637,7 @@ phase_compare() {
         local paired_csv="$WORK_DIR/comparison/paired_per_source__${run_tag}.csv"
         local cnisp_viz_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$run_tag"
         local nnunet_viz_dir="$WORK_DIR/comparison/viz/nnUNet-sparse__${run_tag}"
+        local paired_viz_dir="$WORK_DIR/comparison/viz/paired__${run_tag}"
 
         python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
                 --config "$CONFIG" \
@@ -635,6 +649,16 @@ phase_compare() {
                 --method nnUNet-sparse \
                 --paired-csv "$paired_csv" \
                 --out-dir "$nnunet_viz_dir"
+
+        # 4) Head-to-head paired plots (both methods overlaid). The
+        #    per-method bundles above stay as the raw single-method
+        #    view; this directory is the one a reviewer should look at
+        #    to actually SEE the comparison.
+        python3 "$REPO_ROOT/nnunet/engine/build_paired_summary.py" \
+                --config "$CONFIG" \
+                --cnisp-method "$method" \
+                --paired-csv "$paired_csv" \
+                --out-dir "$paired_viz_dir"
     done
 }
 
@@ -686,5 +710,8 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
     echo "    $WORK_DIR/comparison/paired_summary__${rt}.csv"
     echo "    $WORK_DIR/comparison/paired_summary__${rt}.txt"
     echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${rt}/nnUNet-sparse_recon_summary.png"
+    echo "    $WORK_DIR/comparison/viz/paired__${rt}/paired_dice_vs_eff_res.png"
+    echo "      (+ paired_{overall,per_class,delta}_dice_vs_eff_res.png "
+    echo "         + paired_summary_by_eff_res.csv -- the head-to-head view)"
 done
 echo "============================================================"

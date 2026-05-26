@@ -11,7 +11,13 @@ a matched set of artifacts:
 * ``{out_dir}/{method}_summary_by_eff_res.csv``  - aggregated by
                                                     ``(eff_res_bucket, structure)``
 * ``{out_dir}/{method}_summary_by_eff_res.txt``  - human-readable wide table
-* ``{out_dir}/{method}_recon_summary.png``       - 3-subplot figure:
+* ``{out_dir}/{method}_recon_summary.png``       - combined 3-subplot figure
+* ``{out_dir}/{method}_overall_dice_vs_eff_res.png``
+* ``{out_dir}/{method}_per_class_dice_vs_eff_res.png``
+* ``{out_dir}/{method}_per_case_dice_distribution.png``
+  The latter three are the same subplots in stand-alone format so each
+  panel renders at full size (the combined PNG above cannot reproduce
+  that without becoming too tall to read). Subplots:
     1. overall mean Dice vs eff_res     (errorbar over sources in bucket)
     2. per-class Dice vs eff_res        (4 lines: ON / Globe / Fat / Recti)
     3. per-case Dice distribution       (boxplot + scatter per bucket)
@@ -60,7 +66,7 @@ import math
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -284,19 +290,13 @@ def _write_summary_txt(
         f.write("\n")
 
 
-def _plot_summary_png(
+def _draw_overall_dice(
+    ax,
     method: str,
     bucket_order: List[str],
     bucket_struct: Dict[str, Dict[str, List[float]]],
     bucket_eff: Dict[str, List[float]],
-    bucket_step_perCase: Dict[str, Dict[int, List[float]]],
-    out_path: Path,
 ) -> None:
-    fig = plt.figure(figsize=(14, 11))
-    gs = fig.add_gridspec(3, 1, hspace=0.5)
-
-    # ── (1) Overall mean Dice vs eff_res ─────────────────────────
-    ax0 = fig.add_subplot(gs[0])
     x_eff: List[float] = []
     y_mean: List[float] = []
     y_std: List[float] = []
@@ -317,19 +317,25 @@ def _plot_summary_png(
         ys = [y_mean[i] for i in order]
         es = [y_std[i] for i in order]
         ns = [n_labels[i] for i in order]
-        ax0.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color="#444")
+        ax.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color="#444")
         for x, y, lab in zip(xs, ys, ns):
-            ax0.annotate(f"{y:.3f}\n{lab}", (x, y),
-                         textcoords="offset points", xytext=(0, 10),
-                         ha="center", fontsize=8, color="#444")
-    ax0.set_xlabel("effective resolution (mm, through-plane)")
-    ax0.set_ylabel("mean Dice (4 foreground classes)")
-    ax0.set_title(f"{method}: overall Dice vs effective resolution")
-    ax0.set_ylim(0, 1)
-    ax0.grid(True, alpha=0.3)
+            ax.annotate(f"{y:.3f}\n{lab}", (x, y),
+                        textcoords="offset points", xytext=(0, 10),
+                        ha="center", fontsize=8, color="#444")
+    ax.set_xlabel("effective resolution (mm, through-plane)")
+    ax.set_ylabel("mean Dice (4 foreground classes)")
+    ax.set_title(f"{method}: overall Dice vs effective resolution")
+    ax.set_ylim(0, 1)
+    ax.grid(True, alpha=0.3)
 
-    # ── (2) Per-class Dice vs eff_res ─────────────────────────────
-    ax1 = fig.add_subplot(gs[1])
+
+def _draw_per_class_dice(
+    ax,
+    method: str,
+    bucket_order: List[str],
+    bucket_struct: Dict[str, Dict[str, List[float]]],
+    bucket_eff: Dict[str, List[float]],
+) -> None:
     for c in STRUCT_ORDER:
         xs_c: List[float] = []
         ys_c: List[float] = []
@@ -349,17 +355,22 @@ def _plot_summary_png(
         xs_c = [xs_c[i] for i in order]
         ys_c = [ys_c[i] for i in order]
         es_c = [es_c[i] for i in order]
-        ax1.errorbar(xs_c, ys_c, yerr=es_c, fmt="o-", capsize=3,
-                     color=CLASS_COLORS[c], label=c)
-    ax1.set_xlabel("effective resolution (mm, through-plane)")
-    ax1.set_ylabel("Dice")
-    ax1.set_title(f"{method}: per-class Dice vs effective resolution")
-    ax1.set_ylim(0, 1)
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="lower left", fontsize=8, ncol=2)
+        ax.errorbar(xs_c, ys_c, yerr=es_c, fmt="o-", capsize=3,
+                    color=CLASS_COLORS[c], label=c)
+    ax.set_xlabel("effective resolution (mm, through-plane)")
+    ax.set_ylabel("Dice")
+    ax.set_title(f"{method}: per-class Dice vs effective resolution")
+    ax.set_ylim(0, 1)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower left", fontsize=8, ncol=2)
 
-    # ── (3) Per-case Dice distribution per bucket ─────────────────
-    ax2 = fig.add_subplot(gs[2])
+
+def _draw_per_case_distribution(
+    ax,
+    method: str,
+    bucket_order: List[str],
+    bucket_step_perCase: Dict[str, Dict[int, List[float]]],
+) -> None:
     box_data: List[List[float]] = []
     box_pos: List[int] = []
     box_labels: List[str] = []
@@ -373,31 +384,97 @@ def _plot_summary_png(
         box_pos.append(i)
         box_labels.append(label)
     if box_data:
-        bp = ax2.boxplot(box_data, positions=box_pos, widths=0.6,
-                         patch_artist=True, showfliers=True)
+        bp = ax.boxplot(box_data, positions=box_pos, widths=0.6,
+                        patch_artist=True, showfliers=True)
         for patch in bp["boxes"]:
             patch.set_facecolor("#a6cee3")
             patch.set_alpha(0.7)
         for pos, vals in zip(box_pos, box_data):
-            ax2.scatter([pos] * len(vals), vals, s=8, color="#1f3a5f",
-                        alpha=0.35, zorder=3)
-            ax2.annotate(f"n={len(vals)}", (pos, max(vals)),
-                         textcoords="offset points", xytext=(0, 6),
-                         ha="center", fontsize=8, color="gray")
-        ax2.set_xticks(box_pos)
-        ax2.set_xticklabels(box_labels, rotation=20, fontsize=8)
-    ax2.set_ylabel("per-case Dice (mean over 4 foreground classes)")
-    ax2.set_title(f"{method}: per-case Dice distribution by eff_res bucket")
-    ax2.set_ylim(0, 1)
-    ax2.grid(True, alpha=0.3)
+            ax.scatter([pos] * len(vals), vals, s=8, color="#1f3a5f",
+                       alpha=0.35, zorder=3)
+            ax.annotate(f"n={len(vals)}", (pos, max(vals)),
+                        textcoords="offset points", xytext=(0, 6),
+                        ha="center", fontsize=8, color="gray")
+        ax.set_xticks(box_pos)
+        ax.set_xticklabels(box_labels, rotation=20, fontsize=8)
+    ax.set_ylabel("per-case Dice (mean over 4 foreground classes)")
+    ax.set_title(f"{method}: per-case Dice distribution by eff_res bucket")
+    ax.set_ylim(0, 1)
+    ax.grid(True, alpha=0.3)
 
+
+def _save_standalone(out_path: Path, figsize, draw_fn) -> None:
+    """Render a single panel into its own PNG via ``draw_fn(ax)``."""
+    fig, ax = plt.subplots(figsize=figsize)
+    draw_fn(ax)
+    fig.tight_layout()
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_summary_png(
+    method: str,
+    bucket_order: List[str],
+    bucket_struct: Dict[str, Dict[str, List[float]]],
+    bucket_eff: Dict[str, List[float]],
+    bucket_step_perCase: Dict[str, Dict[int, List[float]]],
+    out_path: Path,
+    standalone_paths: Optional[Dict[str, Path]] = None,
+) -> None:
+    """Render the combined 3-subplot PNG plus optional stand-alone copies.
+
+    ``standalone_paths`` (when given) is a mapping from panel name
+    (``"overall" | "per_class" | "per_case"``) to the file path each
+    individual panel should be written to. The combined PNG is always
+    written to ``out_path`` regardless.
+    """
+    fig = plt.figure(figsize=(14, 11))
+    gs = fig.add_gridspec(3, 1, hspace=0.5)
+
+    ax0 = fig.add_subplot(gs[0])
+    _draw_overall_dice(ax0, method, bucket_order, bucket_struct, bucket_eff)
+
+    ax1 = fig.add_subplot(gs[1])
+    _draw_per_class_dice(ax1, method, bucket_order, bucket_struct, bucket_eff)
+
+    ax2 = fig.add_subplot(gs[2])
+    _draw_per_case_distribution(ax2, method, bucket_order, bucket_step_perCase)
+
+    # Neutral wording on purpose. CNISP IS a reconstruction model, but
+    # this same driver also renders nnUNet-sparse panels (which are
+    # image-conditioned segmentation, NOT reconstruction). Saying
+    # "Dice vs effective resolution" is true for both and keeps the
+    # per-method title symmetric with the paired comparison plot.
     fig.suptitle(
-        f"{method} reconstruction summary  "
+        f"{method}: Dice vs effective resolution  "
         f"(driven by paired_per_source.csv)",
         fontsize=13, fontweight="bold", y=0.995,
     )
     fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+    if standalone_paths:
+        if "overall" in standalone_paths:
+            _save_standalone(
+                standalone_paths["overall"], (10, 5),
+                lambda ax: _draw_overall_dice(
+                    ax, method, bucket_order, bucket_struct, bucket_eff,
+                ),
+            )
+        if "per_class" in standalone_paths:
+            _save_standalone(
+                standalone_paths["per_class"], (10, 5),
+                lambda ax: _draw_per_class_dice(
+                    ax, method, bucket_order, bucket_struct, bucket_eff,
+                ),
+            )
+        if "per_case" in standalone_paths:
+            _save_standalone(
+                standalone_paths["per_case"], (12, 5),
+                lambda ax: _draw_per_case_distribution(
+                    ax, method, bucket_order, bucket_step_perCase,
+                ),
+            )
 
 
 def main() -> int:
@@ -438,17 +515,26 @@ def main() -> int:
     summary_csv = out_dir / f"{args.method}_summary_by_eff_res.csv"
     summary_txt = out_dir / f"{args.method}_summary_by_eff_res.txt"
     summary_png = out_dir / f"{args.method}_recon_summary.png"
+    standalone_paths = {
+        "overall":   out_dir / f"{args.method}_overall_dice_vs_eff_res.png",
+        "per_class": out_dir / f"{args.method}_per_class_dice_vs_eff_res.png",
+        "per_case":  out_dir / f"{args.method}_per_case_dice_distribution.png",
+    }
 
     _write_per_source_csv(rows, per_src)
     _write_summary_csv(bucket_order, bucket_struct, bucket_eff, summary_csv)
     _write_summary_txt(args.method, bucket_order, bucket_struct,
                        bucket_eff, summary_txt)
     _plot_summary_png(args.method, bucket_order, bucket_struct,
-                      bucket_eff, bucket_step, summary_png)
+                      bucket_eff, bucket_step, summary_png,
+                      standalone_paths=standalone_paths)
 
     print(f"[build_method_summary] {args.method}: {len(rows)} long rows -> "
           f"{out_dir}/")
-    for p in (per_src, summary_csv, summary_txt, summary_png):
+    for p in (per_src, summary_csv, summary_txt, summary_png,
+              standalone_paths["overall"],
+              standalone_paths["per_class"],
+              standalone_paths["per_case"]):
         print(f"  {p}")
     return 0
 
