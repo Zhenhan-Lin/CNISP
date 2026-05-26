@@ -22,12 +22,13 @@ test_fraction: 0.2
 # --- Sparsification (synthetic anisotropy for training) ---
 # Keep every Nth slice along this axis to simulate thick-slice acquisition
 slice_step_size: 4
-# slice_step_axis: int (0/1/2 = sag/cor/axial in RAS, uniform across cases)
-# or "auto" (per-case argmax(patch_spacing), so each scan is sparsified
-# along its own natural through-plane direction). The prior learns the
-# distribution of sparsity patterns implied by this choice -- changing
-# it requires retraining. See test_default.yaml for full notes.
-slice_step_axis: 2
+# slice_step_axis: "auto" (DEFAULT) picks per-case argmax(patch_spacing)
+# so each scan is sparsified along its own natural through-plane
+# direction after canonical alignment. Legacy mode is int 0/1/2
+# (uniform RAS axis). The prior learns the distribution of sparsity
+# patterns implied by this choice -- changing it requires retraining
+# AND a matching test_default.yaml. See test_default.yaml for full notes.
+slice_step_axis: auto
 use_thick_slices: false
 
 # --- Sampling ---

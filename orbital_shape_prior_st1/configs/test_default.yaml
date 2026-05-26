@@ -68,23 +68,25 @@ adaptive_step_sweep:
   summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
 
 # slice_step_axis:
-#   int 0/1/2  : sparsify every patch along this RAS axis (legacy,
-#                uniform across the cohort). 2 = S-I in RAS (axial),
-#                matching the original Amiranashvili convention. Safe
-#                default for axial-acquired cohorts; for non-axial
-#                scans (sagittal/coronal) it simulates a S-I sparsity
-#                pattern that doesn't match the original acquisition.
-#   "auto"     : per-case axis = argmax(patch_spacing) for each scan.
-#                After canonical alignment the patch is in RAS with
-#                diagonal affine, so the thick patch voxel axis IS the
-#                scan's natural through-plane direction. This mode
+#   "auto"     : (DEFAULT) per-case axis = argmax(patch_spacing) for
+#                each scan. After canonical alignment the patch is in
+#                RAS with diagonal affine, so the thick patch voxel axis
+#                IS the scan's natural through-plane direction. This
 #                makes the simulated thick-slice sparsification mirror
 #                each scan's actual acquisition geometry (axial scans
-#                still degrade S-I; sagittal scans degrade L-R; coronal
-#                scans degrade A-P). Requires retraining if the prior
-#                was trained with a different mode -- mix only after
-#                you have a matching checkpoint.
-slice_step_axis: 2
+#                degrade S-I, sagittal scans degrade L-R, coronal scans
+#                degrade A-P). Also stops sparsify_inputs.py from
+#                source-level rejecting non-axial raw CTs as oblique to
+#                a uniform S-I axis.
+#   int 0/1/2  : sparsify every patch along this RAS axis (legacy,
+#                uniform across the cohort). 2 = S-I in RAS (axial),
+#                matching the original Amiranashvili convention. Use
+#                only if the prior checkpoint was trained with this
+#                exact integer value.
+# NB: train and test slice_step_axis MUST match the value the prior was
+# trained with -- the network learns the sparsity-pattern distribution
+# implied by this knob. Switching modes requires retraining the prior.
+slice_step_axis: auto
 use_thick_slices: false    # Must be false for multi-class labels
 
 # ── Checkpoint selection ──────────────────────────────────────────

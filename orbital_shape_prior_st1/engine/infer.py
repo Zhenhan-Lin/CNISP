@@ -422,7 +422,7 @@ def infer_test_set(params):
           max_eff_resolution_mm: 12.0
           primary_eff_res_mm: 3.0
           summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
-        slice_step_axis: 2
+        slice_step_axis: auto    # or int 0/1/2 (legacy uniform RAS axis)
         # Option C switches:
         test_label_source: atlas_gt          # or nnunet_pred (deployment)
         run_tag:           atlas_gt          # output subdir name

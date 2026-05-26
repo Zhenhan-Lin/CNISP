@@ -70,13 +70,16 @@ smore_suffix: _smore
 # data_prep/sparsify_inputs.py uses four knobs to gate every write.
 #
 # 1. cnisp_slice_step_axis (RAS world axis: 0=R-L, 1=A-P, 2=S-I):
-#    Fallback canonical direction CNISP sparsifies along on the
-#    canonical patch. New CNISP runs write a per-(case, step)
-#    ``step_axis`` field into sweep_results.pkl, so sparsify_inputs.py
-#    normally reads the RAS direction directly per source -- this
-#    matches even ``slice_step_axis: auto`` runs that vary the axis
-#    per case. This knob is consulted only when the sweep predates
-#    that field. Default 2 matches CNISP's legacy axial convention.
+#    LEGACY fallback canonical direction. New CNISP runs (both
+#    ``slice_step_axis: auto`` and ``slice_step_axis: <int>``) write a
+#    per-(case, step) ``step_axis`` field into sweep_results.pkl, and
+#    sparsify_inputs.py reads it directly per source. This knob is
+#    consulted only when the sweep predates that field (pre-axial-fix
+#    runs). For ``slice_step_axis: auto`` cohorts the right per-case
+#    axes vary, so a single integer here would be wrong for some
+#    sources -- always re-run cnisp-infer + nnunet-predict-sweep
+#    after touching slice_step_axis instead of relying on this
+#    fallback. Default 2 matches CNISP's legacy axial convention.
 # 2. sparse_axis_alignment_min (relative; 0..1):
 #    Minimum |affine[canonical_axis, :]| / col_norm projection required
 #    for the chosen voxel axis. Below this, the raw CT's grid is too
