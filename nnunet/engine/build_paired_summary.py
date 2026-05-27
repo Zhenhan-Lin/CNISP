@@ -462,15 +462,17 @@ def _plot_paired(
     # squashed. Standalones above use 10x5 (2:1) for overall + delta
     # and 12x9 (~1.33:1 per subplot) for the 2x2 grid. With the
     # numbers below, the combined rows resolve to roughly
-    #   overall      : 11 × 4.2  → 2.6:1
-    #   per-class    : 5.5 × 3.0 → 1.83:1
-    #   delta        : 11 × 4.2  → 2.6:1
-    # tighter than the standalone but no longer pancake. If you tweak
-    # these, double-check the per-class subplot doesn't go wider than
-    # ~2:1 — at that point error bars + value labels start to collide
-    # with the legend.
+    #   overall      : 11 × 3.8 → 2.9:1
+    #   per-class    : 5.5 × 3.1 → 1.77:1
+    #   delta        : 11 × 3.8 → 2.9:1
+    # Figure height is sized so that, after the suptitle drop
+    # (y=0.92 below; see comment there), bbox_inches="tight" doesn't
+    # leave a tall blank band above the title. If you tweak these,
+    # double-check the per-class subplot doesn't go wider than ~2:1 —
+    # at that point error bars + value labels start to collide with
+    # the legend.
     combined_path = out_dir / "paired_dice_vs_eff_res.png"
-    fig = plt.figure(figsize=(11, 20))
+    fig = plt.figure(figsize=(11, 18))
     gs = fig.add_gridspec(3, 1, hspace=0.35, height_ratios=[1, 1.9, 1])
 
     ax0 = fig.add_subplot(gs[0])
@@ -488,10 +490,17 @@ def _plot_paired(
     _draw_delta(ax2, cnisp_method, bucket_order,
                 by_method_bucket, eff_by_bucket)
 
+    # ``bbox_inches="tight"`` crops blank space above the suptitle but
+    # NOT the gap between the suptitle and the first subplot — that gap
+    # is purely (y_suptitle - gridspec_top) × fig_height. With the
+    # default gridspec_top ≈ 0.88 and fig_height=18, y=0.92 puts the
+    # title about 0.7 in above the first subplot (= comfortable
+    # breathing room without looking detached); y=0.995 was leaving a
+    # ~2.1 in air gap once tight-cropped.
     fig.suptitle(
         f"{NNUNET_METHOD_LABEL} vs {cnisp_method}: Dice vs effective resolution  "
         f"(driven by paired_per_source.csv)",
-        fontsize=13, fontweight="bold", y=0.995,
+        fontsize=13, fontweight="bold", y=0.92,
     )
     fig.savefig(str(combined_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
