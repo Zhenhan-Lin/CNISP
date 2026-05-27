@@ -21,4 +21,5 @@ nnunet/prediction
 nnunet/data_prep/__pycache__
 nnunet/engine/__pycache__
 nnunet/helpers/__pycache__
+nnunet/source_to_path.json
 main.py
