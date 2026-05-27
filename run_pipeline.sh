@@ -524,32 +524,13 @@ _run_cnisp_infer_for() {
 
 _skip_cnisp_infer_if_done() {
     # Returns 0 (caller should skip) iff the per-run sweep + manifest exist.
-    #
-    # IMPORTANT for refined-sample snapshots
-    # --------------------------------------
-    # ``orbital_shape_prior_st1/engine/infer.py`` writes one .pt per
-    # (case, step) to ``refined_latent_export_dir`` (see test_default.yaml)
-    # via the per-result loop, which runs for BOTH fresh inference AND
-    # cache-resumed rows. The skip check below therefore also short-
-    # circuits the export. To backfill snapshots from an existing
-    # (sweep_results.pkl + native_sweep_manifest.json) pair without
-    # redoing latent optimisation:
-    #
-    #   rm "$run_dir/native_sweep_manifest.json"   # invalidate the marker
-    #   bash run_pipeline.sh cnisp-infer           # cache-resume + export
-    #
-    # Cache resume is fast (no GPU latent opt; loads cached pred + .npy
-    # latent sidecars from step_XX/), so this is the recommended path
-    # whenever you need snapshots from a pre-snapshot-feature run.
     local run_tag="$1"
     local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$run_tag"
     local sweep_pkl="$run_dir/sweep_results.pkl"
     local native_mf="$run_dir/native_sweep_manifest.json"
     if [[ $FORCE -eq 0 && -f "$sweep_pkl" && -f "$native_mf" ]]; then
         echo "  $run_dir already has sweep_results.pkl + native_sweep_manifest.json"
-        echo "  -> skipping (pass --force, or delete native_sweep_manifest.json"
-        echo "     to trigger a cache-resumed re-run that ALSO emits any"
-        echo "     missing refined-sample .pt snapshots)."
+        echo "  -> skipping (pass --force or delete a marker to rerun)."
         return 0
     fi
     return 1

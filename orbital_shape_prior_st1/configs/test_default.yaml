@@ -109,30 +109,26 @@ max_num_const_train_dsc: 10
 export_predictions: true   # save *_pred.nii.gz per case
 evaluate_predictions: true
 
-# ── Portable refined-sample snapshots ─────────────────────────────
-# The slow part of CNISP test-time inference is latent optimisation
-# (minutes per case-step); dense reconstruction and downstream native
-# mapping are cheap by comparison. To avoid redoing latent opt every
-# time a downstream stage (native_mapping, compare_native, viz) is
-# tweaked, every (case, step) result is mirrored as a self-contained
-# .pt snapshot under this directory:
+# Resume-from-latent
+# ------------------
+# The CNISP "model" at test time is (frozen prior MLP, per-(case, step)
+# optimised latent z) -- only the latent is updated, the prior MLP is
+# `net.eval()` throughout (see orbital_shape_prior_st1/engine/infer.py
+# ::optimize_latent). The slow part is latent optimisation; rebuilding
+# the dense pred from a cached latent + the prior is seconds. We
+# therefore make ``step_XX/latents/<casename>.npy`` the canonical
+# resume artefact: any downstream stage (native mapping, compare_native,
+# visualisation) can be replayed by loading
 #
-#   <refined_latent_export_dir>/<model_name>-<run_tag>-<casename>_step<NN>.pt
+#   1. the prior MLP from ``model_basedir/model_name/`` (single file),
+#   2. the latent at ``step_XX/latents/<casename>.npy``,
+#   3. the canonical-align metadata at
+#      ``aligned_dir/<metadata_dirname>/<casename>.json``
 #
-# Each file carries the optimised latent z, the canonical-frame
-# pred_class_map (uint8), spacing, patch shape, cached Dice scores
-# and the prior checkpoint path -- enough for any consumer to skip
-# latent optimisation entirely. The snapshots live OUTSIDE the
-# per-run output_basedir/<model>/runs/<run_tag>/ tree, so a
-# `rm -rf runs/<run_tag>/` cleanup doesn't wipe them.
-#
-# Set to a writable absolute path to enable; set to null (or remove
-# the key) to disable. The default is a fixed Vanderbilt-MASI HPC
-# mount; outside that environment, set this to a local directory or
-# null. A missing / unwritable target prints a one-line warning and
-# disables the export for the rest of the run -- inference still
-# succeeds.
-refined_latent_export_dir: /fs5/p_masi/linz18/local_projects/cnisp/
+# without redoing latent opt. ``diagnostics/resolution_sweep._try_load_cached``
+# already consumes (pred .nii.gz + latent .npy) to fast-path subsequent
+# ``cnisp-infer`` runs into pure replay, so re-running the phase is the
+# canonical entry point.
 
 # ── Batch size (must be 1 for test — each case has different shape) ─
 batch_size_val: 1

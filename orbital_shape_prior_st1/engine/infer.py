@@ -42,7 +42,7 @@ from diagnostics.resolution_sweep import (
     save_sweep_csvs,
 )
 from engine.train import create_model
-from engine.io_utils import load_latest_checkpoint, save_refined_sample
+from engine.io_utils import load_latest_checkpoint
 from engine.native_mapping import map_results_to_native
 from engine.test_label_sources import (
     RunLayout,
@@ -447,26 +447,26 @@ def infer_test_set(params):
         ├── native_space_step_03/     ...
         └── native_sweep_manifest.json   top-level index over per-step manifests
 
-    Portable refined-sample snapshots
-    ---------------------------------
-    Additionally, if ``params["refined_latent_export_dir"]`` resolves to a
-    writable location, every (case, step) result is mirrored as a
-    self-contained ``.pt`` file under that directory:
+    Resume artefacts
+    ----------------
+    Test-time inference freezes the prior MLP (see ``optimize_latent``;
+    only the per-(case, step) latent vector is a torch.nn.Parameter, the
+    Adam optimiser is built over ``[latent]`` alone, and ``net.eval()``
+    stays in effect through the loop). The triple needed to replay any
+    downstream stage (native mapping, compare_native, visualisation)
+    without redoing latent optimisation is therefore:
 
-        <refined_latent_export_dir>/<model_name>-<run_tag>-<casename>_step<NN>.pt
+      1. The prior checkpoint at ``model_basedir/model_name/`` (single
+         file, shared across all cases and steps).
+      2. ``step_XX/latents/<casename>.npy`` -- the optimised latent z.
+      3. ``aligned_dir/<metadata_dirname>/<casename>.json`` -- the
+         canonical-align metadata (orientation, crop slices, original
+         affine, label scheme).
 
-    Each snapshot carries the optimised latent z, the canonical-frame
-    ``pred_class_map``, spacing/patch_shape, cached Dice scores, and the
-    path to the prior MLP checkpoint -- enough for any downstream stage
-    (native mapping, compare_native, viz) to be replayed without redoing
-    latent optimisation. Snapshots are independent of ``runs/<run_tag>/``
-    and so survive a ``rm -rf runs/<run_tag>/`` cleanup; this is the
-    primary "don't recompute the slow part" cache shared across bug-fix
-    iterations. Set the config knob to ``null`` or an unwritable path to
-    skip the export silently.
-
-    See ``engine/io_utils.py``::``save_refined_sample`` /
-    ``load_refined_sample`` for the on-disk schema.
+    ``diagnostics/resolution_sweep._try_load_cached`` already consumes
+    ``step_XX/pred/<casename>_pred.nii.gz`` + the matching latent sidecar
+    to skip latent opt on subsequent runs, so a plain ``cnisp-infer``
+    rerun is the canonical "resume downstream" entry point.
     """
 
     layout = build_run_layout(params)
@@ -474,31 +474,11 @@ def infer_test_set(params):
     output_dir = layout.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Portable refined-sample export directory ─────────────────────
-    # When set, every (case, step) result is also mirrored to
-    #     <refined_latent_export_dir>/<model_name>-<run_tag>-<case>_stepNN.pt
-    # so a fresh bug-fix in any downstream stage can be replayed without
-    # redoing latent optimisation. None (or empty / unwritable) silently
-    # disables the export. Resolved here once so the per-result loop can
-    # just do a cheap is-set check.
-    _raw = params.get("refined_latent_export_dir", None)
-    refined_export_dir: Optional[Path] = Path(_raw) if _raw else None
-    prior_ckpt_for_export: Optional[Path] = None
-    if refined_export_dir is not None:
-        which_ckpt_hint = params.get("checkpoint", "best")
-        prior_ckpt_for_export = (
-            model_dir / "best_checkpoint.pth"
-            if which_ckpt_hint == "best"
-            else model_dir  # latest-periodic: record the dir, loader picks
-        )
-
     print(f"Device: {device}")
     print(f"Run layout:")
     print(f"  test_label_source       = {layout.test_label_source}")
     print(f"  run_tag                 = {layout.run_tag}")
     print(f"  output_dir              = {output_dir}")
-    print(f"  refined_latent_export   = "
-          f"{refined_export_dir if refined_export_dir else '(disabled)'}")
 
     # ── Load model ────────────────────────────────────────────────
     which_ckpt = params.get("checkpoint", "best")
@@ -610,37 +590,13 @@ def infer_test_set(params):
                 str(pred_dir / f"{casename}_pred.nii.gz"),
             )
 
-            # latents/  (sidecar so cache resume keeps iso reconstruction working)
+            # latents/  (sidecar so cache resume keeps iso reconstruction
+            # working AND so any downstream replay -- native mapping,
+            # compare_native, viz -- can skip latent opt by feeding this
+            # back through net.predict_dense with the frozen prior).
             if not result.get("latent_missing", False) and result["latent"].size > 1:
                 np.save(str(lat_dir / f"{casename}.npy"),
                         np.asarray(result["latent"], dtype=np.float32))
-
-            # Portable refined-sample snapshot (latent + dense pred + meta)
-            # at <refined_latent_export_dir>/<model>-<run_tag>-<case>_stepNN.pt
-            # so downstream bug-fix iterations can skip latent
-            # optimisation. The helper handles the latent-missing /
-            # unwritable-dir cases internally and returns None on skip.
-            if refined_export_dir is not None:
-                save_refined_sample(
-                    refined_export_dir,
-                    model_name=params["model_name"],
-                    run_tag=layout.run_tag,
-                    test_label_source=layout.test_label_source,
-                    casename=casename,
-                    step_size=int(step),
-                    step_axis=case_axis,
-                    effective_resolution_mm=float(
-                        result["effective_resolution_mm"]
-                    ),
-                    latent=result["latent"],
-                    pred_class_map=result["pred_class_map"],
-                    spacing_mm=sp,
-                    dice_dense_mean=float(result["dice"]["mean"]),
-                    dice_observed_mean=float(result["dice_observed"]["mean"]),
-                    n_observed_slices=int(result["n_observed_slices"]),
-                    n_total_slices=int(result["n_total_slices"]),
-                    prior_checkpoint_path=prior_ckpt_for_export,
-                )
 
             # obs_vs_recon/
             obs_vs_recon = create_obs_vs_recon_map(
