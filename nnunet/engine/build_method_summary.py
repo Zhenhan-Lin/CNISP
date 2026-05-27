@@ -91,6 +91,38 @@ def _load_yaml(p: Path) -> Dict:
         return yaml.safe_load(f) or {}
 
 
+def _csv_list(s: str) -> List[str]:
+    """Parse comma-separated CLI value into a clean list of prefixes."""
+    if not s:
+        return []
+    return [t.strip() for t in s.split(",") if t.strip()]
+
+
+def _apply_source_filter(
+    rows: List[Dict],
+    include_prefixes: List[str],
+    exclude_prefixes: List[str],
+) -> List[Dict]:
+    """Restrict rows by ``source_id`` prefix (see build_paired_summary).
+
+    Same semantics: ``include`` (if set) keeps only matching prefixes;
+    ``exclude`` then carves out matching prefixes from whatever remains.
+    """
+    inc = tuple(p for p in include_prefixes if p)
+    exc = tuple(p for p in exclude_prefixes if p)
+    if not inc and not exc:
+        return rows
+    out: List[Dict] = []
+    for r in rows:
+        sid = r.get("source_id", "")
+        if inc and not sid.startswith(inc):
+            continue
+        if exc and sid.startswith(exc):
+            continue
+        out.append(r)
+    return out
+
+
 def _read_paired_csv(p: Path, method: str) -> List[Dict]:
     if not p.exists():
         raise FileNotFoundError(
@@ -494,6 +526,17 @@ def main() -> int:
              "${work_dir}/comparison/viz/<method>__<run_tag>/ for nnUNet "
              "rows, ${cnisp_output_basedir}/<model>/viz/<run_tag>/ for CNISP rows.",
     )
+    ap.add_argument(
+        "--include-source-prefixes", default=None,
+        help="Comma-separated source_id prefixes to keep (e.g. 'atlas_'). "
+             "Default: read 'viz_include_source_prefixes' from --config.",
+    )
+    ap.add_argument(
+        "--exclude-source-prefixes", default=None,
+        help="Comma-separated source_id prefixes to drop (e.g. 'chk_'). "
+             "Default: read 'viz_exclude_source_prefixes' from --config "
+             "(default 'chk_' there).",
+    )
     args = ap.parse_args()
 
     cfg = _load_yaml(Path(args.config))
@@ -506,7 +549,30 @@ def main() -> int:
         [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0],
     ))
 
+    if args.include_source_prefixes is None:
+        include_prefixes = list(cfg.get("viz_include_source_prefixes", []))
+    else:
+        include_prefixes = _csv_list(args.include_source_prefixes)
+    if args.exclude_source_prefixes is None:
+        exclude_prefixes = list(cfg.get("viz_exclude_source_prefixes", []))
+    else:
+        exclude_prefixes = _csv_list(args.exclude_source_prefixes)
+
     rows = _read_paired_csv(paired_csv, args.method)
+    n_before = len(rows)
+    rows = _apply_source_filter(rows, include_prefixes, exclude_prefixes)
+    if include_prefixes or exclude_prefixes:
+        print(
+            f"[build_method_summary] source filter: "
+            f"include={include_prefixes!r} exclude={exclude_prefixes!r} "
+            f"-> {len(rows)}/{n_before} rows kept.",
+            file=sys.stderr,
+        )
+    if not rows:
+        raise SystemExit(
+            f"All rows filtered out for method={args.method!r}; "
+            f"relax include/exclude prefixes or check source_id values."
+        )
     bucket_order, bucket_struct, bucket_eff, bucket_step = _aggregate(
         rows, bucket_edges,
     )

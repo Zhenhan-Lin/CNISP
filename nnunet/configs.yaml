@@ -105,6 +105,25 @@ sparse_eff_res_max_drift: 0.30
 # CNISP's existing test_results.csv (eff_res_bucket column).
 summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
 
+# ── Viz source filter ─────────────────────────────────────────────
+# build_paired_summary.py and build_method_summary.py drop rows whose
+# source_id starts with any prefix in viz_exclude_source_prefixes
+# (after applying viz_include_source_prefixes, if it's non-empty).
+# These don't affect compare_native.py: the per-source CSVs still
+# contain every source, so the underlying data is preserved -- only
+# the plotted means/curves are filtered.
+#
+# Default excludes 'chk_' because chk_* deployment-mode runs (run_tag=
+# nnunet_pred) have chk_* GT swapped to the Dataset835 dense pred. At
+# step=1, nnUNet-sparse is just that same dense pred (no sparsification
+# happens), so the row trivially scores Dice=1.0 -- a structural
+# identity, not a measurement. Dropping the whole chk_ family is the
+# simplest way to keep the paired plots focused on human-labelled
+# atlas_* cases. Pass --exclude-source-prefixes "" on the CLI to
+# disable this and see every source.
+viz_include_source_prefixes: []
+viz_exclude_source_prefixes: ["chk_"]
+
 # ── nnUNet label-scheme assertion ─────────────────────────────────
 # Expected dataset.json["labels"] for Dataset835. Asserted at compare time.
 expected_nnunet_labels:

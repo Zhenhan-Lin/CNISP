@@ -137,6 +137,47 @@ def _read_paired_csv(p: Path, methods: List[str]) -> List[Dict]:
     return rows
 
 
+def _apply_source_filter(
+    rows: List[Dict],
+    include_prefixes: List[str],
+    exclude_prefixes: List[str],
+) -> List[Dict]:
+    """Restrict rows by ``source_id`` prefix.
+
+    ``include_prefixes`` (if non-empty) keeps only sources whose id
+    starts with one of the listed prefixes. ``exclude_prefixes`` drops
+    any matching sources -- it's evaluated AFTER include, so an explicit
+    deny can carve a hole out of an include set if both are passed.
+
+    Used by run_pipeline.sh's compare phase to keep paired plots focused
+    on the cohort whose ground truth is a real human-labelled mask
+    (``atlas_*``), excluding ``chk_*`` deployment cases whose chk_pseudo
+    GT in ``test_label_source=nnunet_pred`` mode is the same Dataset835
+    dense prediction that nnUNet-sparse at step=1 IS, producing a
+    structural identity-1.0 row that inflates the deployment curve.
+    """
+    inc = tuple(p for p in include_prefixes if p)
+    exc = tuple(p for p in exclude_prefixes if p)
+    if not inc and not exc:
+        return rows
+    out: List[Dict] = []
+    for r in rows:
+        sid = r.get("source_id", "")
+        if inc and not sid.startswith(inc):
+            continue
+        if exc and sid.startswith(exc):
+            continue
+        out.append(r)
+    return out
+
+
+def _csv_list(s: str) -> List[str]:
+    """Parse a comma-separated CLI value into a clean list of prefixes."""
+    if not s:
+        return []
+    return [t.strip() for t in s.split(",") if t.strip()]
+
+
 def _assign_bucket(eff_res: float,
                    edges: List[float]) -> Tuple[int, str]:
     if math.isnan(eff_res):
@@ -529,6 +570,20 @@ def main() -> int:
         help="Where to write the paired plots and CSV. Pipeline "
              "convention: ${work_dir}/comparison/viz/paired__<run_tag>/.",
     )
+    ap.add_argument(
+        "--include-source-prefixes", default=None,
+        help="Comma-separated source_id prefixes to keep (e.g. 'atlas_'). "
+             "Default: read 'viz_include_source_prefixes' from --config "
+             "(if absent, no include-side filtering -- keep everything).",
+    )
+    ap.add_argument(
+        "--exclude-source-prefixes", default=None,
+        help="Comma-separated source_id prefixes to drop (e.g. 'chk_'). "
+             "Default: read 'viz_exclude_source_prefixes' from --config "
+             "(default 'chk_' there, so the paired plots stay focused on "
+             "human-labelled cases and avoid the chk_ deployment-mode "
+             "identity-1.0 row at step=1).",
+    )
     args = ap.parse_args()
 
     cfg = _load_yaml(Path(args.config))
@@ -539,8 +594,32 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.include_source_prefixes is None:
+        include_prefixes = list(cfg.get("viz_include_source_prefixes", []))
+    else:
+        include_prefixes = _csv_list(args.include_source_prefixes)
+    if args.exclude_source_prefixes is None:
+        exclude_prefixes = list(cfg.get("viz_exclude_source_prefixes", []))
+    else:
+        exclude_prefixes = _csv_list(args.exclude_source_prefixes)
+
     methods = [args.nnunet_method, args.cnisp_method]
     rows = _read_paired_csv(Path(args.paired_csv), methods)
+    n_before = len(rows)
+    rows = _apply_source_filter(rows, include_prefixes, exclude_prefixes)
+    if include_prefixes or exclude_prefixes:
+        print(
+            f"[build_paired_summary] source filter: "
+            f"include={include_prefixes!r} exclude={exclude_prefixes!r} "
+            f"-> {len(rows)}/{n_before} rows kept.",
+            file=sys.stderr,
+        )
+    if not rows:
+        raise SystemExit(
+            f"All rows filtered out (include={include_prefixes!r}, "
+            f"exclude={exclude_prefixes!r}). Relax the filter or check "
+            f"source_id prefixes in {args.paired_csv}."
+        )
     bucket_order, by_method_bucket, eff_by_bucket = _aggregate(
         rows, bucket_edges,
     )
