@@ -102,12 +102,34 @@
 #                         (orbital_shape_prior_st1/scripts/run_03_test.sh
 #                          with TEST_LABEL_SOURCE=nnunet_pred, RUN_TAG=nnunet_pred)
 #
+#   cnisp-native-remap    Per CNISP run, re-apply the canonical -> native CT
+#                         frame mapping to every (case, step) row in
+#                         ``sweep_results.pkl``, writing
+#                           runs/<run_tag>/native_space_step_XX/
+#                             <source>_cnisp_stepNN.nii.gz    # OD+OS merged
+#                             manifest.json                   # source_id -> nifti
+#                           runs/<run_tag>/native_sweep_manifest.json
+#                         The script reads the cached ``pred_class_map`` straight
+#                         out of ``sweep_results.pkl`` and calls the current
+#                         ``orbital_shape_prior_st1/engine/native_mapping.py``,
+#                         so no GPU / latent optimisation is involved.
+#                         Idempotent: per-step ``manifest.json`` acts as the
+#                         skip marker; pass --force (or ``rm -rf
+#                         native_space_step_*/``) to overwrite existing masks
+#                         after patching ``native_mapping.py``.
+#                         This phase is the explicit re-render entry point
+#                         shared by both ``cnisp-viz`` (which audits the
+#                         outputs) and ``compare`` (which Dice's against them).
+#                         (nnunet/engine/build_cnisp_native_sweep.py)
+#
 #   cnisp-viz             CNISP-only artifacts (the bits no method-agnostic
 #                         viewer can reproduce):
 #                         recon_layout.txt (file-tree dump),
 #                         cross_resolution_analysis/ (iso-space prior
 #                         self-consistency heatmaps), and
-#                         native_sweep_summary.json (file audit). One
+#                         native_sweep_summary.json (file audit of the
+#                         native_space_step_XX/ tree produced by
+#                         cnisp-native-remap or cnisp-infer). One
 #                         viz/ tree per run_tag, written under
 #                         output_basedir/<model>/runs/<run_tag>/.
 #                         Per-step Dice trend / per-class / per-case
@@ -154,10 +176,15 @@
 #                                paired_summary_by_eff_res.csv
 #                              Output dir:
 #                                ${work_dir}/comparison/viz/paired__<run_tag>/
-#                         build_cnisp_native_sweep.py is a no-op for
-#                         runs whose native_space_step_XX/ already exist.
-#                         (nnunet/engine/build_cnisp_native_sweep.py
-#                          + nnunet/compare_native.py
+#                         Prerequisite: ``runs/<run_tag>/native_space_step_XX/``
+#                         must already exist. Produced either by
+#                         ``cnisp-native-remap`` (explicit re-render entry
+#                         point) or ``cnisp-infer`` (as a side effect of
+#                         fresh inference). ``compare`` pre-flights this
+#                         and bails out with an instructional error if
+#                         masks are missing, rather than silently emitting
+#                         a half-populated paired CSV.
+#                         (nnunet/compare_native.py
 #                          + nnunet/engine/build_method_summary.py
 #                          + nnunet/engine/build_paired_summary.py)
 #
@@ -170,6 +197,7 @@
 #     -> cnisp-prep-dataset835-gt
 #     -> cnisp-prep-dataset835-sparse
 #     -> cnisp-infer-nnunet-pred                      (nnunet_pred run)
+#     -> cnisp-native-remap                           (canonical->native masks)
 #     -> cnisp-viz
 #     -> compare
 #
@@ -191,6 +219,12 @@
 #                                       allowed to be partial -- see phase doc)
 #     cnisp-infer-nnunet-pred           runs/nnunet_pred/sweep_results.pkl
 #                                       + runs/nnunet_pred/native_sweep_manifest.json
+#     cnisp-native-remap                per-step manifest checked inside
+#                                       build_cnisp_native_sweep.py; skips
+#                                       any step whose
+#                                       native_space_step_XX/manifest.json
+#                                       already exists. With --force every
+#                                       step is re-rendered.
 #   cnisp-viz and compare are cheap (~minutes) so they always re-run.
 #   Pass --force to ignore every check, or --force-train for just training.
 #
@@ -225,6 +259,7 @@ PHASES_DEFAULT=(
     cnisp-prep-dataset835-gt
     cnisp-prep-dataset835-sparse
     cnisp-infer-nnunet-pred
+    cnisp-native-remap
     cnisp-viz
     compare
 )
@@ -607,6 +642,34 @@ phase_cnisp_infer_nnunet_pred() {
     _run_cnisp_infer_for "nnunet_pred" "nnunet_pred"
 }
 
+phase_cnisp_native_remap() {
+    echo ""
+    echo "[phase] cnisp-native-remap ----------------------------"
+    # Rebuilds runs/<run_tag>/native_space_step_XX/<source>_cnisp_stepNN.nii.gz
+    # from the cached pred_class_map fields in sweep_results.pkl, using the
+    # current canonical->native mapping in
+    # orbital_shape_prior_st1/engine/native_mapping.py. No GPU, no latent
+    # optimisation -- the dense pred is already cached inside the pickle.
+    #
+    # Idempotency: per-step native_space_step_XX/manifest.json is the skip
+    # marker. ``--force`` (global flag, also exported via $FORCE) overrides
+    # the skip so every step is re-rendered. To selectively re-render some
+    # steps, manually ``rm -rf native_space_step_XX/`` for those step ids
+    # and run this phase without --force.
+    local force_flag=""
+    if [[ $FORCE -eq 1 ]]; then
+        force_flag="--force"
+        echo "  (--force: existing native_space_step_XX/manifest.json files will be ignored)"
+    fi
+    for i in "${!CNISP_RUN_TAGS[@]}"; do
+        local run_tag="${CNISP_RUN_TAGS[$i]}"
+        echo "  ── native remap for run_tag=$run_tag ──"
+        # shellcheck disable=SC2086  # force_flag is intentionally word-split
+        python3 "$REPO_ROOT/nnunet/engine/build_cnisp_native_sweep.py" \
+                --config "$CONFIG" --run-tag "$run_tag" $force_flag
+    done
+}
+
 phase_cnisp_viz() {
     echo ""
     echo "[phase] cnisp-viz -------------------------------------"
@@ -623,26 +686,61 @@ phase_cnisp_viz() {
     done
 }
 
+_require_native_masks() {
+    # Fail fast if compare_native.py would have nothing to consume.
+    # ``compare`` is strictly a downstream-of-mask phase now; the
+    # canonical mask producer is ``cnisp-native-remap`` (or, as a side
+    # effect, a fresh ``cnisp-infer`` run).
+    local run_tag="$1"
+    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$run_tag"
+    local found=0
+    # shellcheck disable=SC2231  # we want word-splitting + glob expansion
+    for d in "$run_dir"/native_space_step_*; do
+        if [[ -d "$d" && -f "$d/manifest.json" ]]; then
+            found=1
+            break
+        fi
+    done
+    if [[ $found -eq 0 ]]; then
+        echo "[run_pipeline] compare: no native_space_step_XX/manifest.json"  >&2
+        echo "  under $run_dir/."                                             >&2
+        echo "  Native masks must be produced before compare can run."        >&2
+        echo "  Fix:"                                                         >&2
+        echo "    bash run_pipeline.sh cnisp-native-remap compare"            >&2
+        echo "  (or rerun cnisp-infer to produce them as an inference side"   >&2
+        echo "   effect; --force forces a rebuild past the per-step skip"     >&2
+        echo "   marker.)"                                                    >&2
+        exit 2
+    fi
+}
+
 phase_compare() {
     echo ""
     echo "[phase] compare ---------------------------------------"
 
-    # ── Per-run_tag stages: native-map, compare_native, CNISP viz, paired viz ──
+    # ── Per-run_tag stages: compare_native, CNISP viz, paired viz ──────────
     # The CNISP method label and the head-to-head plots are intrinsically
     # per-run-tag (different latent-opt inputs → different CNISP curves).
     # The nnUNet-sparse panel is NOT per-run-tag and is rendered separately
     # below, see the rationale block before the post-loop render.
+    #
+    # Native masks are the responsibility of ``cnisp-native-remap``
+    # (or ``cnisp-infer``, as a side effect of fresh inference); this
+    # phase only consumes them. We pre-flight every run_tag here so a
+    # missing-mask state surfaces with an explicit instruction instead
+    # of leaking through compare_native.py as a stream of per-source
+    # warnings and a half-populated paired_per_source.csv.
+    for i in "${!CNISP_RUN_TAGS[@]}"; do
+        local run_tag="${CNISP_RUN_TAGS[$i]}"
+        _require_native_masks "$run_tag"
+    done
+
     for i in "${!CNISP_RUN_TAGS[@]}"; do
         local run_tag="${CNISP_RUN_TAGS[$i]}"
         local method="${CNISP_METHOD_LABELS[$i]}"
         echo "  ─── compare for run_tag=$run_tag (method=$method) ───"
 
-        # 1) Make sure native_space_step_XX/ exists for this run (no-op
-        #    when engine/infer.py already wrote them).
-        python3 "$REPO_ROOT/nnunet/engine/build_cnisp_native_sweep.py" \
-                --config "$CONFIG" --run-tag "$run_tag"
-
-        # 2) Per-source paired Dice CSV/TXT for THIS run.
+        # 1) Per-source paired Dice CSV/TXT for THIS run.
         python3 "$REPO_ROOT/nnunet/compare_native.py" \
                 --config "$CONFIG" --cnisp-run-tag "$run_tag"
 
@@ -650,14 +748,14 @@ phase_compare() {
         local cnisp_viz_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$run_tag"
         local paired_viz_dir="$WORK_DIR/comparison/viz/paired__${run_tag}"
 
-        # 3) CNISP-only by-eff_res bundle for THIS run.
+        # 2) CNISP-only by-eff_res bundle for THIS run.
         python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
                 --config "$CONFIG" \
                 --method "$method" \
                 --paired-csv "$paired_csv" \
                 --out-dir "$cnisp_viz_dir"
 
-        # 4) Head-to-head paired plots (both methods overlaid). This is
+        # 3) Head-to-head paired plots (both methods overlaid). This is
         #    the dir a reviewer should open to actually SEE the
         #    comparison; the per-method bundles are the raw single-method
         #    view.
@@ -721,6 +819,7 @@ for phase in "${PHASES[@]}"; do
         cnisp-prep-dataset835-gt)      phase_cnisp_prep_dataset835_gt ;;
         cnisp-prep-dataset835-sparse)  phase_cnisp_prep_dataset835_sparse ;;
         cnisp-infer-nnunet-pred)       phase_cnisp_infer_nnunet_pred ;;
+        cnisp-native-remap)            phase_cnisp_native_remap ;;
         cnisp-viz)                     phase_cnisp_viz ;;
         compare)                       phase_compare ;;
     esac
