@@ -455,14 +455,28 @@ def _plot_paired(
     #   row 0          -> overall mean Dice (full width)
     #   row 1 (2x2 sub) -> per-class panels
     #   row 2          -> delta bar chart (full width)
+    #
+    # Sizing rationale: each panel here should land close to the
+    # aspect of its standalone PNG sibling, otherwise the overall /
+    # delta rows look pancake-flat and the per-class subplots
+    # squashed. Standalones above use 10x5 (2:1) for overall + delta
+    # and 12x9 (~1.33:1 per subplot) for the 2x2 grid. With the
+    # numbers below, the combined rows resolve to roughly
+    #   overall      : 11 × 4.2  → 2.6:1
+    #   per-class    : 5.5 × 3.0 → 1.83:1
+    #   delta        : 11 × 4.2  → 2.6:1
+    # tighter than the standalone but no longer pancake. If you tweak
+    # these, double-check the per-class subplot doesn't go wider than
+    # ~2:1 — at that point error bars + value labels start to collide
+    # with the legend.
     combined_path = out_dir / "paired_dice_vs_eff_res.png"
-    fig = plt.figure(figsize=(14, 16))
-    gs = fig.add_gridspec(3, 1, hspace=0.45, height_ratios=[1, 1.6, 1])
+    fig = plt.figure(figsize=(11, 20))
+    gs = fig.add_gridspec(3, 1, hspace=0.35, height_ratios=[1, 1.9, 1])
 
     ax0 = fig.add_subplot(gs[0])
     _draw_overall(ax0, methods, bucket_order, by_method_bucket, eff_by_bucket)
 
-    inner_gs = gs[1].subgridspec(2, 2, hspace=0.55, wspace=0.3)
+    inner_gs = gs[1].subgridspec(2, 2, hspace=0.5, wspace=0.25)
     inner_axes = [
         [fig.add_subplot(inner_gs[0, 0]), fig.add_subplot(inner_gs[0, 1])],
         [fig.add_subplot(inner_gs[1, 0]), fig.add_subplot(inner_gs[1, 1])],
