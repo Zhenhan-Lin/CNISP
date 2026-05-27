@@ -144,17 +144,56 @@ def merge_and_save_native(
 ):
     """
     Merge OD + OS full volumes and save as NIfTI.
-    Non-zero voxels from each eye overwrite the merged volume
-    (OD and OS occupy different spatial regions, so no conflict).
+
+    Each per-eye ``vol`` comes from ``invert_alignment_single_eye``,
+    which calls ``place_patch_in_volume(np.zeros(...))`` to drop the
+    remapped patch into a full-head volume. That produces THREE kinds
+    of voxels per eye:
+
+      * outside the eye's patch        : 0       (np.zeros init)
+      * inside the patch, background   : remap[0] (0 for nnunet / bare
+                                                  labelfusion;
+                                                  -1000 for atlas-offset
+                                                  labelfusion)
+      * inside the patch, foreground   : remap[1..4]
+
+    The OLD merge used ``mask = vol != min(uniq)`` to exclude the
+    in-patch BG, but for atlas-offset sources min(uniq) is -1000 while
+    the OUTSIDE-patch voxels are still 0. Those outside-patch zeros
+    therefore passed the mask and, when overlaying the second eye, were
+    written into the merged volume over the first eye's foreground at
+    non-overlapping patch positions -- erasing it. The net effect was
+    "only the last-iterated eye contributed", which dropped paired
+    Dice to ~2/3 of the per-eye patch-space Dice for every atlas_*
+    source.
+
+    We now identify foreground strictly: a voxel is foreground iff it
+    differs from BOTH the in-patch BG and the outside-patch sentinel
+    (=0). Non-offset schemes (BG = 0) collapse to the natural ``vol > 0``
+    rule and behave identically to before.
     """
     merged = np.zeros(reference_meta["original_shape"], dtype=np.int16)
     for vol in eye_volumes:
-        mask = vol != 0
-        # For offset schemes (e.g., -1000 based), detect actual background
+        if not vol.any():
+            # Empty per-eye render (no foreground inside the patch); skip.
+            continue
         uniq = np.unique(vol)
-        if len(uniq) > 1 and int(uniq[0]) < 0:
-            mask = vol != int(uniq[0])
-        merged[mask] = vol[mask]
+        # min(uniq) is the most-negative value present. For atlas-offset
+        # labelfusion that's the in-patch BG (-1000); for nnunet/bare
+        # labelfusion it's the outside-patch+BG sentinel (0). The
+        # "outside-patch" sentinel itself is ALWAYS exactly 0 because
+        # place_patch_in_volume uses np.zeros.
+        in_patch_bg = int(uniq[0])
+        if in_patch_bg < 0:
+            # Offset scheme: exclude both -1000 (in-patch BG) and 0
+            # (outside the patch). What's left is the true foreground
+            # voxels (remap[1..4]) -- the only thing we want to write.
+            fg_mask = (vol != in_patch_bg) & (vol != 0)
+        else:
+            # Non-offset scheme: in-patch BG and outside-patch are both
+            # 0; everything strictly greater than 0 is foreground.
+            fg_mask = vol > 0
+        merged[fg_mask] = vol[fg_mask]
 
     affine = np.array(reference_meta["original_affine"])
     nib.save(nib.Nifti1Image(merged, affine), str(output_path))

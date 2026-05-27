@@ -43,14 +43,20 @@ Notes
 
 Usage
 -----
-    # nnUNet (deployment-mode shared chk_* GT)
+    # nnUNet-sparse standalone bundle (rendered ONCE; the nnUNet sparse
+    # predictions are independent of which CNISP run_tag is in flight,
+    # and run_pipeline.sh picks paired_per_source__nnunet_pred.csv as
+    # the canonical source because it is a strict superset of the
+    # atlas_gt CSV's nnUNet-sparse rows).
     python nnunet/engine/build_method_summary.py \\
         --config nnunet/configs.yaml \\
         --method nnUNet-sparse \\
         --paired-csv work_dir/comparison/paired_per_source__nnunet_pred.csv \\
-        --out-dir    work_dir/comparison/viz/nnUNet-sparse__nnunet_pred
+        --out-dir    work_dir/comparison/viz/nnUNet-sparse
 
-    # CNISP-atlasGT
+    # CNISP-atlasGT (one CNISP bundle per run_tag, since each CNISP
+    # run uses a different latent-opt input and so has a different
+    # Dice curve).
     python nnunet/engine/build_method_summary.py \\
         --config nnunet/configs.yaml \\
         --method CNISP-atlasGT \\

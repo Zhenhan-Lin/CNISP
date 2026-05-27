@@ -109,5 +109,30 @@ max_num_const_train_dsc: 10
 export_predictions: true   # save *_pred.nii.gz per case
 evaluate_predictions: true
 
+# ── Portable refined-sample snapshots ─────────────────────────────
+# The slow part of CNISP test-time inference is latent optimisation
+# (minutes per case-step); dense reconstruction and downstream native
+# mapping are cheap by comparison. To avoid redoing latent opt every
+# time a downstream stage (native_mapping, compare_native, viz) is
+# tweaked, every (case, step) result is mirrored as a self-contained
+# .pt snapshot under this directory:
+#
+#   <refined_latent_export_dir>/<model_name>-<run_tag>-<casename>_step<NN>.pt
+#
+# Each file carries the optimised latent z, the canonical-frame
+# pred_class_map (uint8), spacing, patch shape, cached Dice scores
+# and the prior checkpoint path -- enough for any consumer to skip
+# latent optimisation entirely. The snapshots live OUTSIDE the
+# per-run output_basedir/<model>/runs/<run_tag>/ tree, so a
+# `rm -rf runs/<run_tag>/` cleanup doesn't wipe them.
+#
+# Set to a writable absolute path to enable; set to null (or remove
+# the key) to disable. The default is a fixed Vanderbilt-MASI HPC
+# mount; outside that environment, set this to a local directory or
+# null. A missing / unwritable target prints a one-line warning and
+# disables the export for the rest of the run -- inference still
+# succeeds.
+refined_latent_export_dir: /fs5/p_masi/linz18/local_projects/cnisp/
+
 # ── Batch size (must be 1 for test — each case has different shape) ─
 batch_size_val: 1

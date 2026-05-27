@@ -122,8 +122,8 @@
 #                                paired_summary__<run_tag>.csv
 #                                paired_summary__<run_tag>.txt
 #                          (b) per-method by-eff_res viz bundle (single-
-#                              method curves; one per method). Each
-#                              bundle = {method}_per_source.csv +
+#                              method curves). Each bundle =
+#                              {method}_per_source.csv +
 #                              {method}_summary_by_eff_res.csv +
 #                              {method}_summary_by_eff_res.txt +
 #                              {method}_recon_summary.png +
@@ -131,8 +131,18 @@
 #                              {method}_per_class_dice_vs_eff_res.png +
 #                              {method}_per_case_dice_distribution.png.
 #                              Output dirs:
-#                                nnUNet -> ${work_dir}/comparison/viz/<method>__<run_tag>/
-#                                CNISP  -> ${cnisp_output_basedir}/<model>/viz/<run_tag>/
+#                                CNISP        -> ${cnisp_output_basedir}/<model>/viz/<run_tag>/
+#                                              (one bundle per run_tag because
+#                                               the CNISP curve depends on which
+#                                               latent-opt input the run used)
+#                                nnUNet-sparse -> ${work_dir}/comparison/viz/nnUNet-sparse/
+#                                              (rendered ONCE outside the
+#                                               per-run-tag loop because nnUNet's
+#                                               sparse predictions are independent
+#                                               of which CNISP run is in flight;
+#                                               canonical CSV = nnunet_pred, which
+#                                               is a strict superset of atlas_gt's
+#                                               nnUNet-sparse rows)
 #                          (c) head-to-head paired plots that overlay
 #                              both methods on shared axes (this is the
 #                              dir to look at to actually SEE the
@@ -514,13 +524,32 @@ _run_cnisp_infer_for() {
 
 _skip_cnisp_infer_if_done() {
     # Returns 0 (caller should skip) iff the per-run sweep + manifest exist.
+    #
+    # IMPORTANT for refined-sample snapshots
+    # --------------------------------------
+    # ``orbital_shape_prior_st1/engine/infer.py`` writes one .pt per
+    # (case, step) to ``refined_latent_export_dir`` (see test_default.yaml)
+    # via the per-result loop, which runs for BOTH fresh inference AND
+    # cache-resumed rows. The skip check below therefore also short-
+    # circuits the export. To backfill snapshots from an existing
+    # (sweep_results.pkl + native_sweep_manifest.json) pair without
+    # redoing latent optimisation:
+    #
+    #   rm "$run_dir/native_sweep_manifest.json"   # invalidate the marker
+    #   bash run_pipeline.sh cnisp-infer           # cache-resume + export
+    #
+    # Cache resume is fast (no GPU latent opt; loads cached pred + .npy
+    # latent sidecars from step_XX/), so this is the recommended path
+    # whenever you need snapshots from a pre-snapshot-feature run.
     local run_tag="$1"
     local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$run_tag"
     local sweep_pkl="$run_dir/sweep_results.pkl"
     local native_mf="$run_dir/native_sweep_manifest.json"
     if [[ $FORCE -eq 0 && -f "$sweep_pkl" && -f "$native_mf" ]]; then
         echo "  $run_dir already has sweep_results.pkl + native_sweep_manifest.json"
-        echo "  -> skipping (pass --force or delete a marker to rerun)."
+        echo "  -> skipping (pass --force, or delete native_sweep_manifest.json"
+        echo "     to trigger a cache-resumed re-run that ALSO emits any"
+        echo "     missing refined-sample .pt snapshots)."
         return 0
     fi
     return 1
@@ -616,6 +645,12 @@ phase_cnisp_viz() {
 phase_compare() {
     echo ""
     echo "[phase] compare ---------------------------------------"
+
+    # ── Per-run_tag stages: native-map, compare_native, CNISP viz, paired viz ──
+    # The CNISP method label and the head-to-head plots are intrinsically
+    # per-run-tag (different latent-opt inputs → different CNISP curves).
+    # The nnUNet-sparse panel is NOT per-run-tag and is rendered separately
+    # below, see the rationale block before the post-loop render.
     for i in "${!CNISP_RUN_TAGS[@]}"; do
         local run_tag="${CNISP_RUN_TAGS[$i]}"
         local method="${CNISP_METHOD_LABELS[$i]}"
@@ -630,36 +665,67 @@ phase_compare() {
         python3 "$REPO_ROOT/nnunet/compare_native.py" \
                 --config "$CONFIG" --cnisp-run-tag "$run_tag"
 
-        # 3) Per-method by-eff_res viz bundle. We render two methods per
-        #    run: the CNISP rows under viz/<run_tag>/, and the nnUNet
-        #    rows (Diced against the same chk_* GT mode as this run)
-        #    under comparison/viz/nnUNet-sparse__<run_tag>/.
         local paired_csv="$WORK_DIR/comparison/paired_per_source__${run_tag}.csv"
         local cnisp_viz_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$run_tag"
-        local nnunet_viz_dir="$WORK_DIR/comparison/viz/nnUNet-sparse__${run_tag}"
         local paired_viz_dir="$WORK_DIR/comparison/viz/paired__${run_tag}"
 
+        # 3) CNISP-only by-eff_res bundle for THIS run.
         python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
                 --config "$CONFIG" \
                 --method "$method" \
                 --paired-csv "$paired_csv" \
                 --out-dir "$cnisp_viz_dir"
-        python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
-                --config "$CONFIG" \
-                --method nnUNet-sparse \
-                --paired-csv "$paired_csv" \
-                --out-dir "$nnunet_viz_dir"
 
-        # 4) Head-to-head paired plots (both methods overlaid). The
-        #    per-method bundles above stay as the raw single-method
-        #    view; this directory is the one a reviewer should look at
-        #    to actually SEE the comparison.
+        # 4) Head-to-head paired plots (both methods overlaid). This is
+        #    the dir a reviewer should open to actually SEE the
+        #    comparison; the per-method bundles are the raw single-method
+        #    view.
         python3 "$REPO_ROOT/nnunet/engine/build_paired_summary.py" \
                 --config "$CONFIG" \
                 --cnisp-method "$method" \
                 --paired-csv "$paired_csv" \
                 --out-dir "$paired_viz_dir"
     done
+
+    # ── nnUNet-sparse standalone bundle (rendered ONCE) ──────────────────
+    # Rationale for not putting this inside the loop above:
+    #   The nnUNet-sparse predictions are produced by the dense Dataset835
+    #   sweep, which is *independent of which CNISP run is happening*.
+    #   For atlas_* sources the Dice GT is the atlas manual mask under
+    #   both run_tags, so the nnUNet-sparse Dice in atlas_gt vs nnunet_pred
+    #   paired CSVs is bit-identical for every atlas_* row. Under the
+    #   default ``viz_exclude_source_prefixes: ["chk_"]`` filter, chk_
+    #   sources are also dropped, so the two CSVs render to identical
+    #   plots -- which used to create two run-tag-suffixed directories
+    #   (``viz/nnUNet-sparse__atlas_gt/`` and ``viz/nnUNet-sparse__nnunet_pred/``)
+    #   with byte-equal contents.
+    #
+    #   We now render a single ``viz/nnUNet-sparse/`` bundle from the
+    #   nnunet_pred CSV (a strict superset: same atlas_ rows + chk_ rows
+    #   that don't exist in atlas_gt mode), so the chk_-inclusive case
+    #   stays informative without paying for the duplicate render in the
+    #   atlas-only default case.
+    if [[ ${#CNISP_RUN_TAGS[@]} -gt 0 ]]; then
+        local canonical_tag="${CNISP_RUN_TAGS[-1]}"
+        # If "nnunet_pred" is present, prefer it (strict superset of
+        # atlas_gt for nnUNet-sparse rows). Otherwise fall back to
+        # whatever the last run_tag is.
+        for t in "${CNISP_RUN_TAGS[@]}"; do
+            if [[ "$t" == "nnunet_pred" ]]; then
+                canonical_tag="$t"
+                break
+            fi
+        done
+        local canonical_csv="$WORK_DIR/comparison/paired_per_source__${canonical_tag}.csv"
+        local nnunet_viz_dir="$WORK_DIR/comparison/viz/nnUNet-sparse"
+
+        echo "  ─── nnUNet-sparse standalone (canonical CSV = ${canonical_tag}) ───"
+        python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
+                --config "$CONFIG" \
+                --method nnUNet-sparse \
+                --paired-csv "$canonical_csv" \
+                --out-dir "$nnunet_viz_dir"
+    fi
 }
 
 # ── Dispatch ─────────────────────────────────────────────────
@@ -709,9 +775,10 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
     echo "    $WORK_DIR/comparison/paired_per_source__${rt}.csv"
     echo "    $WORK_DIR/comparison/paired_summary__${rt}.csv"
     echo "    $WORK_DIR/comparison/paired_summary__${rt}.txt"
-    echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${rt}/nnUNet-sparse_recon_summary.png"
     echo "    $WORK_DIR/comparison/viz/paired__${rt}/paired_dice_vs_eff_res.png"
     echo "      (+ paired_{overall,per_class,delta}_dice_vs_eff_res.png "
     echo "         + paired_summary_by_eff_res.csv -- the head-to-head view)"
 done
+echo "  nnUNet-sparse standalone bundle (run-tag-agnostic; rendered once):"
+echo "    $WORK_DIR/comparison/viz/nnUNet-sparse/nnUNet-sparse_recon_summary.png"
 echo "============================================================"

@@ -99,11 +99,11 @@ For `comparison/paired_per_source__atlas_gt.csv`, `chk_*` rows carry `gt_source=
 
 ### Per-method by-eff_res summary bundle
 
-For each run_tag, `compare` calls `engine/build_method_summary.py` once per method. Same script, same `comparison/paired_per_source__<run_tag>.csv` -> the nnUNet and CNISP halves of that comparison get a matched bundle:
+`compare` produces a matched set of viz directories that split cleanly along **what depends on the CNISP run_tag** and **what doesn't**:
 
-- `${work_dir}/comparison/viz/nnUNet-sparse__<run_tag>/nnUNet-sparse_*` (per-source CSV / summary CSV / TXT / combined PNG + three stand-alone subplot PNGs)
-- `${cnisp_output_basedir}/<model>/viz/<run_tag>/<cnisp_method_label>_*` (same artifacts for the CNISP method)
-- `${work_dir}/comparison/viz/paired__<run_tag>/paired_*` (head-to-head paired plots that overlay both methods on shared axes; this is the dir to read if you want to actually SEE the comparison)
+- `${cnisp_output_basedir}/<model>/viz/<run_tag>/<cnisp_method_label>_*` — **per-run-tag** CNISP bundle (per-source CSV / summary CSV / TXT / combined PNG + three stand-alone subplot PNGs). One directory per run_tag because the CNISP curve differs by latent-opt input.
+- `${work_dir}/comparison/viz/paired__<run_tag>/paired_*` — **per-run-tag** head-to-head plots overlaying both methods on shared axes. Open these first if you want to actually SEE the comparison.
+- `${work_dir}/comparison/viz/nnUNet-sparse/nnUNet-sparse_*` — **single, run-tag-agnostic** nnUNet-sparse bundle. nnUNet's sparse predictions are independent of the CNISP run, so this used to be rendered twice (once per CNISP run_tag) under run-tag-suffixed dirs that turned out to be bit-identical for `atlas_*` sources. We now render it once from the `nnunet_pred` CSV (a strict superset that also includes `chk_*` rows when the source filter allows them) so chk-inclusive views stay informative without the duplicate render.
 
 Each `_recon_summary.png` is three stacked subplots, and each subplot is also written as a stand-alone PNG so the labels stay legible:
 
