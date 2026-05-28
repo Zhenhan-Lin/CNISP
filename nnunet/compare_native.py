@@ -77,20 +77,20 @@ from typing import Dict, List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
-import yaml
 
-# Ensure ``nnunet`` is importable when this file is run as a script.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+# Make ``nnunet.*`` importable when run as ``python nnunet/compare_native.py``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from nnunet.helpers.buckets import (  # noqa: E402
+    NNUNET_METHOD_LABEL,
+    STRUCT_ORDER,
+    assign_bucket,
+    bucket_sort_key,
+)
+from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.resolve_gt import (  # noqa: E402
     build_struct_to_value, resolve_sources,
 )
-
-
-STRUCT_ORDER = ["ON", "Globe", "Fat", "Recti"]
-NNUNET_METHOD_LABEL = "nnUNet-sparse"
 
 
 def _detect_pred_offset(arr: np.ndarray, scheme: str) -> int:
@@ -130,11 +130,6 @@ def _detect_pred_offset(arr: np.ndarray, scheme: str) -> int:
 # ── Generic helpers ──────────────────────────────────────────────
 
 
-def _load_yaml(path: Path) -> Dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
-
-
 def _load_label_volume(p: Path) -> np.ndarray:
     img = nib.load(str(p))
     arr = np.asarray(img.dataobj)
@@ -152,18 +147,6 @@ def _binary_dice(pred: np.ndarray, gt: np.ndarray) -> float:
         # both empty -> perfect by convention
         return 1.0 if (not pred_bool.any() and not gt_bool.any()) else 0.0
     return 2.0 * inter / denom
-
-
-def _assign_bucket(eff_res: Optional[float],
-                   edges: List[float]) -> Tuple[int, str]:
-    """Return (idx, label) for the given eff_res. None -> (-1, 'unknown')."""
-    if eff_res is None or (isinstance(eff_res, float) and math.isnan(eff_res)):
-        return -1, "unknown"
-    for i, ub in enumerate(edges):
-        if eff_res <= ub + 1e-6:
-            lower = 0.0 if i == 0 else edges[i - 1]
-            return i, f"({lower:.1f}, {ub:.1f}]"
-    return len(edges), f"({edges[-1]:.1f}, inf]"
 
 
 # ── Per-source Dice computation ──────────────────────────────────
@@ -288,8 +271,8 @@ def main() -> int:
                          "(default: skip the source with a warning).")
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
-    cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
+    cfg = load_yaml(Path(args.config))
+    cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     model_name = args.model_name or cfg["cnisp_model_name"]
     work_dir = Path(args.work_dir or cfg["work_dir"])
@@ -652,7 +635,7 @@ def main() -> int:
     for r in per_source_rows:
         method = r["method"]
         eff = float(r["eff_res_mm"]) if r["eff_res_mm"] else None
-        _, label = _assign_bucket(eff, bucket_edges)
+        _, label = assign_bucket(eff, bucket_edges)
         col = f"{method} {label}"
         grouped[(method, col)][r["structure"]].append(float(r["dice"]))
 
@@ -663,23 +646,14 @@ def main() -> int:
     for r in per_source_rows:
         if r["eff_res_mm"]:
             eff = float(r["eff_res_mm"])
-            _, label = _assign_bucket(eff, bucket_edges)
+            _, label = assign_bucket(eff, bucket_edges)
         else:
             label = "unknown"
         if label not in seen_buckets:
             seen_buckets.add(label)
             bucket_order.append(label)
 
-    def _bucket_sort_key(label: str) -> float:
-        if label == "unknown":
-            return 1e9
-        try:
-            lo = label.split(",")[0].lstrip("(")
-            return float(lo)
-        except Exception:  # noqa: BLE001
-            return 1e9
-
-    bucket_order.sort(key=_bucket_sort_key)
+    bucket_order.sort(key=bucket_sort_key)
     methods_in_order = [NNUNET_METHOD_LABEL, cnisp_method_label]
     all_cols: List[str] = []
     for label in bucket_order:

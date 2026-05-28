@@ -23,22 +23,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict
 
-import yaml
+# Make ``nnunet.*`` importable when run as ``python nnunet/data_prep/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# Ensure ``nnunet`` is importable when this file is run as a script.
-# (this file lives at nnunet/data_prep/prepare_inputs.py -> repo root is 2 up)
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
+from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.resolve_gt import fail_on_missing, resolve_sources  # noqa: E402
-
-
-def _load_yaml(path: Path) -> Dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
 
 
 def _safe_symlink(src: Path, dst: Path) -> None:
@@ -60,8 +50,8 @@ def main() -> int:
                     help="Override work_dir from config")
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
-    cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
+    cfg = load_yaml(Path(args.config))
+    cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     atlas_image_dir = Path(args.atlas_image_dir or cfg["atlas_image_dir"])
     pivot_csv = Path(args.pivot_csv or cfg["pivot_csv"])

@@ -24,26 +24,17 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
-import yaml
+# Make ``nnunet.*`` importable when run as ``python nnunet/data_prep/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-# This file lives at nnunet/data_prep/prepare_smore_inputs.py;
-# repo root is two directories up.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from nnunet.helpers.config import load_yaml  # noqa: E402
 
 
 # Mirrors ``--smore-suffix`` default in nnunet/engine/build_smore_test_images.py.
 # If you change it there, change it here.
 _SMORE_SUFFIX = "_smore"
-
-
-def _load_yaml(path: Path) -> Dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
 
 
 def _safe_symlink(src: Path, dst: Path) -> None:
@@ -58,7 +49,7 @@ def main() -> int:
     ap.add_argument("--config", default="nnunet/configs.yaml")
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
+    cfg = load_yaml(Path(args.config))
 
     work_dir = Path(cfg["work_dir"])
     smore_out_root = Path(cfg["smore_out_root"])

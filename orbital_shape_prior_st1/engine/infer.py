@@ -589,6 +589,42 @@ def infer_test_set(params):
                 nib.Nifti1Image(result["pred_class_map"].astype(np.uint8), aff),
                 str(pred_dir / f"{casename}_pred.nii.gz"),
             )
+            # Sub-patch sidecar: tells the cache-reload path
+            # (diagnostics.resolution_sweep._try_load_cached) where this
+            # 64 mm prediction lives inside the 80 mm canonical disk
+            # patch, and tells native_mapping how to compose
+            #   pred → disk → full volume
+            # without re-running sparsify or LCC. Mandatory under the
+            # inner-crop pipeline.
+            sub_crop_sidecar = {
+                "casename": casename,
+                "step_size": int(step),
+                "step_axis": case_axis,
+                "sub_crop_lo_vox_dense": list(
+                    map(int, result["sub_crop_lo_vox_dense"])
+                ),
+                "sub_crop_shape_vox_dense": list(
+                    map(int, result["sub_crop_shape_vox_dense"])
+                ),
+                "sub_origin_mm_in_disk": (
+                    list(map(float, result["sub_origin_mm_in_disk"]))
+                    if result.get("sub_origin_mm_in_disk") is not None
+                    else None
+                ),
+                "disk_patch_dense_shape": (
+                    list(map(int, result["disk_patch_dense_shape"]))
+                    if result.get("disk_patch_dense_shape") is not None
+                    else None
+                ),
+                "visible_lcc_voxel_count": int(
+                    result.get("visible_lcc_voxel_count", 0)
+                ),
+                "visible_total_fg_count": int(
+                    result.get("visible_total_fg_count", 0)
+                ),
+            }
+            with open(pred_dir / f"{casename}_sub_crop.json", "w") as f:
+                json.dump(sub_crop_sidecar, f, indent=2)
 
             # latents/  (sidecar so cache resume keeps iso reconstruction
             # working AND so any downstream replay -- native mapping,

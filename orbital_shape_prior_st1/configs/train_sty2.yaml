@@ -1,7 +1,7 @@
 # --- Training configuration ---
 
 # Model identification (set to None for debug runs that don't save)
-model_name: orbital_ad_v3
+model_name: orbital_ad_v4
 
 # --- Architecture ---
 num_classes: 5            # BG + ON + Globe + Fat + Recti

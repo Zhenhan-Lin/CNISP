@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -57,11 +56,24 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-import yaml  # noqa: E402
 
+# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-STRUCT_ORDER = ["ON", "Globe", "Fat", "Recti"]
-NNUNET_METHOD_LABEL = "nnUNet-sparse"
+from nnunet.helpers.buckets import (  # noqa: E402
+    DEFAULT_BUCKET_EDGES_MM,
+    NNUNET_METHOD_LABEL,
+    STRUCT_ORDER,
+    assign_bucket,
+    bucket_sort_key,
+)
+from nnunet.helpers.config import load_yaml  # noqa: E402
+from nnunet.helpers.paired_csv import (  # noqa: E402
+    apply_source_filter,
+    read_paired_csv,
+    resolve_source_prefix_filters,
+)
+
 
 # Per-method colours kept consistent across all three panels so the
 # legend never has to be re-keyed when scanning between subplots.
@@ -76,126 +88,6 @@ DEFAULT_NNUNET_COLOR = "#d62728"
 
 def _color_for(method: str, fallback: str) -> str:
     return METHOD_COLORS.get(method, fallback)
-
-
-# ── Config / CSV plumbing (mirrors build_method_summary.py) ──────
-
-def _load_yaml(p: Path) -> Dict:
-    with open(p) as f:
-        return yaml.safe_load(f) or {}
-
-
-def _read_paired_csv(p: Path, methods: List[str]) -> List[Dict]:
-    """Read rows whose ``method`` field matches one of the given methods.
-
-    Numeric coercion mirrors ``build_method_summary._read_paired_csv``
-    so the per-method plots and the paired plots stay perfectly aligned
-    on the same observations.
-    """
-    if not p.exists():
-        raise FileNotFoundError(
-            f"{p} not found. Run `nnunet/compare_native.py` first "
-            f"(or the `compare` phase of run_pipeline.sh)."
-        )
-    keep = set(methods)
-    rows: List[Dict] = []
-    with open(p) as f:
-        for r in csv.DictReader(f):
-            m = r.get("method")
-            if m not in keep:
-                continue
-            try:
-                step = int(float(r["step_size"]))
-                dice = float(r["dice"])
-            except (KeyError, ValueError):
-                continue
-            eff_str = r.get("eff_res_mm", "")
-            try:
-                eff = float(eff_str) if eff_str else float("nan")
-            except ValueError:
-                eff = float("nan")
-            rows.append({
-                "source_id": r.get("source_id", ""),
-                "gt_source": r.get("gt_source", ""),
-                "method": m,
-                "step_size": step,
-                "eff_res_mm": eff,
-                "structure": r.get("structure", ""),
-                "dice": dice,
-            })
-    if not rows:
-        raise SystemExit(
-            f"{p}: no rows matched methods={methods!r}. "
-            f"Did `compare_native.py` write these methods' rows?"
-        )
-    # Sanity: warn if one of the requested methods is entirely missing.
-    seen = {r["method"] for r in rows}
-    missing = [m for m in methods if m not in seen]
-    if missing:
-        print(f"[build_paired_summary] WARN: no rows for method(s) "
-              f"{missing!r} in {p}", file=sys.stderr)
-    return rows
-
-
-def _apply_source_filter(
-    rows: List[Dict],
-    include_prefixes: List[str],
-    exclude_prefixes: List[str],
-) -> List[Dict]:
-    """Restrict rows by ``source_id`` prefix.
-
-    ``include_prefixes`` (if non-empty) keeps only sources whose id
-    starts with one of the listed prefixes. ``exclude_prefixes`` drops
-    any matching sources -- it's evaluated AFTER include, so an explicit
-    deny can carve a hole out of an include set if both are passed.
-
-    Used by run_pipeline.sh's compare phase to keep paired plots focused
-    on the cohort whose ground truth is a real human-labelled mask
-    (``atlas_*``), excluding ``chk_*`` deployment cases whose chk_pseudo
-    GT in ``test_label_source=nnunet_pred`` mode is the same Dataset835
-    dense prediction that nnUNet-sparse at step=1 IS, producing a
-    structural identity-1.0 row that inflates the deployment curve.
-    """
-    inc = tuple(p for p in include_prefixes if p)
-    exc = tuple(p for p in exclude_prefixes if p)
-    if not inc and not exc:
-        return rows
-    out: List[Dict] = []
-    for r in rows:
-        sid = r.get("source_id", "")
-        if inc and not sid.startswith(inc):
-            continue
-        if exc and sid.startswith(exc):
-            continue
-        out.append(r)
-    return out
-
-
-def _csv_list(s: str) -> List[str]:
-    """Parse a comma-separated CLI value into a clean list of prefixes."""
-    if not s:
-        return []
-    return [t.strip() for t in s.split(",") if t.strip()]
-
-
-def _assign_bucket(eff_res: float,
-                   edges: List[float]) -> Tuple[int, str]:
-    if math.isnan(eff_res):
-        return -1, "unknown"
-    for i, ub in enumerate(edges):
-        if eff_res <= ub + 1e-6:
-            lo = 0.0 if i == 0 else edges[i - 1]
-            return i, f"({lo:.1f}, {ub:.1f}]"
-    return len(edges), f"({edges[-1]:.1f}, inf]"
-
-
-def _bucket_sort_key(label: str) -> float:
-    if label == "unknown":
-        return 1e9
-    try:
-        return float(label.split(",")[0].lstrip("("))
-    except ValueError:
-        return 1e9
 
 
 # ── Aggregation ─────────────────────────────────────────────────
@@ -223,14 +115,14 @@ def _aggregate(
     seen_buckets: List[str] = []
     seen_set = set()
     for r in rows:
-        _, label = _assign_bucket(r["eff_res_mm"], edges)
+        _, label = assign_bucket(r["eff_res_mm"], edges)
         if label not in seen_set:
             seen_set.add(label)
             seen_buckets.append(label)
         by_method_bucket[(r["method"], label)][r["structure"]].append(r["dice"])
         if r["structure"] == "mean":
             eff_by_bucket[(r["method"], label)].append(r["eff_res_mm"])
-    seen_buckets.sort(key=_bucket_sort_key)
+    seen_buckets.sort(key=bucket_sort_key)
     return seen_buckets, by_method_bucket, eff_by_bucket
 
 
@@ -609,27 +501,22 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
+    cfg = load_yaml(Path(args.config))
     bucket_edges = list(cfg.get(
         "summary_bucket_edges_mm",
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0],
+        list(DEFAULT_BUCKET_EDGES_MM),
     ))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.include_source_prefixes is None:
-        include_prefixes = list(cfg.get("viz_include_source_prefixes", []))
-    else:
-        include_prefixes = _csv_list(args.include_source_prefixes)
-    if args.exclude_source_prefixes is None:
-        exclude_prefixes = list(cfg.get("viz_exclude_source_prefixes", []))
-    else:
-        exclude_prefixes = _csv_list(args.exclude_source_prefixes)
+    include_prefixes, exclude_prefixes = resolve_source_prefix_filters(
+        args.include_source_prefixes, args.exclude_source_prefixes, cfg,
+    )
 
     methods = [args.nnunet_method, args.cnisp_method]
-    rows = _read_paired_csv(Path(args.paired_csv), methods)
+    rows = read_paired_csv(Path(args.paired_csv), methods)
     n_before = len(rows)
-    rows = _apply_source_filter(rows, include_prefixes, exclude_prefixes)
+    rows = apply_source_filter(rows, include_prefixes, exclude_prefixes)
     if include_prefixes or exclude_prefixes:
         print(
             f"[build_paired_summary] source filter: "

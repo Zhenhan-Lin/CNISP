@@ -2,12 +2,38 @@
 Native-space mapping: reverse canonical alignment to place predictions
 back into the original full-head volume coordinate system.
 
-Inverse pipeline per eye patch:
-    canonical pred → un-flip (if OS) → un-reorient (RAS → original) →
-    remap labels → place at crop_slices in full volume
+Inverse pipeline per eye (post inner-crop pipeline):
 
-When both OD and OS exist for the same source, they are merged into
-one volume (they occupy non-overlapping regions).
+    64 mm pred sub-patch
+        |
+        | (1) LCC clean-up        -- defensive; should be a no-op because
+        |                            canonical_align already enforces single-
+        |                            eye patches and the MLP outputs one
+        |                            connected shape per eye. Any voxels
+        |                            stripped here trigger a WARNING since
+        |                            it means the prior produced spurious
+        |                            disconnected components.
+        |
+        | (2) Place into the 80 mm canonical disk patch using
+        |     sub_crop_lo_vox_dense from the result dict (everything outside
+        |     the sub-patch is zero).
+        |
+        | (3) Un-flip   (np.flip axis=0)  -- if was_flipped (OS)
+        |
+        | (4) Un-reorient (RAS → original) using meta["original_ornt"]
+        |
+        | (5) Place into the full-head volume using meta["crop_slices"]
+        v
+    Canonical-labels full-head per-eye volume
+
+When both OD and OS exist for the same source, they are merged into one
+volume. Because canonical_align's LCC cleanup guarantees a single-eye
+patch and step (1) re-enforces it on the prediction side, two eyes can
+NEVER overlap in the merged volume; the merge is therefore a simple
+"foreground wins" union -- no need to consult either eye's metadata
+during the merge step. Label remapping to the original scheme (nnunet /
+labelfusion / atlas-offset) is deferred until AFTER the merge so the
+union operates on the clean canonical {0..4} integer space.
 
 Usage from other modules:
     from engine.native_mapping import map_results_to_native
@@ -18,10 +44,11 @@ import json
 import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import nibabel as nib
 import numpy as np
+from scipy import ndimage
 
 
 # ── Inverse transform primitives ─────────────────────────────────
@@ -41,7 +68,7 @@ def reverse_reorient(data: np.ndarray, original_ornt_codes: list) -> np.ndarray:
 
 def place_patch_in_volume(
     patch: np.ndarray,
-    original_shape: list,
+    original_shape: Sequence[int],
     crop_slices: list,
 ) -> np.ndarray:
     """Place a cropped patch back into a full-size zero volume."""
@@ -54,6 +81,83 @@ def place_patch_in_volume(
     pk = min(patch.shape[2], k1 - k0)
     full[i0:i0+pi, j0:j0+pj, k0:k0+pk] = patch[:pi, :pj, :pk]
     return full
+
+
+def place_sub_patch_in_disk(
+    sub_patch: np.ndarray,
+    disk_shape: Sequence[int],
+    sub_crop_lo_vox_dense: Sequence[int],
+) -> np.ndarray:
+    """Place a 64 mm sub-patch prediction into an 80 mm disk-patch zero volume.
+
+    ``sub_crop_lo_vox_dense`` is the (lo_x, lo_y, lo_z) voxel offset of the
+    sub-patch inside the disk patch's dense voxel grid (see
+    ``engine.dataset.inner_crop_64mm``). Out-of-bounds clipping handles
+    the rare edge case where the visible-LCC centroid sat near the disk
+    patch boundary and the sub-patch was clamped during training.
+    """
+    disk = np.zeros(disk_shape, dtype=sub_patch.dtype)
+    lo = [int(v) for v in sub_crop_lo_vox_dense]
+    for ax in range(3):
+        if lo[ax] >= disk_shape[ax] or (lo[ax] + sub_patch.shape[ax]) <= 0:
+            # Entire sub-patch falls outside disk -- nothing to write.
+            return disk
+    sl_disk: List[slice] = []
+    sl_sub: List[slice] = []
+    for ax in range(3):
+        d0 = max(lo[ax], 0)
+        d1 = min(lo[ax] + sub_patch.shape[ax], int(disk_shape[ax]))
+        s0 = d0 - lo[ax]
+        s1 = s0 + (d1 - d0)
+        sl_disk.append(slice(d0, d1))
+        sl_sub.append(slice(s0, s1))
+    disk[tuple(sl_disk)] = sub_patch[tuple(sl_sub)]
+    return disk
+
+
+def lcc_cleanup_with_warning(
+    pred_class_map: np.ndarray,
+    casename: str = "?",
+) -> np.ndarray:
+    """Keep only the largest connected component of the foreground.
+
+    Under the inner-crop pipeline each eye's prediction is supposed to be
+    one connected shape inside its 64 mm sub-patch. This helper enforces
+    that invariant at inference time and prints a WARNING whenever it
+    actually strips anything -- a non-empty strip means the prior emitted
+    spurious foreground components which downstream consumers (paired
+    Dice, merge) shouldn't see anyway.
+
+    Returns a copy of ``pred_class_map`` with off-LCC voxels zeroed.
+    """
+    if pred_class_map.size == 0:
+        return pred_class_map
+    fg = pred_class_map > 0
+    total_fg = int(fg.sum())
+    if total_fg == 0:
+        return pred_class_map
+
+    struct = ndimage.generate_binary_structure(3, 3)  # 26-conn
+    labeled, n_cc = ndimage.label(fg, structure=struct)
+    if n_cc <= 1:
+        return pred_class_map
+
+    sizes = np.bincount(labeled.ravel())
+    sizes[0] = 0
+    lcc_id = int(sizes.argmax())
+    lcc_count = int(sizes[lcc_id])
+    stripped = total_fg - lcc_count
+    if stripped == 0:
+        return pred_class_map
+
+    print(f"  [LCC] {casename}: {n_cc} foreground CCs in prediction; "
+          f"stripped {stripped} voxels ({stripped / total_fg * 100:.1f}% "
+          f"of fg) outside the largest CC ({lcc_count} voxels). The prior "
+          f"should normally emit one CC per eye -- inspect the prediction "
+          f"if this fires frequently.")
+    out = pred_class_map.copy()
+    out[(labeled != lcc_id) & fg] = 0
+    return out
 
 
 def remap_canonical_to_original(data: np.ndarray, meta: dict) -> np.ndarray:
@@ -113,25 +217,55 @@ def remap_canonical_to_original(data: np.ndarray, meta: dict) -> np.ndarray:
 def invert_alignment_single_eye(
     pred_patch: np.ndarray,
     meta: dict,
+    sub_crop_lo_vox_dense: Sequence[int],
+    sub_crop_shape_vox_dense: Optional[Sequence[int]] = None,
+    casename: Optional[str] = None,
 ) -> np.ndarray:
     """
-    Reverse canonical alignment for one eye patch.
-    Returns the patch placed into a full-size volume.
+    Reverse canonical alignment for one eye's 64 mm sub-patch prediction.
+
+    Args:
+        pred_patch: [Nx, Ny, Nz] canonical-labels prediction in the 64 mm
+            sub-patch frame.
+        meta: alignment metadata json (one entry per disk patch).
+        sub_crop_lo_vox_dense: voxel offset of the sub-patch inside the
+            80 mm disk patch (dense voxel grid).
+        sub_crop_shape_vox_dense: expected sub-patch voxel shape; only used
+            for a sanity assert that ``pred_patch.shape`` matches.
+        casename: optional name for the LCC WARNING message.
+
+    Returns a CANONICAL-LABELS full-head volume (np.int16) with this eye's
+    prediction placed at its native position. Label remapping to the
+    original scheme is deferred until after OD/OS merge.
     """
-    patch = pred_patch.copy()
+    if sub_crop_shape_vox_dense is not None:
+        expected = tuple(int(v) for v in sub_crop_shape_vox_dense)
+        if tuple(pred_patch.shape) != expected:
+            raise ValueError(
+                f"invert_alignment_single_eye: pred shape {pred_patch.shape} "
+                f"!= sub_crop_shape_vox_dense {expected}; sub_crop sidecar "
+                f"disagrees with the cached pred for "
+                f"{casename or meta.get('casename', '?')}."
+            )
 
-    # 1. Remap labels
-    patch = remap_canonical_to_original(patch, meta)
+    # (1) LCC clean-up on the prediction (no-op expected; WARNING if not).
+    patch = lcc_cleanup_with_warning(
+        pred_patch, casename=casename or meta.get("casename", "?"),
+    ).astype(np.int16, copy=False)
 
-    # 2. Un-flip
+    # (2) Place the 64 mm sub-patch inside the 80 mm canonical disk patch.
+    disk_shape = tuple(int(v) for v in meta["patch_voxel_shape"])
+    disk_patch = place_sub_patch_in_disk(patch, disk_shape, sub_crop_lo_vox_dense)
+
+    # (3) Un-flip   (4) Un-reorient
     if meta["was_flipped"]:
-        patch = reverse_flip(patch)
+        disk_patch = reverse_flip(disk_patch)
+    disk_patch = reverse_reorient(disk_patch, meta["original_ornt"])
 
-    # 3. Un-reorient
-    patch = reverse_reorient(patch, meta["original_ornt"])
-
-    # 4. Place into full volume
-    full = place_patch_in_volume(patch, meta["original_shape"], meta["crop_slices"])
+    # (5) Place the disk patch into the full-head volume zeros.
+    full = place_patch_in_volume(
+        disk_patch, meta["original_shape"], meta["crop_slices"],
+    )
     return full
 
 
@@ -140,67 +274,57 @@ def invert_alignment_single_eye(
 def merge_and_save_native(
     eye_volumes: List[np.ndarray],
     reference_meta: dict,
-    output_path: Path
+    output_path: Path,
 ):
     """
-    Merge OD + OS full volumes and save as NIfTI.
+    Merge OD + OS canonical-labels full-volume renders, remap to the
+    original label scheme, and save as NIfTI.
 
-    Each per-eye ``vol`` comes from ``invert_alignment_single_eye``,
-    which calls ``place_patch_in_volume(np.zeros(...))`` to drop the
-    remapped patch into a full-head volume. That produces THREE kinds
-    of voxels per eye:
+    Each ``eye_volumes[i]`` comes from ``invert_alignment_single_eye`` and
+    is in CANONICAL labels {0..4} with zeros outside that eye's footprint
+    (the LCC clean-up + single-eye disk patch invariant guarantees no
+    contralateral voxels are written). The merge is therefore a simple
+    "foreground union": any voxel where any eye is > 0 keeps that value.
+    Since OD/OS footprints never overlap, the order of iteration does
+    not change the result.
 
-      * outside the eye's patch        : 0       (np.zeros init)
-      * inside the patch, background   : remap[0] (0 for nnunet / bare
-                                                  labelfusion;
-                                                  -1000 for atlas-offset
-                                                  labelfusion)
-      * inside the patch, foreground   : remap[1..4]
-
-    The OLD merge used ``mask = vol != min(uniq)`` to exclude the
-    in-patch BG, but for atlas-offset sources min(uniq) is -1000 while
-    the OUTSIDE-patch voxels are still 0. Those outside-patch zeros
-    therefore passed the mask and, when overlaying the second eye, were
-    written into the merged volume over the first eye's foreground at
-    non-overlapping patch positions -- erasing it. The net effect was
-    "only the last-iterated eye contributed", which dropped paired
-    Dice to ~2/3 of the per-eye patch-space Dice for every atlas_*
-    source.
-
-    We now identify foreground strictly: a voxel is foreground iff it
-    differs from BOTH the in-patch BG and the outside-patch sentinel
-    (=0). Non-offset schemes (BG = 0) collapse to the natural ``vol > 0``
-    rule and behave identically to before.
+    Remapping (canonical → original scheme, possibly -1000 offset) runs
+    once on the merged volume rather than per-eye, so the in-patch BG vs
+    outside-patch sentinel ambiguity that bit the OLD merge is gone.
     """
     merged = np.zeros(reference_meta["original_shape"], dtype=np.int16)
     for vol in eye_volumes:
-        if not vol.any():
-            # Empty per-eye render (no foreground inside the patch); skip.
+        if vol is None or not vol.any():
             continue
-        uniq = np.unique(vol)
-        # min(uniq) is the most-negative value present. For atlas-offset
-        # labelfusion that's the in-patch BG (-1000); for nnunet/bare
-        # labelfusion it's the outside-patch+BG sentinel (0). The
-        # "outside-patch" sentinel itself is ALWAYS exactly 0 because
-        # place_patch_in_volume uses np.zeros.
-        in_patch_bg = int(uniq[0])
-        if in_patch_bg < 0:
-            # Offset scheme: exclude both -1000 (in-patch BG) and 0
-            # (outside the patch). What's left is the true foreground
-            # voxels (remap[1..4]) -- the only thing we want to write.
-            fg_mask = (vol != in_patch_bg) & (vol != 0)
-        else:
-            # Non-offset scheme: in-patch BG and outside-patch are both
-            # 0; everything strictly greater than 0 is foreground.
-            fg_mask = vol > 0
-        merged[fg_mask] = vol[fg_mask]
+        # ``vol`` is in canonical labels with 0 = BG everywhere (both in-
+        # patch and outside-patch). Foreground is strictly ``vol > 0``.
+        fg = vol > 0
+        merged[fg] = vol[fg]
+
+    merged = remap_canonical_to_original(merged, reference_meta)
 
     affine = np.array(reference_meta["original_affine"])
-    nib.save(nib.Nifti1Image(merged, affine), str(output_path))
+    nib.save(nib.Nifti1Image(merged.astype(np.int16), affine), str(output_path))
     return output_path
 
 
 # ── High-level: map a batch of results to native space ────────────
+
+def _extract_sub_crop_info(result: dict, casename: str) -> Tuple[List[int], List[int]]:
+    """Pull sub_crop position + shape out of a result dict, with a clear
+    error when they're missing (= old cache without inner-crop sidecar)."""
+    lo = result.get("sub_crop_lo_vox_dense")
+    sh = result.get("sub_crop_shape_vox_dense")
+    if lo is None or sh is None:
+        raise ValueError(
+            f"native_mapping: result for {casename} is missing "
+            f"sub_crop_lo_vox_dense / sub_crop_shape_vox_dense. This "
+            f"comes from the inner-crop pipeline (see engine/dataset.py "
+            f"and diagnostics/resolution_sweep.py); old caches without "
+            f"the sub_crop sidecar must be regenerated."
+        )
+    return [int(v) for v in lo], [int(v) for v in sh]
+
 
 def map_results_to_native(
     results: List[dict],
@@ -213,19 +337,20 @@ def map_results_to_native(
     Map inference results back to native space.
 
     Args:
-        results: list of dicts from infer_single_case, each with
-            "casename", "pred_class_map", etc.
-        meta_dir: directory containing alignment metadata JSONs. Used
-            as ``meta_dir/<casename>.json`` unless
+        results: list of dicts from the resolution sweep, each with
+            ``casename``, ``pred_class_map``, ``sub_crop_lo_vox_dense``,
+            ``sub_crop_shape_vox_dense``.
+        meta_dir: directory containing alignment metadata JSONs. Used as
+            ``meta_dir/<casename>.json`` unless
             ``meta_path_for_casename`` is provided.
-        output_dir: where to save _cnisp.nii.gz files
-        meta_path_for_casename: optional resolver
-            ``(casename) -> Path`` to support mixed metadata trees
-            (Option C nnunet_pred mode uses ``metadata/`` for atlas
-            cases and ``metadata_dataset835/`` for chk_* cases since
-            those two share a Dice frame with different canonical
-            crops). When None we fall back to ``meta_dir`` for every
-            case so the legacy single-tree call sites keep working.
+        output_dir: where to save ``_cnisp.nii.gz`` files.
+        meta_path_for_casename: optional resolver ``(casename) -> Path``
+            to support mixed metadata trees (Option C nnunet_pred mode
+            uses ``metadata/`` for atlas cases and
+            ``metadata_dataset835/`` for chk_* cases since those two
+            share a Dice frame with different canonical crops). When
+            None we fall back to ``meta_dir`` for every case so the
+            legacy single-tree call sites keep working.
 
     Returns:
         list of output file paths
@@ -239,7 +364,7 @@ def map_results_to_native(
         return Path(meta_dir) / f"{casename}.json"
 
     # Group results by source_id
-    source_groups = defaultdict(list)
+    source_groups: Dict[str, List[Tuple[dict, dict]]] = defaultdict(list)
     for r in results:
         casename = r["casename"]
         meta_path = _meta_path(casename)
@@ -255,12 +380,18 @@ def map_results_to_native(
     for source_id, items in sorted(source_groups.items()):
         ref_meta = items[0][1]
 
-        eye_volumes = []
+        eye_volumes: List[np.ndarray] = []
         for result, meta in items:
-            full_vol = invert_alignment_single_eye(result["pred_class_map"], meta)
+            cn = result["casename"]
+            sub_crop_lo, sub_crop_shape = _extract_sub_crop_info(result, cn)
+            full_vol = invert_alignment_single_eye(
+                result["pred_class_map"], meta,
+                sub_crop_lo_vox_dense=sub_crop_lo,
+                sub_crop_shape_vox_dense=sub_crop_shape,
+                casename=cn,
+            )
             eye_volumes.append(full_vol)
 
-        # Output filename: original stem + _cnisp
         orig_name = Path(ref_meta["original_nifti_path"]).name
         stem = orig_name.replace(".nii.gz", "").replace(".nii", "")
         out_path = output_dir / f"{stem}{suffix}.nii.gz"
@@ -281,18 +412,22 @@ def map_iso_results_to_native(
     output_dir: Path,
     suffix: str = "_cnisp_iso",
 ) -> List[Path]:
-    """
-    Save isotropic predictions merged into full-volume at isotropic spacing.
+    """Save isotropic predictions merged into a full-volume at isotropic spacing.
 
-    Creates a new full-head volume where all axes use the minimum (in-plane)
-    spacing. OD and OS are merged into one file per source, matching
-    native_space output convention.
+    Under the inner-crop pipeline ``result["pred_class_map_iso"]`` is a
+    64 mm sub-patch at isotropic spacing. We compose two layers exactly
+    like the regular ``map_results_to_native`` does, but in iso voxel
+    coordinates: sub-patch → 80 mm disk patch (in iso voxels) → full-
+    head iso volume.
+
+    OD/OS are merged with the same "foreground union" rule as the
+    non-iso path. Remap to the original label scheme runs once on the
+    merged iso volume.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Group by source_id
-    source_groups = defaultdict(list)
+    source_groups: Dict[str, List[Tuple[dict, dict]]] = defaultdict(list)
     for r in results:
         casename = r["casename"]
         meta_path = Path(meta_dir) / f"{casename}.json"
@@ -308,77 +443,90 @@ def map_iso_results_to_native(
         original_affine = np.array(ref_meta["original_affine"])
         original_shape = ref_meta["original_shape"]
 
-        # Compute isotropic spacing and new volume shape
+        # Iso spacing = min over original (in-plane) spacing.
         orig_spacing = np.sqrt(np.sum(original_affine[:3, :3] ** 2, axis=0))
-        iso_sp = float(orig_spacing.min())  # use in-plane spacing for all axes
+        iso_sp = float(orig_spacing.min())
         iso_shape = [int(round(original_shape[ax] * orig_spacing[ax] / iso_sp))
                      for ax in range(3)]
-
-        # Build isotropic affine (same origin and orientation, different spacing)
-        direction = original_affine[:3, :3] / orig_spacing  # unit direction vectors
+        direction = original_affine[:3, :3] / orig_spacing  # unit dirs
         iso_affine = np.eye(4)
         iso_affine[:3, :3] = direction * iso_sp
-        iso_affine[:3, 3] = original_affine[:3, 3]  # same origin
+        iso_affine[:3, 3] = original_affine[:3, 3]
 
-        merged = np.zeros(iso_shape, dtype=np.int32)
+        merged = np.zeros(iso_shape, dtype=np.int16)
 
         for result, meta in items:
             pred_iso = result.get("pred_class_map_iso")
             if pred_iso is None:
                 continue
+            cn = result["casename"]
+            sub_crop_lo, sub_crop_shape = _extract_sub_crop_info(result, cn)
 
-            patch = pred_iso.copy()
+            # The iso pred is a 64 mm sub-patch at iso spacing -- its
+            # voxel shape differs from the disk-frame sub-patch (which is
+            # at the disk patch's dense spacing). To place it in the iso
+            # frame we recompute sub_crop positions in iso voxels by
+            # converting through physical mm.
+            disk_spacing = np.asarray(meta["patch_spacing"], dtype=np.float64)
+            disk_shape = np.asarray(meta["patch_voxel_shape"], dtype=np.int64)
+            sub_crop_lo_arr = np.asarray(sub_crop_lo, dtype=np.float64)
 
-            # Remap labels
-            patch = remap_canonical_to_original(patch, meta)
+            # Sub-patch origin in disk-local mm (corner; voxel-center conv
+            # adds an extra +spacing/2 but cancels with the iso voxel-
+            # center sample, so corner-vs-corner mapping suffices).
+            sub_origin_mm_in_disk = sub_crop_lo_arr * disk_spacing
 
-            # Un-flip
+            # Same physical region in iso-voxel coords inside the disk
+            # patch's iso version. Disk patch in iso voxels:
+            disk_iso_shape = np.maximum(
+                np.round(disk_shape * disk_spacing / iso_sp).astype(np.int64),
+                1,
+            )
+            sub_lo_iso_in_disk = np.round(sub_origin_mm_in_disk / iso_sp).astype(np.int64)
+
+            patch = np.asarray(pred_iso).astype(np.int16, copy=False)
+            patch = lcc_cleanup_with_warning(patch, casename=cn)
+
+            # Compose: sub-patch (iso) → disk patch (iso) → iso volume.
+            disk_iso = place_sub_patch_in_disk(
+                patch, tuple(disk_iso_shape.tolist()), sub_lo_iso_in_disk.tolist(),
+            )
+
             if meta["was_flipped"]:
-                patch = reverse_flip(patch)
+                disk_iso = reverse_flip(disk_iso)
+            disk_iso = reverse_reorient(disk_iso, meta["original_ornt"])
 
-            # Un-reorient
-            patch = reverse_reorient(patch, meta["original_ornt"])
-
-            # Convert original crop_slices to isotropic voxel coordinates
+            # Disk patch position in iso voxels in the full iso volume:
             crop_slices_iso = []
             for ax in range(3):
                 lo_phys = meta["crop_slices"][ax][0] * orig_spacing[ax]
                 hi_phys = meta["crop_slices"][ax][1] * orig_spacing[ax]
                 lo_iso = int(round(lo_phys / iso_sp))
                 hi_iso = int(round(hi_phys / iso_sp))
+                # Clamp to the iso volume bounds.
+                lo_iso = max(0, min(lo_iso, iso_shape[ax]))
+                hi_iso = max(lo_iso, min(hi_iso, iso_shape[ax]))
                 crop_slices_iso.append([lo_iso, hi_iso])
 
-            # Place patch into isotropic volume
-            for ax in range(3):
-                lo, hi = crop_slices_iso[ax]
-                p_size = patch.shape[ax]
-                slot_size = hi - lo
-                # Use the smaller of patch size and slot size
-                use = min(p_size, slot_size, iso_shape[ax] - lo)
-                crop_slices_iso[ax] = [lo, lo + use]
-
+            full_disk_iso = np.zeros(iso_shape, dtype=np.int16)
             i0, i1 = crop_slices_iso[0]
             j0, j1 = crop_slices_iso[1]
             k0, k1 = crop_slices_iso[2]
-            pi = i1 - i0
-            pj = j1 - j0
-            pk = k1 - k0
+            pi = min(disk_iso.shape[0], i1 - i0)
+            pj = min(disk_iso.shape[1], j1 - j0)
+            pk = min(disk_iso.shape[2], k1 - k0)
+            full_disk_iso[i0:i0+pi, j0:j0+pj, k0:k0+pk] = disk_iso[:pi, :pj, :pk]
 
-            sub_patch = patch[:pi, :pj, :pk]
-            mask = sub_patch != 0
-            # For offset labels (e.g., -1000 based)
-            uniq = np.unique(sub_patch)
-            if len(uniq) > 1 and int(uniq[0]) < 0:
-                mask = sub_patch != int(uniq[0])
+            fg = full_disk_iso > 0
+            merged[fg] = full_disk_iso[fg]
 
-            merged[i0:i1, j0:j1, k0:k1][mask] = sub_patch[mask]
+        merged = remap_canonical_to_original(merged, ref_meta).astype(np.int16)
 
-        # Output filename
         orig_name = Path(ref_meta["original_nifti_path"]).name
         stem = orig_name.replace(".nii.gz", "").replace(".nii", "")
         out_path = output_dir / f"{stem}{suffix}.nii.gz"
 
-        nib.save(nib.Nifti1Image(merged.astype(np.int16), iso_affine), str(out_path))
+        nib.save(nib.Nifti1Image(merged, iso_affine), str(out_path))
         n_labels = len(set(np.unique(merged))) - 1
         print(f"  {source_id}: {len(items)} eye(s) → {out_path.name} "
               f"(shape={iso_shape}, labels={n_labels})")

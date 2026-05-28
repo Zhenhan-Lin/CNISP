@@ -18,7 +18,27 @@ Supports two training strategies via config:
 Coordinate convention (following Amiranashvili et al.):
     - offset = spacing/2  (align_corners=False)
     - coordinates are in mm, physical space
-    - image_size = max(shape * spacing) across all training cases
+    - image_size = INNER_PATCH_SIZE_MM (fixed; see below)
+
+Two-patch system: 80 mm disk patch + 64 mm visible-centroid inner crop
+----------------------------------------------------------------------
+Disk patches (produced by ``data_prep/canonical_align.py``) are 80 mm cubic
+crops centred on each eye's dense-LCC centroid, with the contralateral eye's
+voxels already zeroed out by single-eye LCC cleanup.
+
+At training and inference time each sample is sparsified along its
+through-plane axis. The OBSERVED foreground centroid drifts away from the
+dense centroid by up to ``step_size * spacing / 2`` — typically several mm,
+sometimes 8+ mm at large step sizes. The implicit MLP must learn to
+reconstruct the dense shape from this drifted view, so we feed it an inner
+crop of **fixed 64 mm extent centred on the visible-LCC centroid**, not the
+raw 80 mm disk patch. The 16 mm buffer (80 − 64) absorbs the drift so the
+inner crop never falls off the disk patch.
+
+The MLP's ``image_size`` buffer is therefore fixed at 64 mm and
+``latent_coords = 32 mm``. Inference unmap composes two steps:
+    64 mm sub-patch  --place_at(sub_crop_in_disk)-->  80 mm disk patch
+                     --place_at(crop_slices_in_full)-->  full-head volume
 """
 
 import time
@@ -31,11 +51,18 @@ import numpy as np
 import torch
 from torch.utils import data
 
+from data_prep.canonical_align import extract_single_eye_lcc
 from data_prep.sparsify import resolve_slice_step_axes, sparsen_volume
 
 SPRSF_SEED = 1
 SPLIT_SEED = 2
 SPRSF_VAL_SEED = 3
+
+# Physical side length of the inner crop the MLP actually sees. Disk patches
+# from canonical_align are 80 mm; this 64 mm sub-patch is centred on the
+# sparsify-time visible-LCC centroid. Keep in sync with the MLP's
+# ``image_size`` buffer (set when training the AutoDecoder).
+INNER_PATCH_SIZE_MM = 64.0
 
 
 class PhaseType(IntEnum):
@@ -80,6 +107,145 @@ def compute_centroid_mm(volume: torch.Tensor, spacing: torch.Tensor,
         return torch.full((3,), float("nan"), dtype=torch.float32)
     centroid_voxel = fg.to(torch.float32).mean(dim=0)
     return centroid_voxel * spacing + offset
+
+
+def compute_visible_lcc_centroid_mm(
+    volume_sparse: torch.Tensor,
+    spacing_sparse: torch.Tensor,
+    offset_sparse: torch.Tensor,
+) -> Tuple[Optional[torch.Tensor], int, int]:
+    """Centroid of the sparsified volume's largest connected component.
+
+    Used to position the 64 mm inner crop centre. Falls back gracefully when
+    no foreground is visible (returns ``None`` so the caller can centre on
+    the disk patch's geometric centre instead).
+
+    Returns
+    -------
+    centroid_mm : torch.Tensor[3] or None
+        Centroid in disk-patch-local mm: ``voxel_idx * spacing + offset``.
+    lcc_voxel_count : int
+        Voxels in the LCC (for QC).
+    total_fg_count : int
+        Voxels in the full visible foreground (for QC).
+    """
+    fg_mask = (volume_sparse > 0).cpu().numpy()
+    _, lcc_centroid_voxel, lcc_count, total_fg = extract_single_eye_lcc(fg_mask)
+    if lcc_centroid_voxel is None:
+        return None, 0, total_fg
+    cv = torch.from_numpy(lcc_centroid_voxel.astype(np.float32))
+    return cv * spacing_sparse + offset_sparse, lcc_count, total_fg
+
+
+def pad_or_crop_to_voxel_bbox(
+    volume: torch.Tensor, lo_vox: np.ndarray, shape_vox: np.ndarray,
+) -> torch.Tensor:
+    """Extract a fixed-shape sub-volume at voxel position ``lo_vox`` from
+    ``volume``, zero-padding when the bbox spills past the volume bounds.
+
+    The returned tensor always has shape ``tuple(shape_vox)``; out-of-bounds
+    regions read as 0 (background sentinel). This lets the inner crop hold
+    its fixed 64 mm physical extent even when the visible-LCC centroid sits
+    near a disk-patch edge.
+    """
+    lo_vox = np.asarray(lo_vox, dtype=np.int64)
+    shape_vox = np.asarray(shape_vox, dtype=np.int64)
+    hi_vox = lo_vox + shape_vox
+    vol_shape = np.asarray(volume.shape, dtype=np.int64)
+    # Clamp the source slice into the input volume's bounds.
+    src_lo = np.maximum(lo_vox, 0)
+    src_hi = np.minimum(hi_vox, vol_shape)
+    # Destination indices into the output (sub-patch) frame.
+    dst_lo = src_lo - lo_vox
+    dst_hi = dst_lo + (src_hi - src_lo)
+    out = torch.zeros(tuple(shape_vox.tolist()), dtype=volume.dtype)
+    if np.all(src_hi > src_lo):
+        out[dst_lo[0]:dst_hi[0], dst_lo[1]:dst_hi[1], dst_lo[2]:dst_hi[2]] = \
+            volume[src_lo[0]:src_hi[0], src_lo[1]:src_hi[1], src_lo[2]:src_hi[2]]
+    return out
+
+
+def inner_crop_64mm(
+    volume_sparse: torch.Tensor,
+    spacing_sparse: torch.Tensor,
+    offset_sparse: torch.Tensor,
+    volume_dense: torch.Tensor,
+    spacing_dense: torch.Tensor,
+    offset_dense: torch.Tensor,
+    inner_size_mm: float = INNER_PATCH_SIZE_MM,
+) -> Dict[str, object]:
+    """Crop a ``inner_size_mm`` cubic sub-patch around the visible-LCC centroid.
+
+    Both ``volume_sparse`` and ``volume_dense`` live in the SAME disk-patch
+    coordinate frame (they differ only in spacing along the through-plane
+    axis). We compute the centroid on the sparse view (= what the MLP
+    actually sees), then express the same physical sub-patch in both the
+    sparse and dense voxel grids so they remain aligned voxel-for-voxel in
+    physical mm.
+
+    Returns a dict with everything callers need:
+        sub_sparse                : [Nx_s, Ny_s, Nz_s] inner crop of sparse
+        sub_dense                 : [Nx_d, Ny_d, Nz_d] inner crop of dense
+        sub_offset_sparse_local   : [3] mm, sub-patch-local origin in sparse
+                                    (= spacing_sparse / 2, voxel-center conv.)
+        sub_offset_dense_local    : [3] mm, sub-patch-local origin in dense
+        sub_crop_lo_vox_dense     : [3] int, dense-frame lo voxel of the
+                                    sub-patch within the 80 mm disk patch
+                                    (used by inference unmap)
+        sub_crop_shape_vox_dense  : [3] int, dense-frame voxel shape
+        sub_origin_mm_in_disk     : [3] mm, disk-patch-local mm origin of
+                                    the sub-patch (for diagnostics)
+        visible_lcc_voxel_count   : int
+        visible_total_fg_count    : int
+    """
+    sp = spacing_sparse.numpy().astype(np.float32)
+    of_s = offset_sparse.numpy().astype(np.float32)
+    sd = spacing_dense.numpy().astype(np.float32)
+    of_d = offset_dense.numpy().astype(np.float32)
+
+    centroid_mm, lcc_count, total_fg = compute_visible_lcc_centroid_mm(
+        volume_sparse, spacing_sparse, offset_sparse,
+    )
+    if centroid_mm is None:
+        # No visible foreground: fall back to the disk patch's geometric
+        # centre. Disk patch's local mm extent along axis k is
+        # vol_dense.shape[k] * spacing_dense[k] (== 80 mm by construction).
+        disk_extent_mm = np.array(volume_dense.shape, dtype=np.float32) * sd
+        centroid_np = disk_extent_mm / 2.0
+    else:
+        centroid_np = centroid_mm.numpy().astype(np.float32)
+
+    sub_origin_mm = centroid_np - inner_size_mm / 2.0  # disk-frame mm
+
+    sub_shape_vox_sparse = np.maximum(
+        np.round(inner_size_mm / sp).astype(np.int64), 1
+    )
+    sub_lo_vox_sparse = np.round((sub_origin_mm - of_s) / sp).astype(np.int64)
+    sub_sparse = pad_or_crop_to_voxel_bbox(
+        volume_sparse, sub_lo_vox_sparse, sub_shape_vox_sparse,
+    )
+
+    sub_shape_vox_dense = np.maximum(
+        np.round(inner_size_mm / sd).astype(np.int64), 1
+    )
+    sub_lo_vox_dense = np.round((sub_origin_mm - of_d) / sd).astype(np.int64)
+    sub_dense = pad_or_crop_to_voxel_bbox(
+        volume_dense, sub_lo_vox_dense, sub_shape_vox_dense,
+    )
+
+    return {
+        "sub_sparse": sub_sparse,
+        "sub_dense": sub_dense,
+        # Voxel-center offset convention (align_corners=False); sub-patch
+        # local origin sits at spacing/2 just like the disk-patch frame.
+        "sub_offset_sparse_local": spacing_sparse / 2.0,
+        "sub_offset_dense_local": spacing_dense / 2.0,
+        "sub_crop_lo_vox_dense": sub_lo_vox_dense.tolist(),
+        "sub_crop_shape_vox_dense": sub_shape_vox_dense.tolist(),
+        "sub_origin_mm_in_disk": sub_origin_mm.tolist(),
+        "visible_lcc_voxel_count": int(lcc_count),
+        "visible_total_fg_count": int(total_fg),
+    }
 
 
 class OrbitalImplicitDataset(data.Dataset):
@@ -136,12 +302,11 @@ class OrbitalImplicitDataset(data.Dataset):
             slice_step_axis, spacings_dense
         )
 
-        # image_size = max physical extent across all patches
-        image_sizes = [
-            torch.tensor(v.shape, dtype=torch.float32) * s
-            for v, s in zip(labels_dense, spacings_dense)
-        ]
-        self.image_size = torch.stack(image_sizes).max(dim=0)[0]
+        # The MLP sees a 64 mm physical extent regardless of disk patch size;
+        # the inner-crop step below makes every sample physically 64 mm.
+        self.image_size = torch.tensor(
+            [INNER_PATCH_SIZE_MM] * 3, dtype=torch.float32,
+        )
 
         # ── Strategy A: Amiranashvili val split ───────────────────
         # Applied only when num_sparsify_offsets == 1 (Strategy A) and
@@ -161,18 +326,42 @@ class OrbitalImplicitDataset(data.Dataset):
                 num_sparsify_offsets, phase_type,
             )
 
+        # ── Inner crop: from 80 mm disk patch to 64 mm sub-patch around
+        # the visible-LCC centroid. Applies to every item AFTER all sparsi-
+        # fication settles. Populates per-item sub-patch tensors + dense
+        # sub-patches + sub_crop_in_disk bookkeeping for inference unmap.
+        self._apply_inner_crop_to_all_items(
+            labels_dense, spacings_dense, offsets_dense,
+        )
+        # observed centroid is computed on the 64 mm sub-patch (post-crop)
+        # so it sits in sub-patch-local mm just like the coords downstream
+        # consumers see.
+        self._cache_observed_centroids()
+
         self.num_points = num_points_per_dim ** 3 if num_points_per_dim > 0 else -1
         self.yield_full_res = (phase_type == PhaseType.INF)
 
         if verbose:
             voxel_shapes = [list(v.shape) for v in self.labels_sparse]
-            print(f"  {len(self)} items, {len(set(self.scan_ids))} scans "
+            n_items = len(self)
+            n_fallback = sum(
+                1 for c in self.visible_lcc_voxel_counts if c == 0
+            )
+            print(f"  {n_items} items, {len(set(self.scan_ids))} scans "
                   f"in {time.time()-t0:.1f}s")
             print(f"  image_size (mm): {self.image_size.tolist()}")
             if voxel_shapes:
-                print(f"  sparse voxel shapes range: "
+                print(f"  sub-patch voxel shapes range: "
                       f"{[min(s[i] for s in voxel_shapes) for i in range(3)]} to "
                       f"{[max(s[i] for s in voxel_shapes) for i in range(3)]}")
+            if n_fallback > 0:
+                # Visible-LCC centroid fell back to disk-patch geometric
+                # centre because the sparsified view had no foreground. This
+                # is rare (only happens when sparsify drops ALL fg slices)
+                # but surface it for awareness.
+                print(f"  WARN: {n_fallback}/{n_items} items had no visible "
+                      f"foreground after sparsification; inner crop fell back "
+                      f"to disk-patch geometric centre.")
 
     # ── Strategy A init (backward compatible) ─────────────────────
 
@@ -229,7 +418,9 @@ class OrbitalImplicitDataset(data.Dataset):
             self.scan_ids = list(range(n))
             self.sparsify_offsets_used = starts
 
-        self._cache_observed_centroids()
+        # observed centroid is cached AFTER __init__ runs the inner crop,
+        # so labels_sparse holds the 64 mm sub-patch -- the mm frame the
+        # downstream model expects.
 
     # ── Strategy B init (multi-offset) ────────────────────────────
 
@@ -273,7 +464,9 @@ class OrbitalImplicitDataset(data.Dataset):
                 self.sparsify_offsets_used.append(off)
                 latent_idx += 1
 
-        self._cache_observed_centroids()
+        # observed centroid is cached AFTER __init__ runs the inner crop,
+        # so labels_sparse holds the 64 mm sub-patch -- the mm frame the
+        # downstream model expects.
 
     # ── Helpers ───────────────────────────────────────────────────
 
@@ -282,11 +475,12 @@ class OrbitalImplicitDataset(data.Dataset):
         Precompute per-item centroid of the OBSERVED (sparsified) foreground
         in patch-local physical (mm) coordinates.
 
-        The true eye centroid is fixed in physical space, but the centroid
-        computed from sparse observations drifts by up to step*spacing/2 along
-        the sparsified axis depending on `slice_start_id`. Exposing this
-        observed centroid lets downstream code (e.g. model conditioning on the
-        observed center) encode that drift explicitly.
+        After the 64 mm inner crop step this centroid is in sub-patch-local
+        mm and should sit near ``INNER_PATCH_SIZE_MM / 2`` (= 32 mm) by
+        construction. Sub-patch is centred on the visible-LCC centroid, so
+        the OBSERVED centroid landing far from 32 mm is itself a QC signal
+        (e.g. the sub-patch was edge-clamped against the 80 mm disk patch
+        boundary, so the LCC ended up off-centre after zero-padding).
         """
         self.observed_centroids_mm = [
             compute_centroid_mm(
@@ -297,6 +491,57 @@ class OrbitalImplicitDataset(data.Dataset):
             for i in range(len(self.labels_sparse))
         ]
 
+    # ── Inner crop (80 mm disk patch → 64 mm sub-patch) ─────────
+    def _apply_inner_crop_to_all_items(self, labels_dense, spacings_dense,
+                                       offsets_dense):
+        """Replace each item's 80 mm sparsified disk patch with the 64 mm
+        inner crop around its visible-LCC centroid; populate matching
+        per-item dense sub-patches and the sub_crop bookkeeping inference
+        needs to unmap predictions back to full-volume space.
+
+        Called once at the end of __init__ (after every sparsification —
+        including Strategy A's secondary val split — has settled), so
+        per-item self.labels_sparse / spacings_sparse / offsets_sparse are
+        already final.
+
+        Inputs ``labels_dense / spacings_dense / offsets_dense`` are per-
+        SCAN; this method fans them out per-item using ``self.scan_ids``.
+        """
+        self.labels_dense_sub: List[torch.Tensor] = []
+        self.spacings_dense_sub: List[torch.Tensor] = []
+        self.offsets_dense_sub: List[torch.Tensor] = []
+        # ``sub_crop_lo_vox_dense[i]`` / ``sub_crop_shape_vox_dense[i]`` are
+        # voxel coordinates of item ``i``'s sub-patch INSIDE its source
+        # 80 mm disk patch (dense voxel grid). Native unmap composes this
+        # with ``crop_slices`` from the disk patch's metadata json to get
+        # full-volume coordinates.
+        self.sub_crop_lo_vox_dense: List[list] = []
+        self.sub_crop_shape_vox_dense: List[list] = []
+        self.sub_origin_mm_in_disk: List[list] = []
+        self.visible_lcc_voxel_counts: List[int] = []
+        self.visible_total_fg_counts: List[int] = []
+
+        for item_idx in range(len(self.labels_sparse)):
+            scan_id = self.scan_ids[item_idx]
+            info = inner_crop_64mm(
+                volume_sparse=self.labels_sparse[item_idx],
+                spacing_sparse=self.spacings_sparse[item_idx],
+                offset_sparse=self.offsets_sparse[item_idx],
+                volume_dense=labels_dense[scan_id],
+                spacing_dense=spacings_dense[scan_id],
+                offset_dense=offsets_dense[scan_id],
+            )
+            self.labels_sparse[item_idx] = info["sub_sparse"]
+            self.offsets_sparse[item_idx] = info["sub_offset_sparse_local"]
+            self.labels_dense_sub.append(info["sub_dense"])
+            self.spacings_dense_sub.append(spacings_dense[scan_id])
+            self.offsets_dense_sub.append(info["sub_offset_dense_local"])
+            self.sub_crop_lo_vox_dense.append(info["sub_crop_lo_vox_dense"])
+            self.sub_crop_shape_vox_dense.append(info["sub_crop_shape_vox_dense"])
+            self.sub_origin_mm_in_disk.append(info["sub_origin_mm_in_disk"])
+            self.visible_lcc_voxel_counts.append(info["visible_lcc_voxel_count"])
+            self.visible_total_fg_counts.append(info["visible_total_fg_count"])
+
     @staticmethod
     def _split_ids(n, val_fraction):
         n_val = max(1, round(n * val_fraction))
@@ -306,8 +551,16 @@ class OrbitalImplicitDataset(data.Dataset):
 
     def _filter_to_ids(self, ids, casenames, labels_dense,
                        spacings_dense, offsets_dense):
+        # Per-item filter — applies to every list whose i-th entry is item i.
+        # (Inner-crop bookkeeping is populated AFTER this call, so it isn't
+        # filtered here; only the source-scan lists are.)
         for attr in ["labels_sparse", "spacings_sparse", "offsets_sparse"]:
             setattr(self, attr, [getattr(self, attr)[i] for i in ids])
+        # ``labels_dense`` is the source per-scan list; in Strategy A item ==
+        # scan, so the same index set applies. After this call the disk-patch
+        # references stored on self are also restricted to the val scans,
+        # which is fine because Strategy A val never indexes by raw scan_id
+        # outside the val pool.
         self.labels_dense = [labels_dense[i] for i in ids]
         self.spacings_dense = [spacings_dense[i] for i in ids]
         self.offsets_dense = [offsets_dense[i] for i in ids]
@@ -355,17 +608,28 @@ class OrbitalImplicitDataset(data.Dataset):
             "casenames": self.casenames[item],
             "caseids": self.caseids[item],
             "scan_ids": self.scan_ids[item],
-            # Centroid of observed sparse foreground in patch-local mm. Drifts
-            # with sparsify offset; the dense true centroid sits at roughly
-            # `patch_size_mm / 2` since canonical_align centers each crop on
-            # the whole-eye centroid.
+            # Centroid of observed sparse foreground in the sub-patch-local
+            # mm frame (post inner crop). By construction the sub-patch is
+            # centred on the visible-LCC centroid, so this should land near
+            # ``image_size / 2 = 32 mm`` along every axis. Significant drift
+            # away from 32 mm indicates edge-clamping at the disk-patch
+            # boundary.
             "observed_centroid_mm": self.observed_centroids_mm[item],
+            # Sub-patch position inside the 80 mm disk patch (dense voxel
+            # frame). Inference uses these to compose
+            #   pred (64 mm sub-patch) → disk-patch (80 mm) → full volume.
+            # Stored as plain lists so the default DataLoader collate
+            # works without a custom collate_fn.
+            "sub_crop_lo_vox_dense": self.sub_crop_lo_vox_dense[item],
+            "sub_crop_shape_vox_dense": self.sub_crop_shape_vox_dense[item],
         }
         if self.yield_full_res:
-            scan_id = self.scan_ids[item]
-            result["labels_hr"] = self.labels_dense[scan_id]
-            result["spacings_hr"] = self.spacings_dense[scan_id]
-            result["offsets_hr"] = self.offsets_dense[scan_id]
+            # Per-item dense sub-patch: same 64 mm physical region as the
+            # sparsified input, sampled at the original dense voxel grid.
+            # This is what inference compares predictions against.
+            result["labels_hr"] = self.labels_dense_sub[item]
+            result["spacings_hr"] = self.spacings_dense_sub[item]
+            result["offsets_hr"] = self.offsets_dense_sub[item]
         return result
 
 

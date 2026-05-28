@@ -64,25 +64,74 @@ def _select_multi_scans(dataset, max_scans: Optional[int] = None) -> Dict[int, L
     return multi
 
 
+# ── Helper: predict one item back into the 80 mm disk frame ──────
+
+@torch.no_grad()
+def _predict_item_in_disk_frame(net, dataset, latents, item_idx, disk_shape,
+                                device):
+    """Run ``predict_dense`` for one item and place its 64 mm sub-patch
+    output into a disk-frame zero tensor.
+
+    The training-time inner crop means each item's latent was fit on a
+    64 mm sub-patch with its OWN (per-item) physical position inside the
+    80 mm disk patch. To compare/aggregate across items of the same scan
+    we therefore predict at the per-item sub-patch shape using sub-patch-
+    local spacing/offset, then drop that into a disk-frame zero tensor
+    using the recorded ``sub_crop_lo_vox_dense``.
+    """
+    sub_lo = dataset.sub_crop_lo_vox_dense[item_idx]
+    sub_shape = dataset.sub_crop_shape_vox_dense[item_idx]
+    sub_spacing = dataset.spacings_dense_sub[item_idx]
+    target_shape = torch.tensor(sub_shape, dtype=torch.long)
+    latent = latents[dataset.caseids[item_idx]].unsqueeze(0).to(device)
+    pred_sub = net.predict_dense(
+        latent, target_shape.to(device), sub_spacing.to(device),
+    )  # CPU tensor by predict_dense convention
+
+    pred_disk = torch.zeros(disk_shape, dtype=pred_sub.dtype)
+    lo = [int(v) for v in sub_lo]
+    sl_disk: List[slice] = []
+    sl_sub: List[slice] = []
+    in_bounds = True
+    for ax in range(3):
+        if lo[ax] >= disk_shape[ax] or (lo[ax] + pred_sub.shape[ax]) <= 0:
+            in_bounds = False
+            break
+        d0 = max(lo[ax], 0)
+        d1 = min(lo[ax] + pred_sub.shape[ax], int(disk_shape[ax]))
+        s0 = d0 - lo[ax]
+        s1 = s0 + (d1 - d0)
+        sl_disk.append(slice(d0, d1))
+        sl_sub.append(slice(s0, s1))
+    if in_bounds:
+        pred_disk[tuple(sl_disk)] = pred_sub[tuple(sl_sub)]
+    return pred_disk
+
+
 # ── Metric: merged Dice ──────────────────────────────────────────
 
 @torch.no_grad()
 def _compute_merged_dice(net, dataset, latents, device, num_classes,
                          scan_groups: Dict[int, List[tuple]]) -> List[dict]:
-    """Per-scan merged Dice: majority-vote across offsets vs dense GT."""
+    """Per-scan merged Dice: majority-vote across offsets vs dense GT.
+
+    Each item is predicted at its own 64 mm sub-patch position, placed
+    into the 80 mm disk frame, then majority-voted against the disk-
+    frame dense GT. Voxels outside any sub-patch end up BG (= 0), which
+    cleanly matches the disk-frame GT's zero-padded layout.
+    """
     net.eval()
     results = []
     for scan_id, items in scan_groups.items():
         gt = dataset.labels_dense[scan_id]
-        spacing = dataset.spacings_dense[scan_id]
-        target_shape = torch.tensor(gt.shape)
+        disk_shape = gt.shape
 
         preds = []
         for item_idx, _off in items:
-            latent = latents[dataset.caseids[item_idx]].unsqueeze(0).to(device)
-            pred = net.predict_dense(latent, target_shape.to(device),
-                                     spacing.to(device))
-            preds.append(pred)
+            pred_disk = _predict_item_in_disk_frame(
+                net, dataset, latents, item_idx, disk_shape, device,
+            )
+            preds.append(pred_disk)
 
         stacked = torch.stack(preds, dim=0)
         merged = torch.mode(stacked, dim=0).values
@@ -133,8 +182,7 @@ def _compute_multiview_accuracy(net, dataset, latents, device, num_classes,
 
     for scan_id, items in scan_groups.items():
         gt = dataset.labels_dense[scan_id]
-        spacing = dataset.spacings_dense[scan_id]
-        target_shape = torch.tensor(gt.shape)
+        disk_shape = gt.shape
         axis = int(axes[scan_id])
 
         offsets_used = []
@@ -144,10 +192,10 @@ def _compute_multiview_accuracy(net, dataset, latents, device, num_classes,
                 f"slice_start_id={off} out of [0, {step}) for item "
                 f"{item_idx}; observed_by mask would alias."
             )
-            latent = latents[dataset.caseids[item_idx]].unsqueeze(0).to(device)
-            pred = net.predict_dense(latent, target_shape.to(device),
-                                     spacing.to(device))
-            preds.append(pred)
+            pred_disk = _predict_item_in_disk_frame(
+                net, dataset, latents, item_idx, disk_shape, device,
+            )
+            preds.append(pred_disk)
             offsets_used.append(off)
 
         pred_stack = torch.stack(preds, dim=0)        # [K, D1, D2, D3]

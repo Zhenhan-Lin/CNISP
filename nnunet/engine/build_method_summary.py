@@ -78,113 +78,30 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-import yaml  # noqa: E402
+
+# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from nnunet.helpers.buckets import (  # noqa: E402
+    DEFAULT_BUCKET_EDGES_MM,
+    STRUCT_ORDER,
+    assign_bucket,
+    bucket_sort_key,
+)
+from nnunet.helpers.config import load_yaml  # noqa: E402
+from nnunet.helpers.paired_csv import (  # noqa: E402
+    apply_source_filter,
+    read_paired_csv,
+    resolve_source_prefix_filters,
+)
 
 
-# Kept in sync with compare_native.STRUCT_ORDER on purpose. If a new
-# foreground structure is added in one place, both files have to grow.
-STRUCT_ORDER = ["ON", "Globe", "Fat", "Recti"]
 CLASS_COLORS = {
     "ON": "#d62728",
     "Globe": "#1f77b4",
     "Fat": "#2ca02c",
     "Recti": "#9467bd",
 }
-
-
-def _load_yaml(p: Path) -> Dict:
-    with open(p) as f:
-        return yaml.safe_load(f) or {}
-
-
-def _csv_list(s: str) -> List[str]:
-    """Parse comma-separated CLI value into a clean list of prefixes."""
-    if not s:
-        return []
-    return [t.strip() for t in s.split(",") if t.strip()]
-
-
-def _apply_source_filter(
-    rows: List[Dict],
-    include_prefixes: List[str],
-    exclude_prefixes: List[str],
-) -> List[Dict]:
-    """Restrict rows by ``source_id`` prefix (see build_paired_summary).
-
-    Same semantics: ``include`` (if set) keeps only matching prefixes;
-    ``exclude`` then carves out matching prefixes from whatever remains.
-    """
-    inc = tuple(p for p in include_prefixes if p)
-    exc = tuple(p for p in exclude_prefixes if p)
-    if not inc and not exc:
-        return rows
-    out: List[Dict] = []
-    for r in rows:
-        sid = r.get("source_id", "")
-        if inc and not sid.startswith(inc):
-            continue
-        if exc and sid.startswith(exc):
-            continue
-        out.append(r)
-    return out
-
-
-def _read_paired_csv(p: Path, method: str) -> List[Dict]:
-    if not p.exists():
-        raise FileNotFoundError(
-            f"{p} not found. Run `nnunet/compare_native.py` first "
-            f"(or the `compare` phase of run_pipeline.sh)."
-        )
-    rows: List[Dict] = []
-    with open(p) as f:
-        for r in csv.DictReader(f):
-            if r.get("method") != method:
-                continue
-            try:
-                step = int(float(r["step_size"]))
-                dice = float(r["dice"])
-            except (KeyError, ValueError):
-                continue
-            eff_str = r.get("eff_res_mm", "")
-            try:
-                eff = float(eff_str) if eff_str else float("nan")
-            except ValueError:
-                eff = float("nan")
-            rows.append({
-                "source_id": r.get("source_id", ""),
-                "gt_source": r.get("gt_source", ""),
-                "method": method,
-                "step_size": step,
-                "eff_res_mm": eff,
-                "structure": r.get("structure", ""),
-                "dice": dice,
-            })
-    if not rows:
-        raise SystemExit(
-            f"{p}: no rows with method=={method!r}. "
-            f"Did `compare_native.py` write this method's rows?"
-        )
-    return rows
-
-
-def _assign_bucket(eff_res: float,
-                   edges: List[float]) -> Tuple[int, str]:
-    if math.isnan(eff_res):
-        return -1, "unknown"
-    for i, ub in enumerate(edges):
-        if eff_res <= ub + 1e-6:
-            lo = 0.0 if i == 0 else edges[i - 1]
-            return i, f"({lo:.1f}, {ub:.1f}]"
-    return len(edges), f"({edges[-1]:.1f}, inf]"
-
-
-def _bucket_sort_key(label: str) -> float:
-    if label == "unknown":
-        return 1e9
-    try:
-        return float(label.split(",")[0].lstrip("("))
-    except ValueError:
-        return 1e9
 
 
 def _aggregate(
@@ -217,14 +134,14 @@ def _aggregate(
     )
 
     for r in rows:
-        _, label = _assign_bucket(r["eff_res_mm"], edges)
+        _, label = assign_bucket(r["eff_res_mm"], edges)
         bucket_struct[label][r["structure"]].append(r["dice"])
         if r["structure"] == "mean":
             bucket_eff[label].append(r["eff_res_mm"])
             bucket_step_perCase[label][r["step_size"]].append(r["dice"])
 
     bucket_order = list(bucket_struct.keys())
-    bucket_order.sort(key=_bucket_sort_key)
+    bucket_order.sort(key=bucket_sort_key)
     return bucket_order, bucket_struct, bucket_eff, bucket_step_perCase
 
 
@@ -545,28 +462,23 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
+    cfg = load_yaml(Path(args.config))
     paired_csv = Path(args.paired_csv)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bucket_edges = list(cfg.get(
         "summary_bucket_edges_mm",
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0],
+        list(DEFAULT_BUCKET_EDGES_MM),
     ))
 
-    if args.include_source_prefixes is None:
-        include_prefixes = list(cfg.get("viz_include_source_prefixes", []))
-    else:
-        include_prefixes = _csv_list(args.include_source_prefixes)
-    if args.exclude_source_prefixes is None:
-        exclude_prefixes = list(cfg.get("viz_exclude_source_prefixes", []))
-    else:
-        exclude_prefixes = _csv_list(args.exclude_source_prefixes)
+    include_prefixes, exclude_prefixes = resolve_source_prefix_filters(
+        args.include_source_prefixes, args.exclude_source_prefixes, cfg,
+    )
 
-    rows = _read_paired_csv(paired_csv, args.method)
+    rows = read_paired_csv(paired_csv, args.method)
     n_before = len(rows)
-    rows = _apply_source_filter(rows, include_prefixes, exclude_prefixes)
+    rows = apply_source_filter(rows, include_prefixes, exclude_prefixes)
     if include_prefixes or exclude_prefixes:
         print(
             f"[build_method_summary] source filter: "

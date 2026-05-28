@@ -86,20 +86,12 @@ from typing import Dict, List, Optional, Tuple
 import nibabel as nib
 import numpy as np
 import torch
-import yaml
 
+# Make ``nnunet.*`` importable when run as ``python nnunet/data_prep/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# This file lives at nnunet/data_prep/sparsify_inputs.py; repo root is two up.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
+from nnunet.helpers.config import load_yaml  # noqa: E402
 from orbital_shape_prior_st1.data_prep.sparsify import sparsen_volume  # noqa: E402
-
-
-def _load_yaml(path: Path) -> Dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
 
 
 def _build_sweep_set(
@@ -235,8 +227,8 @@ def main() -> int:
                          "covers both stories.")
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
-    cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
+    cfg = load_yaml(Path(args.config))
+    cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     work_dir = Path(cfg["work_dir"])
     input_root = work_dir / "input"

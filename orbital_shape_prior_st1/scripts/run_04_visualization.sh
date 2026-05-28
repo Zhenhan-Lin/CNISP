@@ -27,7 +27,7 @@ export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
 TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
-MODEL_NAME="orbital_ad_v3"
+MODEL_NAME="orbital_ad_v4"
 # Optional 2nd arg: run_tag override (atlas_gt / nnunet_pred / ...).
 # When unset, the test yaml's run_tag wins (defaults to atlas_gt).
 RUN_TAG="${2:-}"

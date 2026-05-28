@@ -3,24 +3,37 @@ Canonical alignment for orbital segmentation patches.
 
 Pipeline per case:
     1. Load full-head segmentation NIfTI
-    2. Separate OD/OS via whole-foreground connected component analysis
+    2. Separate OD/OS via globe connected component analysis
     3. For each eye:
         a. Compute globe centroid in world coordinates
-        b. Crop a cubic patch (default 64mm) centered on globe centroid
-        c. Reorient array to RAS+
-        d. Validate affine is diagonal (required by downstream MLP)
-        e. If OS: flip along sagittal axis → pseudo-OD
-        f. Remap labels to canonical order: {0:BG, 1:ON, 2:Globe, 3:Fat, 4:Recti}
-        g. Save aligned patch as NIfTI + metadata JSON
+        b. Within a midplane-clipped search bbox, isolate this eye's single
+           foreground connected component (LCC). Its voxel-coord mean is the
+           crop centroid.
+        c. Crop a cubic patch (default 80 mm) centered on the LCC centroid
+        d. Use the LCC mask to zero out any voxels in the patch that do NOT
+           belong to this eye (contralateral structures that physically lie
+           inside the 80 mm cube but are not in this eye's LCC). After this
+           step the patch is "single-eye only" -- a precondition the
+           downstream training + inference pipeline relies on.
+        e. Reorient array to RAS+
+        f. Validate affine is diagonal (required by downstream MLP)
+        g. If OS: flip along sagittal axis → pseudo-OD
+        h. Remap labels to canonical order: {0:BG, 1:ON, 2:Globe, 3:Fat, 4:Recti}
+        i. Save aligned patch as NIfTI + metadata JSON
 
 Why patch size is in mm, not voxels:
     The downstream implicit MLP works in physical coordinates (mm). It
     generates a coordinate grid from (spacing, patch_shape) at runtime.
-    A 64mm patch with 0.5mm spacing has 128 voxels; with 1.0mm spacing
-    it has 64 voxels. Both are valid — the MLP sees the same physical
-    coordinate range [0, 64]mm. The coordinate convention follows
+    An 80 mm patch with 0.5 mm spacing has 160 voxels; with 1.0 mm spacing
+    it has 80 voxels. Both are valid — the MLP sees the same physical
+    coordinate range [0, 80] mm. The coordinate convention follows
     Amiranashvili et al.: offset = spacing/2 (align_corners=False),
     so voxel centers are at spacing/2, 3*spacing/2, 5*spacing/2, ...
+
+The 80 mm canonical patch is a buffer: training time the dataset
+re-crops a tighter 64 mm sub-patch around the *visible* (sparsified)
+LCC centroid, so the prior learns to correct the drift between visible
+centroid and dense centroid. See ``engine/dataset.py`` for details.
 
 Data sources (Stage 1, CT only):
     1. QA-kept nnUNet predictions: review_checklist CSV, labels {1,2,3,4}
@@ -202,6 +215,18 @@ class AlignmentMetadata:
     on_volume_mm3: float
     num_structures_found: int
 
+    # ── LCC bookkeeping (added when the patch is built with the
+    #    single-eye LCC cleanup. Older metadata without LCC may set
+    #    these to 0 / 0.0 — readers should treat 0 as "unknown".) ─
+    lcc_voxel_count: int = 0              # size of the LCC inside the search bbox
+    lcc_total_fg_in_bbox: int = 0         # all fg voxels in the search bbox
+    lcc_in_patch_count: int = 0           # fg voxels left in the 80 mm patch
+                                          # after LCC cleanup (== voxels we kept)
+    lcc_fg_in_patch_before: int = 0       # fg voxels in the patch BEFORE cleanup
+                                          # (so reviewers can see what got
+                                          #  stripped). lcc_kept_fraction =
+                                          #  in_patch_count / fg_in_patch_before.
+
 
 # ── Label detection ───────────────────────────────────────────────
 # Note: the label map is for CT scans, MRI scans has different map
@@ -283,33 +308,106 @@ def separate_eyes(data, affine, globe_label, min_vox=50):
     eyes[1]["eye"] = "OS"
     return eyes
 
-def _whole_eye_centroid(data, affine, this_globe_vox, other_globe_vox,
-                        search_size_mm, voxel_sizes, label_map):
-    """
-    Compute the dense centroid of ALL foreground voxels belonging to one eye.
+# ── Single-eye largest connected component (LCC) ─────────────────
+#
+# Both data-prep (this file) and inference (engine.native_mapping,
+# engine.dataset) need to enforce "one eye per patch". This helper is the
+# single source of truth; everywhere else just calls it.
+#
+# Anatomy assumption (load-bearing): the four labelled structures inside one
+# orbit (ON + Globe + Fat + Recti) form ONE 26-connected component, and the
+# two orbits never connect to each other through any of those four labels.
+# Under that assumption the largest CC of the foreground mask is exactly
+# "this eye". If two CCs happen to be tied or the LCC's voxel count is much
+# smaller than the total foreground, callers should warn — see the
+# ``total_fg_voxel_count`` return value.
 
-    Anatomy: the globe sits anteriorly while the optic nerve extends posteriorly
-    and orbital fat/recti wrap around both, so the geometric center of the full
-    eye is several mm posterior to the globe center. Cropping around this
-    "whole-eye centroid" gives a balanced 64 mm patch that fully covers globe
-    and ON without wasting volume.
+# 26-connectivity (3x3x3 fully-connected, i.e. each centre voxel touches 26
+# neighbours + itself = 27 voxels). Same convention as ``separate_eyes`` so the
+# two helpers agree about what "connected" means.
+LCC_STRUCT_26 = ndimage.generate_binary_structure(3, 3)
+
+
+def extract_single_eye_lcc(
+    fg_mask: np.ndarray,
+    structure: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray], int, int]:
+    """Return the largest connected component of a single-eye foreground mask.
+
+    Args:
+        fg_mask:    3D boolean array. True at any voxel labelled ON / Globe /
+                    Fat / Recti for the eye we're looking at.
+        structure:  3D structuring element. Defaults to 26-connectivity
+                    (``LCC_STRUCT_26``).
+
+    Returns:
+        (lcc_mask, lcc_centroid_voxel, lcc_voxel_count, total_fg_voxel_count)
+
+        * ``lcc_mask`` — 3D boolean, True only inside the largest component.
+        * ``lcc_centroid_voxel`` — [3] float, voxel-index mean over LCC, or
+          ``None`` when ``fg_mask`` has no True voxel.
+        * ``lcc_voxel_count`` — size of the LCC.
+        * ``total_fg_voxel_count`` — sum of all True voxels in ``fg_mask``.
+          Callers compare this to ``lcc_voxel_count`` to detect "extra"
+          components (contralateral bleed, debris) and emit a WARNING.
+    """
+    if structure is None:
+        structure = LCC_STRUCT_26
+
+    total_fg = int(fg_mask.sum())
+    if total_fg == 0:
+        return np.zeros_like(fg_mask, dtype=bool), None, 0, 0
+
+    labeled, n_cc = ndimage.label(fg_mask, structure=structure)
+    if n_cc == 0:
+        return np.zeros_like(fg_mask, dtype=bool), None, 0, total_fg
+
+    sizes = np.bincount(labeled.ravel())
+    sizes[0] = 0  # background bin
+    lcc_id = int(sizes.argmax())
+    lcc_mask = (labeled == lcc_id)
+    lcc_count = int(sizes[lcc_id])
+    lcc_centroid_voxel = np.array(
+        ndimage.center_of_mass(lcc_mask), dtype=float
+    )
+    return lcc_mask, lcc_centroid_voxel, lcc_count, total_fg
+
+
+def _eye_lcc_in_search_bbox(data, affine, this_globe_vox, other_globe_vox,
+                            search_size_mm, voxel_sizes, label_map):
+    """Locate THIS eye's single foreground LCC in a midplane-clipped bbox.
+
+    Replaces the older ``_whole_eye_centroid``: the centroid we want is no
+    longer just the mean of every foreground voxel in the bbox, it's the
+    mean of voxels in the bbox's largest connected component. Under the
+    anatomy assumption above, that's "this eye" without any contralateral
+    bleed even if the bbox's midplane clip is generous.
 
     Args:
         this_globe_vox:    [3] globe CC centroid of THIS eye, voxel coords.
-        other_globe_vox:   [3] globe CC centroid of the contralateral eye, or
-                           None for single-eye cases. Used to clip the search
-                           bbox at the midplane so the contralateral eye does
-                           not pull the centroid toward midline.
-        search_size_mm:    Side length of the search bbox. Should be larger
-                           than patch_size_mm so the bbox catches the full ON.
-        label_map:         {raw_label_value -> structure_name} as returned by
-                           detect_label_scheme. Used to identify foreground
-                           voxels in a label-scheme-agnostic way (atlas data
-                           uses the labelfusion scheme offset by -1000, so a
-                           naive ``data > 0`` test would miss all foreground).
+        other_globe_vox:   [3] globe CC centroid of the contralateral eye,
+                           or None for single-eye cases. Used to clip the
+                           search bbox at the midplane.
+        search_size_mm:    Side length of the search bbox. Should be ≥
+                           ``patch_size_mm`` (we use 1.5×) so that any
+                           legal crop_slices around the LCC centroid still
+                           fit inside the bbox where the LCC mask is valid.
+        label_map:         {raw_label_value -> structure_name} as returned
+                           by ``detect_label_scheme``. Used to identify
+                           foreground voxels in a label-scheme-agnostic
+                           way (atlas data uses the labelfusion scheme
+                           offset by -1000 so a naive ``data > 0`` test
+                           would miss all foreground).
 
     Returns:
-        (centroid_voxel, centroid_world) or None if the bbox has no foreground.
+        ``None`` if the bbox has no foreground.
+        Otherwise a tuple:
+            (centroid_voxel,        # [3] float, voxel coords in full volume
+             centroid_world,        # [3] float, mm in original world frame
+             lcc_mask_full,         # bool, same shape as ``data``, True only
+                                    # inside both the bbox AND the LCC
+             lcc_voxel_count,       # int
+             total_fg_in_bbox)      # int  (≥ lcc_voxel_count)
     """
     half_vox = np.round((search_size_mm / 2.0) / voxel_sizes).astype(int)
     center = np.round(this_globe_vox).astype(int)
@@ -317,8 +415,11 @@ def _whole_eye_centroid(data, affine, this_globe_vox, other_globe_vox,
     bbox_lo = [int(max(0, center[ax] - half_vox[ax])) for ax in range(3)]
     bbox_hi = [int(min(data.shape[ax], center[ax] + half_vox[ax])) for ax in range(3)]
 
-    # Clip on the L–R separation axis at the midplane between the two globes,
-    # so we don't accidentally pull in foreground from the other orbit.
+    # Clip on the L–R separation axis at the midplane between the two globes.
+    # Even with the LCC step downstream, the midplane clip stays as a cheap
+    # belt-and-suspenders safeguard: if the anatomy assumption is ever
+    # violated (e.g. one tiny voxel of fat bridges the orbits), the bbox
+    # never reaches across the midline so the LCC is still single-eye.
     if other_globe_vox is not None:
         diff = np.asarray(other_globe_vox) - np.asarray(this_globe_vox)
         sep_axis = int(np.argmax(np.abs(diff)))
@@ -330,15 +431,21 @@ def _whole_eye_centroid(data, affine, this_globe_vox, other_globe_vox,
 
     sl = tuple(slice(bbox_lo[ax], bbox_hi[ax]) for ax in range(3))
     fg_labels = np.asarray(list(label_map.keys()), dtype=data.dtype)
-    mask = np.isin(data[sl], fg_labels)
-    if not mask.any():
+    fg_mask_bbox = np.isin(data[sl], fg_labels)
+
+    lcc_mask_bbox, c_local, lcc_count, total_fg = extract_single_eye_lcc(
+        fg_mask_bbox
+    )
+    if c_local is None or lcc_count == 0:
         return None
 
-    c_local = np.array(ndimage.center_of_mass(mask))
     origin = np.array([s.start for s in sl], dtype=float)
     c_vox = c_local + origin
     c_world = (affine @ np.append(c_vox, 1.0))[:3]
-    return c_vox, c_world
+
+    lcc_mask_full = np.zeros(data.shape, dtype=bool)
+    lcc_mask_full[sl] = lcc_mask_bbox
+    return c_vox, c_world, lcc_mask_full, lcc_count, total_fg
 
 
 # ── Crop + reorient + validate ────────────────────────────────────
@@ -390,26 +497,38 @@ def flip_os_to_od(data, affine):
 # ── Single-case ───────────────────────────────────────────────────
 
 def align_single_case(seg_path, source_id, source="checklist",
-                      patch_size_mm=64.0, search_size_mm=None):
-    """
-    Crop one fully-aligned `patch_size_mm` cubic patch per eye, centered on the
-    **whole-eye centroid** (centroid of globe + ON + fat + recti combined).
+                      patch_size_mm=80.0, search_size_mm=None):
+    """Crop one ``patch_size_mm`` cubic patch per eye, centred on the eye's
+    single-eye LCC centroid.
 
-    Anatomy: the globe sits anteriorly while the optic nerve extends
-    posteriorly; cropping around the whole-eye centroid (rather than the globe
-    centroid) keeps the patch balanced and fully covers ON + globe in 64 mm.
+    For each detected eye we:
+      1. Use ``_eye_lcc_in_search_bbox`` to compute (a) the voxel centroid of
+         the eye's largest connected component inside a midplane-clipped
+         search bbox, and (b) a boolean mask that marks every voxel in that
+         LCC.
+      2. Compute ``crop_slices`` of side ``patch_size_mm`` around that LCC
+         centroid and slice both the raw data and the LCC mask with it.
+      3. Set every voxel in the patch whose mask is False back to 0 (raw
+         scheme) — i.e. anything in the 80 mm cube that doesn't belong to
+         THIS eye's LCC. After this step the patch is single-eye-only,
+         which the downstream merge in ``engine/native_mapping`` relies on
+         to avoid OD/OS overwrite at the midline.
+      4. Run the usual remap → RAS reorient → OS→OD flip pipeline. The LCC
+         cleanup is invariant under those operations (0 stays 0).
 
     The offline crop is intentionally sparsity-agnostic; downstream
-    sparsification (in dataset.py) only changes which voxels of this fixed
-    patch are observed, never the patch's location in physical space.
+    sparsification (in ``engine/dataset.py``) only changes which voxels of
+    this fixed patch are observed, never the patch's location in physical
+    space.
 
     Args:
-        patch_size_mm:   Side length of the saved patch.
-        search_size_mm:  Side length of the bbox used to locate the whole-eye
-                         centroid. Should be larger than `patch_size_mm` so the
-                         posterior ON is captured; midplane-clipped between
-                         OD/OS so the contralateral eye is excluded. Defaults
-                         to 1.5 × patch_size_mm.
+        patch_size_mm:   Side length of the saved patch (default 80 mm).
+        search_size_mm:  Side length of the bbox used to locate the LCC
+                         centroid. Must be ≥ ``patch_size_mm`` so any crop
+                         placed at the LCC centroid still lies inside the
+                         bbox where the LCC mask was computed; midplane-
+                         clipped between OD/OS as a belt-and-suspenders
+                         safeguard. Defaults to 1.5 × patch_size_mm.
     """
     if search_size_mm is None:
         search_size_mm = patch_size_mm * 1.5
@@ -434,6 +553,7 @@ def align_single_case(seg_path, source_id, source="checklist",
         return []
 
     voxel_sizes = np.sqrt(np.sum(affine[:3, :3] ** 2, axis=0))
+    fg_labels_arr = np.asarray(list(label_map.keys()), dtype=data.dtype)
     results = []
 
     for idx, eye_info in enumerate(eyes):
@@ -444,19 +564,23 @@ def align_single_case(seg_path, source_id, source="checklist",
         crop_centroid_vox = eye_info["centroid_voxel"].copy()
         crop_centroid_world = eye_info["centroid_world"].copy()
 
-        eye_c = _whole_eye_centroid(
+        # LCC + centroid in the midplane-clipped search bbox.
+        eye_lcc = _eye_lcc_in_search_bbox(
             data, affine,
             eye_info["centroid_voxel"], other_globe_vox,
             search_size_mm, voxel_sizes, label_map,
         )
-        if eye_c is not None:
-            crop_centroid_vox, crop_centroid_world = eye_c
+        if eye_lcc is not None:
+            (crop_centroid_vox, crop_centroid_world, lcc_mask_full,
+             lcc_voxel_count, total_fg_in_bbox) = eye_lcc
         else:
             # Defensive: separate_eyes already ensured a globe CC exists in
-            # this neighborhood, so the search bbox should always contain
-            # foreground.
-            print(f"  WARN {casename}: whole-eye search returned no foreground; "
-                  f"falling back to globe centroid")
+            # this neighborhood, so the bbox should always contain foreground.
+            print(f"  WARN {casename}: LCC search returned no foreground; "
+                  f"falling back to globe centroid + no LCC cleanup")
+            lcc_mask_full = None
+            lcc_voxel_count = 0
+            total_fg_in_bbox = 0
 
         crop_sl = compute_crop_slices(
             crop_centroid_vox, data.shape, patch_size_mm, voxel_sizes
@@ -466,6 +590,32 @@ def align_single_case(seg_path, source_id, source="checklist",
             crop_sl[1][0]:crop_sl[1][1],
             crop_sl[2][0]:crop_sl[2][1],
         ].copy()
+
+        # ── Single-eye LCC cleanup ──
+        # Any voxel in this 80 mm cube that doesn't belong to this eye's LCC
+        # (e.g. contralateral structures bleeding across the midplane, or
+        # disconnected debris) is zeroed in the raw scheme. remap_to_canonical
+        # below collapses any non-fg-label value to canonical BG (0), so 0 is
+        # a safe "BG" sentinel even in atlas-offset (-1000) data.
+        fg_in_patch_before = int(np.isin(patch, fg_labels_arr).sum())
+        if lcc_mask_full is not None:
+            mask_in_patch = lcc_mask_full[
+                crop_sl[0][0]:crop_sl[0][1],
+                crop_sl[1][0]:crop_sl[1][1],
+                crop_sl[2][0]:crop_sl[2][1],
+            ]
+            patch[~mask_in_patch] = 0
+        fg_in_patch_after = int(np.isin(patch, fg_labels_arr).sum())
+
+        if fg_in_patch_before > 0:
+            stripped = fg_in_patch_before - fg_in_patch_after
+            strip_frac = stripped / fg_in_patch_before
+            if strip_frac > 0.05:
+                # A noticeable strip means the 80 mm cube did catch
+                # contralateral / debris voxels — that's expected and exactly
+                # what LCC cleanup is for. Surface it for QC.
+                print(f"  [LCC] {casename}: stripped {stripped} fg voxels "
+                      f"({strip_frac*100:.1f}%) from the 80 mm patch")
 
         crop_offset = np.array([s[0] for s in crop_sl], dtype=float)
         pa = affine.copy()
@@ -510,6 +660,10 @@ def align_single_case(seg_path, source_id, source="checklist",
             globe_volume_mm3=globe_vol,
             on_volume_mm3=on_vol,
             num_structures_found=n_structs,
+            lcc_voxel_count=int(lcc_voxel_count),
+            lcc_total_fg_in_bbox=int(total_fg_in_bbox),
+            lcc_in_patch_count=int(fg_in_patch_after),
+            lcc_fg_in_patch_before=int(fg_in_patch_before),
         )
 
         results.append((patch, pa, meta))
@@ -571,7 +725,7 @@ def _collect_scan_list(checklist_csv=None, atlas_label_dir=None):
 
 
 def align_dataset(checklist_csv=None, atlas_label_dir=None,
-                  output_dir="aligned_patches", patch_size_mm=64.0,
+                  output_dir="aligned_patches", patch_size_mm=80.0,
                   search_size_mm=None):
     out_labels = Path(output_dir) / "labels"
     out_meta = Path(output_dir) / "metadata"

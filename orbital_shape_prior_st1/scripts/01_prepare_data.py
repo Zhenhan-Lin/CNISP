@@ -18,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--paths", required=True, help="paths.yaml")
     parser.add_argument("-c", "--config", default=None, help="train config yaml (reads val_fraction, test_fraction)")
-    parser.add_argument("--patch_size", type=float, default=64.0)
+    parser.add_argument("--patch_size", type=float, default=80.0)
     args = parser.parse_args()
 
     with open(args.paths) as f:

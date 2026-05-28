@@ -44,33 +44,18 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List
 
-import yaml
+# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from nnunet.helpers.config import (  # noqa: E402
+    add_cnisp_src_to_syspath,
+    load_yaml,
+    stem_of,
+)
 
-# ── Make orbital_shape_prior_st1 importable ───────────────────────
-# This file lives at nnunet/engine/build_cnisp_native_sweep.py;
-# repo root is two directories up.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_CNISP_SRC = _REPO_ROOT / "orbital_shape_prior_st1"
-if str(_CNISP_SRC) not in sys.path:
-    sys.path.insert(0, str(_CNISP_SRC))
-
+add_cnisp_src_to_syspath(__file__)
 
 from engine.native_mapping import map_results_to_native  # noqa: E402
-
-
-def _load_yaml(path: Path) -> Dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
-
-
-def _stem_of(p: Path | str) -> str:
-    name = Path(p).name
-    if name.endswith(".nii.gz"):
-        return name[: -len(".nii.gz")]
-    if name.endswith(".nii"):
-        return name[: -len(".nii")]
-    return Path(name).stem
 
 
 def _meta_path_for_casename_factory(
@@ -114,8 +99,8 @@ def main() -> int:
                          "already exists (default: skip steps already done).")
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
-    cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
+    cfg = load_yaml(Path(args.config))
+    cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     model_name = args.model_name or cfg["cnisp_model_name"]
     output_base = (
@@ -218,7 +203,7 @@ def main() -> int:
         # manifest's own directory so the artefact survives any data
         # move (only the location of the manifest matters, not what
         # absolute path was current at write time).
-        path_by_stem = {_stem_of(p): Path(p).name for p in native_paths}
+        path_by_stem = {stem_of(p): Path(p).name for p in native_paths}
         step_manifest: Dict[str, str] = {}
         seen_sources = set()
         for r in step_results:
@@ -234,7 +219,7 @@ def main() -> int:
             if source_id in seen_sources:
                 continue
             seen_sources.add(source_id)
-            stem = _stem_of(meta["original_nifti_path"])
+            stem = stem_of(meta["original_nifti_path"])
             # ``map_results_to_native`` writes "{stem}{suffix}.nii.gz"
             output_stem = stem + suffix
             if output_stem in path_by_stem:

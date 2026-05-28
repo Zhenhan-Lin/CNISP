@@ -51,16 +51,11 @@ from queue import Queue
 from threading import Lock
 from typing import Dict, List, Optional
 
-import yaml
 
+# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# ── Wire up imports to reuse the existing SMORE helpers ───────────
-# This file lives at nnunet/engine/build_smore_test_images.py; repo root is two up.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-
+from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.helpers.smore import (  # noqa: E402
     _acquire_dir_lock,
     _is_smore_compatible_from_nifti_header,
@@ -69,11 +64,6 @@ from nnunet.helpers.smore import (  # noqa: E402
     _run_smore_singularity_run_smore,
 )
 from nnunet.resolve_gt import fail_on_missing, resolve_sources  # noqa: E402
-
-
-def _load_yaml(path: Path) -> Dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
 
 
 def _safe_symlink(src: Path, dst: Path) -> None:
@@ -135,8 +125,8 @@ def main() -> int:
 
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
-    cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
+    cfg = load_yaml(Path(args.config))
+    cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     smore_out_root = Path(args.smore_out_root or cfg["smore_out_root"])
     casefiles_dir = Path(cnisp_paths["casefiles_dir"])

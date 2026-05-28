@@ -47,24 +47,22 @@ from typing import Dict, List
 
 import nibabel as nib
 import numpy as np
-import yaml
 
+# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# Make orbital_shape_prior_st1 importable when run as a script.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_CNISP_SRC = _REPO_ROOT / "orbital_shape_prior_st1"
-if str(_CNISP_SRC) not in sys.path:
-    sys.path.insert(0, str(_CNISP_SRC))
+from nnunet.helpers.config import (  # noqa: E402
+    add_cnisp_src_to_syspath,
+    load_yaml,
+)
+from nnunet.helpers.patch_size import resolve_patch_size_mm  # noqa: E402
+
+add_cnisp_src_to_syspath(__file__)
 
 from data_prep.canonical_align import (  # noqa: E402
     align_single_case,
     infer_patch_size_mm,
 )
-
-
-def _load_yaml(p: Path) -> Dict:
-    with open(p) as f:
-        return yaml.safe_load(f) or {}
 
 
 def _aligned_dir_layout(cnisp_paths: dict, aligned_dir: Path) -> Dict[str, Path]:
@@ -95,8 +93,8 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
-    cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
+    cfg = load_yaml(Path(args.config))
+    cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
     work_dir = Path(cfg["work_dir"])
     aligned_dir = Path(cnisp_paths["aligned_dir"])
 
@@ -106,26 +104,11 @@ def main() -> int:
     # default of 64 mm mismatched the 80 mm patches used to train the
     # AutoDecoder.
     train_meta_dir = aligned_dir / "metadata"
-    if args.patch_size is None:
-        patch_size_mm = infer_patch_size_mm(train_meta_dir)
-        print(f"[dataset835_canonical] patch_size_mm auto-detected from "
-              f"{train_meta_dir} -> {patch_size_mm:.3f} mm")
-    else:
-        patch_size_mm = float(args.patch_size)
-        try:
-            detected = infer_patch_size_mm(train_meta_dir)
-        except (FileNotFoundError, ValueError):
-            detected = None
-        if detected is not None and abs(detected - patch_size_mm) > 1e-3:
-            print(
-                f"[dataset835_canonical] WARNING: --patch-size "
-                f"{patch_size_mm:.3f} mm differs from the training-time "
-                f"patch_size_mm={detected:.3f} mm recorded in "
-                f"{train_meta_dir}. The MLP's latent_coords were learned "
-                f"at {detected:.3f} mm/2 so these patches will be "
-                f"centred at a different physical offset.",
-                file=sys.stderr,
-            )
+    patch_size_mm = resolve_patch_size_mm(
+        args.patch_size, train_meta_dir,
+        log_prefix="dataset835_canonical",
+        infer_fn=infer_patch_size_mm,
+    )
 
     layout = _aligned_dir_layout(cnisp_paths, aligned_dir)
     layout["labels_dir"].mkdir(parents=True, exist_ok=True)

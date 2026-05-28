@@ -47,12 +47,11 @@ from typing import Dict
 
 import nibabel as nib
 import numpy as np
-import yaml
 
+# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-def _load_yaml(path: Path) -> Dict:
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+from nnunet.helpers.config import load_yaml  # noqa: E402
 
 
 def _nn_upsample_along_axis(
@@ -124,7 +123,7 @@ def main() -> int:
     ap.add_argument("--config", default="nnunet/configs.yaml")
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
+    cfg = load_yaml(Path(args.config))
     work_dir = Path(cfg["work_dir"])
 
     sparse_manifest = work_dir / "input" / "sparse_manifest.json"

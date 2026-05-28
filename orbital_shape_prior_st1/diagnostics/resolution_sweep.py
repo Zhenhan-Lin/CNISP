@@ -4,13 +4,16 @@ Resolution sweep utilities for orbital shape prior evaluation.
 Evaluates reconstruction quality across effective through-plane resolutions
 by varying sparsification step_size.
 
-IMPORTANT: No imports from engine.* — receives model and optimize_fn as
-arguments to avoid circular imports.
+IMPORTANT: receives model and optimize_fn as arguments to avoid circular
+imports (otherwise engine.train / engine.infer would round-trip back).
+``engine.dataset`` is imported directly because it has no back-edge into
+this module.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -21,6 +24,7 @@ import numpy as np
 import torch
 
 from data_prep.sparsify import sparsen_volume
+from engine.dataset import INNER_PATCH_SIZE_MM, inner_crop_64mm
 
 
 # ── Adaptive step / eff-res helpers ──────────────────────────────
@@ -166,6 +170,42 @@ def eval_case_at_resolution(
             step_axis, step_size, 0, use_thick_slices,
         )
 
+    # ── 64 mm inner crop around the visible-LCC centroid ──────────
+    # Identical to engine/dataset.py training: feed the MLP a 64 mm sub-
+    # patch centred on the SPARSE foreground's largest connected
+    # component, so the prior learns/uses the same drift-corrected input
+    # at train and inference time.  ``sub_crop_lo_vox_dense`` and
+    # ``sub_crop_shape_vox_dense`` describe where this 64 mm sub-patch
+    # lives in the original 80 mm disk patch (dense voxel grid); inference
+    # unmap uses them later to compose sub-patch -> disk -> full volume.
+    assert label_dense is not None, (
+        "_run_case requires label_dense in this pipeline — both eval and "
+        "cache paths in resolution_sweep.run_sweep pass a non-None GT. If "
+        "you intentionally added a no-GT inference mode, decide the target "
+        "grid explicitly instead of falling back to net.image_size envelope."
+    )
+    disk_patch_dense_shape = list(label_dense.shape)
+    inner_info = inner_crop_64mm(
+        volume_sparse=label_obs,
+        spacing_sparse=spacing_obs,
+        offset_sparse=offset_obs,
+        volume_dense=label_dense,
+        spacing_dense=spacing_dense,
+        offset_dense=offset_dense,
+    )
+    # Re-bind the working volumes/offsets to the 64 mm sub-patch frame.
+    # The original disk-patch tensors are now only used via inner_info
+    # bookkeeping (e.g. for native unmap and cache sidecars).
+    label_obs = inner_info["sub_sparse"]
+    label_dense_sub = inner_info["sub_dense"]
+    offset_obs = inner_info["sub_offset_sparse_local"]
+    offset_dense_sub = inner_info["sub_offset_dense_local"]
+    sub_crop_lo_vox_dense = inner_info["sub_crop_lo_vox_dense"]
+    sub_crop_shape_vox_dense = inner_info["sub_crop_shape_vox_dense"]
+    sub_origin_mm_in_disk = inner_info["sub_origin_mm_in_disk"]
+    visible_lcc_count = inner_info["visible_lcc_voxel_count"]
+    visible_total_fg = inner_info["visible_total_fg_count"]
+
     # ── Build coordinates for latent optimization ──────────────────
     individual = [torch.arange(label_obs.shape[d]) for d in range(3)]
     meshed = torch.meshgrid(individual, indexing="ij")
@@ -191,23 +231,12 @@ def eval_case_at_resolution(
     # 2. Predict within bbox
     # 3. Iteratively expand any face that has foreground on it
     # 4. Stop when all 6 faces are fully background
-
-    # Render the prediction on the dense GT's voxel grid so that
-    # pred_class_map.shape == gt_class_map.shape downstream.
     #
-    # `net.image_size` is the MAX physical extent across the training set
-    # (see OrbitalImplicitDataset.image_size), so the legacy
-    # `ceil(image_size / spacing_dense)` envelope is per-case >= the case's
-    # own label_dense.shape and only matches by coincidence. label_dense is
-    # exactly the canonical patch the model is supposed to reconstruct.
-    assert label_dense is not None, (
-        "_run_case requires label_dense in this pipeline — both eval and "
-        "cache paths in resolution_sweep.run_sweep pass a non-None GT. If "
-        "you intentionally added a no-GT inference mode, decide the target "
-        "grid explicitly instead of falling back to net.image_size envelope."
-    )
-    full_shape = torch.as_tensor(label_dense.shape, dtype=torch.long)
-    offset_dense = spacing_dense / 2.0
+    # All voxel coords here are in the 64 mm SUB-PATCH dense frame.
+    # ``label_dense_sub`` is the dense GT cropped to the same physical
+    # region as ``label_obs``, so pred and GT share a voxel grid.
+    full_shape = torch.as_tensor(label_dense_sub.shape, dtype=torch.long)
+    offset_dense = offset_dense_sub
 
     fg_vox = torch.nonzero(label_obs > 0, as_tuple=False)  # [M, 3]
     if fg_vox.shape[0] > 0:
@@ -310,18 +339,27 @@ def eval_case_at_resolution(
     full_points = int(np.prod(full_shape.tolist()))
 
     # ── Dice ──────────────────────────────────────────────────
-    gt_np = label_dense.numpy()
+    # Pred and GT are both in the 64 mm sub-patch frame; their voxel
+    # grids agree by construction (label_dense_sub uses the disk's dense
+    # spacing, just cropped/padded to the sub-patch position).
+    gt_np = label_dense_sub.numpy()
     assert pred_np.shape == gt_np.shape, (
         f"[_run_case] step={step_size}: pred {pred_np.shape} != gt "
-        f"{gt_np.shape}. full_shape was built from label_dense.shape so this "
-        f"should never trigger — investigate."
+        f"{gt_np.shape}. full_shape was built from label_dense_sub.shape "
+        f"so this should never trigger — investigate inner_crop_64mm "
+        f"shape rounding."
     )
     print(f"  [_run_case] step={step_size}  pred={pred_np.shape}  "
           f"gt={gt_np.shape}  bbox_pts={bbox_points}/{full_points}  "
-          f"spacing={tuple(round(float(s), 3) for s in spacing_dense)}")
+          f"spacing={tuple(round(float(s), 3) for s in spacing_dense)}  "
+          f"visible_fg={visible_total_fg} lcc={visible_lcc_count}")
 
     dice_dense = _hard_dice(pred_np, gt_np, net.num_classes)
     if step_size > 1:
+        # ``step_axis`` is the disk-frame sparsify axis. After inner crop
+        # the sub-patch grid is still axis-aligned with the disk grid
+        # (spacing is unchanged along each axis), so ``step_axis`` indexes
+        # the same physical direction in the sub-patch frame.
         obs_slices = list(range(0, pred_np.shape[step_axis], step_size))
         sl = [slice(None)] * 3
         sl[step_axis] = obs_slices
@@ -330,7 +368,9 @@ def eval_case_at_resolution(
     else:
         dice_observed = dice_dense
 
-    n_total = full_shape[step_axis].item()
+    # n_total is reported in DISK-PATCH units so step-size accounting
+    # matches what infer.py records in step metadata.
+    n_total = disk_patch_dense_shape[step_axis]
     n_obs = len(range(0, n_total, max(step_size, 1)))
 
     return {
@@ -338,6 +378,13 @@ def eval_case_at_resolution(
         "dice_observed": dice_observed,
         "pred_class_map": pred_np,
         "gt_class_map": gt_np,
+        # Sub-patch bookkeeping for native unmap and cache reload.
+        "sub_crop_lo_vox_dense": sub_crop_lo_vox_dense,
+        "sub_crop_shape_vox_dense": sub_crop_shape_vox_dense,
+        "sub_origin_mm_in_disk": sub_origin_mm_in_disk,
+        "disk_patch_dense_shape": disk_patch_dense_shape,
+        "visible_lcc_voxel_count": int(visible_lcc_count),
+        "visible_total_fg_count": int(visible_total_fg),
         "latent": latent.cpu().squeeze(0).numpy(),
         "latent_missing": False,
         "spacing": spacing_dense.numpy(),
@@ -356,12 +403,48 @@ def eval_case_at_resolution(
 
 # ── Resume support: load cached predictions ──────────────────────
 
+def _crop_disk_to_subpatch(label_disk_np, sub_crop_lo, sub_crop_shape):
+    """Zero-padded crop of a disk-patch volume to a sub-patch position.
+
+    Mirrors ``pad_or_crop_to_voxel_bbox`` from ``engine.dataset`` but
+    operates on a numpy array. Used by the cache reload path to recover
+    the same 64 mm dense GT frame the live ``inner_crop_64mm`` would have
+    produced; we deliberately don't re-import the torch helper here to
+    keep the cache path numpy-only and side-effect free.
+    """
+    lo = np.asarray(sub_crop_lo, dtype=np.int64)
+    sh = np.asarray(sub_crop_shape, dtype=np.int64)
+    hi = lo + sh
+    src_lo = np.maximum(lo, 0)
+    src_hi = np.minimum(hi, np.asarray(label_disk_np.shape, dtype=np.int64))
+    dst_lo = src_lo - lo
+    dst_hi = dst_lo + (src_hi - src_lo)
+    out = np.zeros(tuple(sh.tolist()), dtype=label_disk_np.dtype)
+    if np.all(src_hi > src_lo):
+        out[dst_lo[0]:dst_hi[0], dst_lo[1]:dst_hi[1], dst_lo[2]:dst_hi[2]] = \
+            label_disk_np[
+                src_lo[0]:src_hi[0],
+                src_lo[1]:src_hi[1],
+                src_lo[2]:src_hi[2],
+            ]
+    return out
+
+
 def _try_load_cached(output_dir, casename, step, step_axis,
                      label_dense, spacing_dense, num_classes):
     """
     Check if step_XX/pred/{casename}_pred.nii.gz exists.
     If so, load it (plus its sidecar latent if available), compute Dice
     vs dense GT, and return a result dict. Returns None if not cached.
+
+    Sub-patch sidecar
+    -----------------
+    Each cached pred has a sidecar ``{casename}_sub_crop.json`` next to
+    it that records where the 64 mm sub-patch sits inside the 80 mm
+    disk patch. We use it to crop ``label_dense`` (= the disk-patch
+    dense GT) to the same sub-patch region the live path used. If the
+    sidecar is missing, the cache is from a pre-inner-crop run and is
+    treated as invalid (returns None so the live path re-computes).
 
     Latent recovery
     ---------------
@@ -379,21 +462,46 @@ def _try_load_cached(output_dir, casename, step, step_axis,
     if not pred_path.exists():
         return None
 
+    # Sub-patch sidecar is mandatory under the new (LCC + inner crop)
+    # pipeline. A cached pred without it is from a pre-refactor run and
+    # MUST be regenerated.
+    sub_crop_path = (output_dir / f"step_{step:02d}" / "pred"
+                     / f"{casename}_sub_crop.json")
+    if not sub_crop_path.exists():
+        print(f"  [cache stale] {casename}  step={step}  no sub_crop sidecar; "
+              f"deleting and re-running")
+        try:
+            pred_path.unlink()
+        except OSError:
+            pass
+        return None
+    with open(sub_crop_path) as f:
+        sub_info = json.load(f)
+    sub_crop_lo = sub_info["sub_crop_lo_vox_dense"]
+    sub_crop_shape = sub_info["sub_crop_shape_vox_dense"]
+    sub_origin_mm_in_disk = sub_info.get("sub_origin_mm_in_disk")
+    disk_patch_dense_shape = sub_info.get(
+        "disk_patch_dense_shape",
+        list(label_dense.shape) if hasattr(label_dense, "shape") else None,
+    )
+
     pred_nii = nib.load(str(pred_path))
     pred_np = np.asarray(pred_nii.dataobj).astype(np.int32)
-    gt_np = label_dense.numpy() if isinstance(label_dense, torch.Tensor) else label_dense
 
-    # Stale-cache trap: a saved pred from a previous run can have a different
-    # shape (built from a now-changed net.image_size envelope, or from a
-    # different canonical_align voxel grid). Surface it loudly instead of
-    # silently cropping — the right action is to delete that step_XX/ subtree
-    # and re-run inference for the affected cases.
+    label_disk_np = (label_dense.numpy()
+                     if isinstance(label_dense, torch.Tensor)
+                     else label_dense)
+    gt_np = _crop_disk_to_subpatch(label_disk_np, sub_crop_lo, sub_crop_shape)
+
+    # Stale-cache trap: pred and the sub-patch GT must agree. If they don't
+    # the sidecar JSON disagrees with the pred (e.g. sidecar manually
+    # edited, or pred saved with a different shape rounding); surface it.
     assert pred_np.shape == gt_np.shape, (
         f"[_try_load_cached] {casename} step={step}: cached pred shape "
-        f"{pred_np.shape} != gt shape {gt_np.shape} at {pred_path}. This is "
-        f"a stale cache from a previous run with a different envelope; "
-        f"delete step_{step:02d}/pred/{casename}_pred.nii.gz (and the "
-        f"matching latents/) and re-run."
+        f"{pred_np.shape} != sub-patch gt shape {gt_np.shape}. Sidecar "
+        f"sub_crop_shape={sub_crop_shape}; delete "
+        f"step_{step:02d}/pred/{casename}_pred.nii.gz (+ .json + latent) "
+        f"and re-run."
     )
     print(f"  [cache hit] {casename}  step={step}  shape={pred_np.shape}")
 
@@ -407,7 +515,9 @@ def _try_load_cached(output_dir, casename, step, step_axis,
         dice_observed = dice_dense
 
     sp = spacing_dense.numpy() if isinstance(spacing_dense, torch.Tensor) else spacing_dense
-    n_total = pred_np.shape[step_axis]
+    n_total = (disk_patch_dense_shape[step_axis]
+               if disk_patch_dense_shape is not None
+               else pred_np.shape[step_axis])
 
     latent_path = output_dir / f"step_{step:02d}" / "latents" / f"{casename}.npy"
     if latent_path.exists():
@@ -422,6 +532,10 @@ def _try_load_cached(output_dir, casename, step, step_axis,
         "dice_observed": dice_observed,
         "pred_class_map": pred_np,
         "gt_class_map": gt_np,
+        "sub_crop_lo_vox_dense": sub_crop_lo,
+        "sub_crop_shape_vox_dense": sub_crop_shape,
+        "sub_origin_mm_in_disk": sub_origin_mm_in_disk,
+        "disk_patch_dense_shape": disk_patch_dense_shape,
         "latent": latent_np,
         "latent_missing": latent_missing,
         "spacing": sp,

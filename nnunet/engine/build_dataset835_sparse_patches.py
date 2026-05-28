@@ -47,17 +47,21 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Iterable, List, Tuple
 
 import nibabel as nib
 import numpy as np
-import yaml
 
+# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_CNISP_SRC = _REPO_ROOT / "orbital_shape_prior_st1"
-if str(_CNISP_SRC) not in sys.path:
-    sys.path.insert(0, str(_CNISP_SRC))
+from nnunet.helpers.config import (  # noqa: E402
+    add_cnisp_src_to_syspath,
+    load_yaml,
+)
+from nnunet.helpers.patch_size import resolve_patch_size_mm  # noqa: E402
+
+add_cnisp_src_to_syspath(__file__)
 
 from data_prep.canonical_align import (  # noqa: E402
     align_single_case,
@@ -65,14 +69,9 @@ from data_prep.canonical_align import (  # noqa: E402
 )
 
 
-def _load_yaml(p: Path) -> Dict:
-    with open(p) as f:
-        return yaml.safe_load(f) or {}
-
-
 def _iter_sparse_inputs(
     work_dir: Path,
-    sparse_manifest: Dict,
+    sparse_manifest: dict,
 ) -> Iterable[Tuple[int, str, Path]]:
     """Yield ``(step_size, source_id, sparse_pred_path)`` for steps >= 2."""
     by_step = sparse_manifest.get("by_step", {})
@@ -126,8 +125,8 @@ def main() -> int:
                          "dense baseline isn't part of this run).")
     args = ap.parse_args()
 
-    cfg = _load_yaml(Path(args.config))
-    cnisp_paths = _load_yaml(Path(cfg["cnisp_paths_yaml"]))
+    cfg = load_yaml(Path(args.config))
+    cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
     work_dir = Path(cfg["work_dir"])
     aligned_dir = Path(cnisp_paths["aligned_dir"])
     prefix = cnisp_paths.get(
@@ -140,26 +139,11 @@ def main() -> int:
     # frame would translate the predicted globe by
     # (training_patch - this_patch) / 2 millimetres per axis.
     train_meta_dir = aligned_dir / "metadata"
-    if args.patch_size is None:
-        patch_size_mm = infer_patch_size_mm(train_meta_dir)
-        print(f"[dataset835_sparse] patch_size_mm auto-detected from "
-              f"{train_meta_dir} -> {patch_size_mm:.3f} mm")
-    else:
-        patch_size_mm = float(args.patch_size)
-        try:
-            detected = infer_patch_size_mm(train_meta_dir)
-        except (FileNotFoundError, ValueError):
-            detected = None
-        if detected is not None and abs(detected - patch_size_mm) > 1e-3:
-            print(
-                f"[dataset835_sparse] WARNING: --patch-size "
-                f"{patch_size_mm:.3f} mm differs from the training-time "
-                f"patch_size_mm={detected:.3f} mm recorded in "
-                f"{train_meta_dir}. The MLP's latent_coords were learned "
-                f"at {detected:.3f} mm/2 so the sparse latent-opt input "
-                f"will sit at a different physical offset.",
-                file=sys.stderr,
-            )
+    patch_size_mm = resolve_patch_size_mm(
+        args.patch_size, train_meta_dir,
+        log_prefix="dataset835_sparse",
+        infer_fn=infer_patch_size_mm,
+    )
 
     sparse_manifest_path = work_dir / "input" / "sparse_manifest.json"
     if not sparse_manifest_path.exists():
