@@ -612,9 +612,16 @@ phase_cnisp_prep_dataset835_gt() {
     # --patch-size explicitly is redundant; we still forward it to
     # surface a single value in the log and so a future user can
     # override it from the shell without editing python.
+    # When the bash-level FORCE is set we ALSO forward --force to the
+    # python so its per-case "both eyes already on disk -> skip" logic
+    # is bypassed; otherwise --force on the pipeline would still leave
+    # stale 64 mm / old-centroid patches in place.
+    local force_args=()
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
     python3 "$REPO_ROOT/nnunet/engine/build_dataset835_canonical_patches.py" \
             --config "$CONFIG" \
-            --patch-size "$CNISP_PATCH_SIZE_MM"
+            --patch-size "$CNISP_PATCH_SIZE_MM" \
+            "${force_args[@]}"
 }
 
 phase_cnisp_prep_dataset835_sparse() {
@@ -630,9 +637,15 @@ phase_cnisp_prep_dataset835_sparse() {
         return 0
     fi
     _require_training_patch_size "cnisp-prep-dataset835-sparse"
+    # See sibling phase: forward --force to bypass the python script's
+    # per-(case, step) "already on disk -> skip" logic when the caller
+    # asks for a full rebuild.
+    local force_args=()
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
     python3 "$REPO_ROOT/nnunet/engine/build_dataset835_sparse_patches.py" \
             --config "$CONFIG" \
-            --patch-size "$CNISP_PATCH_SIZE_MM"
+            --patch-size "$CNISP_PATCH_SIZE_MM" \
+            "${force_args[@]}"
 }
 
 phase_cnisp_infer_nnunet_pred() {
