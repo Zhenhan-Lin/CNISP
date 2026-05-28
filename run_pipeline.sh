@@ -301,6 +301,7 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 
 # ── Validate phase names early (no PyYAML needed) ────────────
+# Keep in sync with PHASES_DEFAULT above and the dispatch case below.
 VALID_PHASES=(
     cnisp-train
     nnunet-predict
@@ -310,6 +311,7 @@ VALID_PHASES=(
     cnisp-prep-dataset835-gt
     cnisp-prep-dataset835-sparse
     cnisp-infer-nnunet-pred
+    cnisp-native-remap
     cnisp-viz
     compare
 )
