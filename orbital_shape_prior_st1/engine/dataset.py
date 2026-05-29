@@ -186,9 +186,13 @@ def inner_crop_64mm(
     Returns a dict with everything callers need:
         sub_sparse                : [Nx_s, Ny_s, Nz_s] inner crop of sparse
         sub_dense                 : [Nx_d, Ny_d, Nz_d] inner crop of dense
-        sub_offset_sparse_local   : [3] mm, sub-patch-local origin in sparse
-                                    (= spacing_sparse / 2, voxel-center conv.)
+        sub_offset_sparse_local   : [3] mm, sparse voxel-0 centre expressed in
+                                    the SHARED dense-corner frame (so the
+                                    sparse-fit latent decodes correctly on the
+                                    dense grid; equals spacing_dense/2 off the
+                                    through-plane axis)
         sub_offset_dense_local    : [3] mm, sub-patch-local origin in dense
+                                    (= spacing_dense / 2, voxel-center conv.)
         sub_crop_lo_vox_dense     : [3] int, dense-frame lo voxel of the
                                     sub-patch within the 80 mm disk patch
                                     (used by inference unmap)
@@ -233,13 +237,40 @@ def inner_crop_64mm(
         volume_dense, sub_lo_vox_dense, sub_shape_vox_dense,
     )
 
+    # ── Shared-origin sub-patch frame (fixes the through-plane drift) ──
+    # The latent is fitted on the SPARSE grid and decoded on the DENSE grid,
+    # so both grids MUST express the same physical point with the same local
+    # coordinate. We anchor both to the dense sub-patch's lower-corner origin
+    #   O_disk = sub_lo_vox_dense * sd + of_d - sd/2          (disk-frame mm)
+    # Dense keeps the voxel-centre convention (local origin = sd/2). The sparse
+    # voxel-0 centre sits at disk-mm (sub_lo_vox_sparse*sp + of_s); its local
+    # offset is that minus O_disk.
+    #
+    # The OLD code used ``spacing_sparse / 2`` for the sparse offset too. Along
+    # the through-plane axis spacing_sparse = step * sd, so that convention put
+    # the sparse origin at step*sd/2 instead of the physically-correct corner,
+    # drifting the sparse and dense frames apart by ~sd*(step-1)/2 (plus the
+    # sub_lo rounding mismatch). The fitted latent then decoded onto a
+    # translated dense grid, shifting every step>1 prediction along the
+    # sparsified axis (step=1 is unaffected because step*sd == sd). In-plane
+    # axes are unaffected because spacing is unchanged there, so this reduces
+    # to spacing_dense/2 (== old behaviour) off the through-plane axis.
+    sub_lo_sparse_t = torch.from_numpy(sub_lo_vox_sparse).to(spacing_sparse.dtype)
+    sub_lo_dense_t = torch.from_numpy(sub_lo_vox_dense).to(spacing_dense.dtype)
+    sub_offset_sparse_local = (
+        sub_lo_sparse_t * spacing_sparse + offset_sparse
+        - (sub_lo_dense_t * spacing_dense + offset_dense)
+        + spacing_dense / 2.0
+    )
+    sub_offset_dense_local = spacing_dense / 2.0
+
     return {
         "sub_sparse": sub_sparse,
         "sub_dense": sub_dense,
-        # Voxel-center offset convention (align_corners=False); sub-patch
-        # local origin sits at spacing/2 just like the disk-patch frame.
-        "sub_offset_sparse_local": spacing_sparse / 2.0,
-        "sub_offset_dense_local": spacing_dense / 2.0,
+        # Sparse + dense sub-patches share the dense lower-corner origin so a
+        # latent fitted on the sparse grid decodes correctly on the dense grid.
+        "sub_offset_sparse_local": sub_offset_sparse_local,
+        "sub_offset_dense_local": sub_offset_dense_local,
         "sub_crop_lo_vox_dense": sub_lo_vox_dense.tolist(),
         "sub_crop_shape_vox_dense": sub_shape_vox_dense.tolist(),
         "sub_origin_mm_in_disk": sub_origin_mm.tolist(),
