@@ -104,11 +104,20 @@ def _detect_pred_offset(arr: np.ndarray, scheme: str) -> int:
     scheme map then yields all-zero Dice for atlas sources.
 
     To make Dice robust to that mismatch we recover the offset directly
-    from the prediction array. The canonical foreground value for "ON"
-    is 1 in both LABELFUSION_LABELS and NNUNET_LABELS, so any negative
-    label present means ``offset = min(neg_values) - 1``. When no
-    negative labels are present we assume the prediction uses the bare
-    scheme (``offset = 0``).
+    from the prediction array. ``remap_canonical_to_original`` maps the
+    canonical BACKGROUND (label 0) to ``offset`` itself (e.g. canonical 0
+    -> -1000), so the background is the MOST negative value in the volume
+    (ON = offset+1 etc. are all less negative). The offset is therefore
+    simply ``min(neg_values)`` -- matching ``resolve_gt._detect_gt_offset``,
+    which reads the GT offset as ``arr.min()``. When no negative labels
+    are present we assume the prediction uses the bare scheme
+    (``offset = 0``).
+
+    NOTE: an earlier version returned ``min(neg_values) - 1`` on the
+    assumption that the most-negative label was ON (offset+1). That is
+    wrong -- the negative background (offset) is more negative than ON --
+    and produced a 1-off offset that shifted every structure by one,
+    yielding all-zero CNISP Dice for atlas sources.
 
     Parameters
     ----------
@@ -119,11 +128,11 @@ def _detect_pred_offset(arr: np.ndarray, scheme: str) -> int:
         for signature symmetry with ``build_struct_to_value`` even though
         the detection itself is scheme-agnostic.
     """
-    del scheme  # detection is scheme-agnostic (ON canonical value is 1 in both)
+    del scheme  # detection is scheme-agnostic (background maps to offset)
     if arr.size == 0:
         return 0
     if np.any(arr < 0):
-        return int(arr[arr < 0].min()) - 1
+        return int(arr[arr < 0].min())
     return 0
 
 
