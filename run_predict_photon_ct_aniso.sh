@@ -72,6 +72,17 @@ with open(info_csv, newline="") as f:
             continue
         if aniso >= aniso_max:
             continue
+        # Skip single-slice/2D images (scout, MEDRAD injection localizers).
+        # They are isotropic 1x1x1 so they pass the aniso filter, but a
+        # 1-slice volume breaks nnUNet 3d_fullres preprocessing.
+        try:
+            nz = int(float(row.get("size_z_vox") or 0))
+        except ValueError:
+            nz = 0
+        if nz <= 1:
+            print(f"[skip] not a 3D volume (size_z={nz}): "
+                  f"{row['session_label']}_{row['image_label']}", file=sys.stderr)
+            continue
         src = (row.get("image_path") or "").strip()
         if not src or not Path(src).is_file():
             print(f"[skip] missing image_path: {src!r}", file=sys.stderr)
