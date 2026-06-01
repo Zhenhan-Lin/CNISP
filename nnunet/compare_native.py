@@ -13,10 +13,12 @@ the pipeline calls this script once per entry in
 Inputs
 ------
 * ``{work_dir}/input/native/{source_id}_0000.nii.gz``    - staged input CT
-* ``{work_dir}/prediction/sparse_step_{XX}_upsampled/{source_id}.nii.gz``
-  - nnUNet per-step prediction NN-upsampled back to the native CT grid
-  (step_01 is a symlink to the dense baseline ``prediction/native/``).
-  Indexed via ``{work_dir}/prediction/sweep_manifest.json``.
+* ``{work_dir}/prediction/sparse_step_{XX}_native/{source_id}.nii.gz``
+  - nnUNet per-step plan-spacing (iso 0.5) prediction resampled onto the
+  native CT grid with nnUNet's own segmentation resampler (the iso mask
+  itself lives in ``sparse_step_{XX}_upsampled/``). step_01 is a symlink
+  to the dense baseline ``prediction/native/``. Indexed via
+  ``{work_dir}/prediction/sweep_manifest.json``.
 * ``output_basedir/{model}/runs/{run_tag}/native_space_step_{XX}/...``
   -- CNISP per-step predictions for this run, produced by
   ``orbital_shape_prior_st1/engine/infer.py`` (or backfilled by
@@ -33,8 +35,9 @@ Comparison
 ----------
 * Both methods contribute one row per (source_id, step_size,
   structure). All Dice computed on the ORIGINAL CT's voxel grid -- GT
-  is never resampled. nnUNet's sparse-CT predictions are NN-upsampled
-  along the through-plane axis by ``engine/upsample_sparse_preds.py``
+  is never resampled. nnUNet's sparse-CT predictions are produced at the
+  plan (iso 0.5) spacing and resampled onto the native CT grid with
+  nnUNet's own segmentation resampler by ``engine/predict_sparse_iso.py``
   before this step.
 * When the CNISP run uses ``test_label_source=nnunet_pred`` we ALSO
   switch nnUNet-sparse's chk_* GT to Dataset835's dense pred so both
@@ -433,10 +436,15 @@ def main() -> int:
 
     # ── nnUNet per-step manifest loader ───────────────────────────
     # Same idea as the CNISP loader: basenames anchored against the
-    # canonical upsampled-output convention written by
-    # ``nnunet/engine/upsample_sparse_preds.py``:
-    #     ${work_dir}/prediction/sparse_step_{XX}_upsampled/{sid}.nii.gz
-    nn_upsampled_root = work_dir / "prediction"
+    # canonical native-grid output convention written by
+    # ``nnunet/engine/predict_sparse_iso.py``:
+    #     ${work_dir}/prediction/sparse_step_{XX}_native/{sid}.nii.gz
+    # That mask is the plan-spacing (iso 0.5) network prediction
+    # resampled onto the native CT grid with nnUNet's own segmentation
+    # resampler (NOT the old NN slice-duplication). The matching
+    # iso-spacing prediction lives in ``sparse_step_{XX}_upsampled/``;
+    # Dice uses the native one so GT is never resampled.
+    nn_pred_root = work_dir / "prediction"
     with open(nnunet_sweep_manifest) as f:
         nn_m = json.load(f)
     nnunet_step_paths: Dict[int, Dict[str, Path]] = {}
@@ -445,7 +453,7 @@ def main() -> int:
             step = int(step_tag)
         except ValueError:
             continue
-        canonical_dir = nn_upsampled_root / f"sparse_step_{step:02d}_upsampled"
+        canonical_dir = nn_pred_root / f"sparse_step_{step:02d}_native"
         nnunet_step_paths[step] = {
             sid: canonical_dir / Path(raw).name
             for sid, raw in sid_map.items()
@@ -484,8 +492,9 @@ def main() -> int:
 
         # ── nnUNet per step ───────────────────────────────────────
         # nnUNet predictions live on the same native CT grid as the GT;
-        # for step>1 they've already been NN-upsampled by
-        # engine/upsample_sparse_preds.py before reaching this script.
+        # for step>1 they've already been resampled from plan (iso 0.5)
+        # spacing onto the native grid by engine/predict_sparse_iso.py
+        # (nnUNet's own segmentation resampler) before reaching here.
         for step in sorted(nnunet_step_paths):
             path_map = nnunet_step_paths[step]
             if sid not in path_map:
@@ -730,9 +739,9 @@ def main() -> int:
         f.write("    eff_res used by CNISP for that (source, step). The nnUNet\n")
         f.write("    plan was trained at iso 0.5 mm, so large z-spacing rows\n")
         f.write("    are intentionally out-of-distribution -- that's the test.\n")
-        f.write("  - nnUNet preds are NN-upsampled along the through-plane axis\n")
-        f.write("    back to the native CT grid before Dice; GT is never\n")
-        f.write("    resampled.\n")
+        f.write("  - nnUNet preds are taken at the plan (iso 0.5) spacing and\n")
+        f.write("    resampled onto the native CT grid with nnUNet's own\n")
+        f.write("    segmentation resampler before Dice; GT is never resampled.\n")
         f.write(chk_note + "\n")
 
         f.write(f"Sources processed: {n_done}  "

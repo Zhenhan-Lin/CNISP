@@ -7,6 +7,10 @@ CUSTOM_PLAN_NAME="${CUSTOM_PLAN_NAME:-nnUNetPlans_iso05}"
 CFG="${CFG:-3d_fullres}"
 # TRAIN_FOLDS="${TRAIN_FOLDS:-0 1 2 3 4}"
 TRAIN_FOLDS="${TRAIN_FOLDS:-1 2 3 4}"
+# CONTINUE=1 -> resume from checkpoint (--c). Default 0 = train from
+# scratch (use this to recover a collapsed fold; resuming a bad
+# checkpoint just keeps it stuck).
+CONTINUE="${CONTINUE:-0}"
 GPU_ID="${GPU_ID:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_PREPROCESS="${SKIP_PREPROCESS:-0}"
@@ -29,9 +33,11 @@ DS_DIR_NAME="$(printf "Dataset%03d_%s" "${DATASET_ID}" "${DATASET_NAME}")"
 
 # ── Step 4: Train ─────────────────────────────────────────────────
 echo -e "\n--- Step 4: Train ---"
+CONT_FLAG=""
+[[ "$CONTINUE" == "1" ]] && CONT_FLAG="--c"
 for F in ${TRAIN_FOLDS}; do
-    echo "[FOLD ${F}] nnUNetv2_train ${DATASET_ID} ${CFG} ${F} -p ${CUSTOM_PLAN_NAME}"
-    nnUNetv2_train "${DATASET_ID}" "${CFG}" "${F}" -p "${CUSTOM_PLAN_NAME}" --c
+    echo "[FOLD ${F}] nnUNetv2_train ${DATASET_ID} ${CFG} ${F} -p ${CUSTOM_PLAN_NAME} ${CONT_FLAG}"
+    nnUNetv2_train "${DATASET_ID}" "${CFG}" "${F}" -p "${CUSTOM_PLAN_NAME}" ${CONT_FLAG}
 done
 
 echo -e "\n=== Done. Results: ${nnUNet_results}/${DS_DIR_NAME} ==="

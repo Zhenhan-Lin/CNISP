@@ -37,16 +37,19 @@
 #                         (source_id, step_size) set CNISP just ran.
 #                         Reads sweep_results.pkl (from runs/atlas_gt/),
 #                         drops axial slices along each source's
-#                         through-plane axis, runs nnUNetv2_predict per
-#                         step, then NN-upsamples back to the native
-#                         CT grid. Writes
-#                         prediction/sparse_step_XX_upsampled/ and
-#                         prediction/sweep_manifest.json.
+#                         through-plane axis, then runs a custom nnUNet
+#                         predictor that keeps the plan-spacing (iso 0.5)
+#                         network output. Writes per step:
+#                           prediction/sparse_step_XX/           (sparse grid)
+#                           prediction/sparse_step_XX_upsampled/ (iso 0.5)
+#                           prediction/sparse_step_XX_native/    (iso resampled
+#                             onto the native grid via nnUNet's segmentation
+#                             resampler; the Dice target)
+#                         + prediction/sweep_manifest.json.
 #                         Requires: nnunet-predict (step_01 baseline)
 #                                   + cnisp-infer (sweep set).
 #                         (nnunet/data_prep/sparsify_inputs.py
-#                          + nnunet/run_predict_sparse_sweep.sh
-#                          + nnunet/engine/upsample_sparse_preds.py)
+#                          + nnunet/engine/predict_sparse_iso.py)
 #
 #   nnunet-predict-smore  nnUNet on the SMORE-super-resolved CTs (produced
 #                         out-of-band by
@@ -531,8 +534,13 @@ phase_nnunet_predict_sweep() {
         return 0
     fi
     python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG"
-    CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_sparse_sweep.sh"
-    python3 "$REPO_ROOT/nnunet/engine/upsample_sparse_preds.py" --config "$CONFIG"
+    # Single custom-predictor pass writes the sparse-grid mask
+    # (sparse_step_XX/), the genuine iso-0.5 plan-spacing prediction
+    # (sparse_step_XX_upsampled/), and that iso prediction resampled onto
+    # the native grid with nnUNet's own resampler (sparse_step_XX_native/,
+    # the Dice target). Replaces the old nnUNetv2_predict CLI sweep +
+    # NN slice-duplication upsample.
+    python3 "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py" --config "$CONFIG"
 }
 
 phase_nnunet_predict_smore() {
@@ -859,8 +867,9 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
     echo "    $base/sweep_results.pkl"
     echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$rt/${ml}_recon_summary.png"
 done
-echo "  nnUNet sparse-CT sweep (per-step preds on native CT grid):"
-echo "    $WORK_DIR/prediction/sparse_step_XX_upsampled/"
+echo "  nnUNet sparse-CT sweep (per-step preds):"
+echo "    $WORK_DIR/prediction/sparse_step_XX_native/    (iso->native, Dice target)"
+echo "    $WORK_DIR/prediction/sparse_step_XX_upsampled/ (iso 0.5 plan spacing)"
 echo "    $WORK_DIR/prediction/sweep_manifest.json"
 echo "  nnUNet on SMORE'd CTs (mask only):"
 echo "    $WORK_DIR/prediction/smore/"
