@@ -23,4 +23,5 @@ nnunet/engine/__pycache__
 nnunet/helpers/__pycache__
 nnunet/source_to_path.json
 results_when_model_learned_both_eyes
+nnUNet-master
 main.py

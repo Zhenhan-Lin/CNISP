@@ -2,10 +2,16 @@
 # ============================================================
 # Predict PHOTON-CT scans with the Dataset835-trained nnUNet.
 #
-# Selects the first N scans (default 8) from an image_info CSV whose
-# `anisotropy_ratio` < threshold (default 1.3), copies each source
-# CT into the images/ dir using nnUNet's `<case>_0000.nii.gz`
-# convention, then runs nnUNetv2_predict into the preds/ dir.
+# Selects EVERY scan in an image_info CSV that passes the known
+# fail-safe filters (anisotropy_ratio < threshold, a real 3D volume,
+# and an existing image_path), copies each source CT into the images/
+# dir using nnUNet's `<case>_0000.nii.gz` convention, runs
+# nnUNetv2_predict into PRED_DIR, then writes a new CSV that keeps only
+# the rows whose prediction actually landed and adds a `seg_path`
+# column pointing at each prediction mask.
+#
+# Set N_SCANS > 0 to cap the number of scans (handy for smoke tests);
+# the default of 0 means "process all matching scans".
 #
 # All knobs are env-overridable. Defaults match nnunet/configs.yaml.
 # ============================================================
@@ -14,12 +20,15 @@ set -euo pipefail
 # ── Selection inputs ──────────────────────────────────────────────
 INFO_CSV="${INFO_CSV:-/fs5/p_masi/linz18/QA_record/table_collection/PHOTON_CP_image_only_image_info.csv}"
 ANISO_MAX="${ANISO_MAX:-1.3}"
-N_SCANS="${N_SCANS:-8}"
+# 0 (default) = no cap, process every matching scan. >0 caps the count.
+N_SCANS="${N_SCANS:-0}"
 
 # ── Output layout ─────────────────────────────────────────────────
-BASE_DIR="${BASE_DIR:-/fs5/p_masi/linz18/data/nnUNet_prediction/PHOTON_CT}"
+BASE_DIR="${BASE_DIR:-/fs5/p_masi/linz18/data/nnUNet_prediction/PHOTON_CT_part2}"
 IMG_DIR="${IMG_DIR:-${BASE_DIR}/images}"
-PRED_DIR="${PRED_DIR:-${BASE_DIR}/preds}"
+PRED_DIR="${PRED_DIR:-/fs5/p_masi/linz18/EyeSegmentation/nnUNet_results/predictions/PHOTON_CT_part2}"
+# New CSV (kept rows + seg_path column), written next to INFO_CSV.
+OUT_CSV="${OUT_CSV:-$(dirname "$INFO_CSV")/PHOTON_CP_QCpart2_image_info.csv}"
 
 # ── nnUNet inference identity (Dataset835 training) ───────────────
 DATASET_ID="${DATASET_ID:-835}"
@@ -27,6 +36,10 @@ DATASET_NAME="${DATASET_NAME:-PHOTON_CT_QAfiltered}"
 CFG="${CFG:-3d_fullres}"
 PLAN="${PLAN:-nnUNetPlans}"
 TRAINER="${TRAINER:-nnUNetTrainer}"
+# Which checkpoint to load. Default = final EMA weights (nnUNet default,
+# more stable). Set CHECKPOINT=checkpoint_best.pth to use the best
+# online-pseudo-dice epoch instead.
+CHECKPOINT="${CHECKPOINT:-checkpoint_final.pth}"
 # FOLDS: leave empty to auto-pick the single best-Dice fold from each
 # fold's validation/summary.json. Set explicitly (e.g. "0 1 2 3 4") to
 # override and ensemble.
@@ -41,10 +54,16 @@ if [[ ! -f "$INFO_CSV" ]]; then
     exit 2
 fi
 
+if [[ "${N_SCANS}" -gt 0 ]]; then
+    SEL_DESC="first ${N_SCANS} matching scans"
+else
+    SEL_DESC="all matching scans"
+fi
 echo "[predict] info_csv : ${INFO_CSV}"
-echo "[predict] filter   : anisotropy_ratio < ${ANISO_MAX}, first ${N_SCANS} scans"
+echo "[predict] filter   : anisotropy_ratio < ${ANISO_MAX}, 3D volume, valid path; ${SEL_DESC}"
 echo "[predict] images -> ${IMG_DIR}"
 echo "[predict] preds  -> ${PRED_DIR}"
+echo "[predict] out_csv-> ${OUT_CSV}"
 
 # ── Step 1: select scans + stage CTs as <case>_0000.nii.gz ────────
 # A case name is session_label + '_' + image_label so multiple images
@@ -63,7 +82,7 @@ picked = 0
 with open(info_csv, newline="") as f:
     reader = csv.DictReader(f)
     for row in reader:
-        if picked >= n_scans:
+        if n_scans > 0 and picked >= n_scans:
             break
         raw = (row.get("anisotropy_ratio") or "").strip()
         try:
@@ -141,6 +160,8 @@ fi
 echo -e "\n--- Step 3: nnUNetv2_predict (Dataset${DATASET_ID}, fold ${FOLDS}) ---"
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
+# Don't let a single bad case abort the run: keep whatever masks landed
+# so Step 4 can still build the CSV from the successful predictions.
 # shellcheck disable=SC2086
 nnUNetv2_predict \
     -d "${DATASET_ID}" \
@@ -148,7 +169,69 @@ nnUNetv2_predict \
     -p "${PLAN}" \
     -tr "${TRAINER}" \
     -f ${FOLDS} \
+    -chk "${CHECKPOINT}" \
     -i "${IMG_DIR}" \
-    -o "${PRED_DIR}"
+    -o "${PRED_DIR}" \
+    || echo "[warn] nnUNetv2_predict returned non-zero; continuing with whatever masks were produced" >&2
+
+echo -e "\n=== predictions written: ${PRED_DIR} ==="
+
+# ── Step 4: build output CSV (kept rows + seg_path column) ────────
+echo -e "\n--- Step 4: write ${OUT_CSV} (rows with a landed prediction) ---"
+python3 - "$INFO_CSV" "$ANISO_MAX" "$N_SCANS" "$PRED_DIR" "$OUT_CSV" <<'PY'
+import csv, sys
+from pathlib import Path
+
+info_csv, aniso_max, n_scans, pred_dir, out_csv = sys.argv[1:6]
+aniso_max, n_scans, pred_dir = float(aniso_max), int(n_scans), Path(pred_dir)
+
+kept_rows = []
+selected = 0
+missing_pred = []
+with open(info_csv, newline="") as f:
+    reader = csv.DictReader(f)
+    fieldnames = list(reader.fieldnames or [])
+    for row in reader:
+        if n_scans > 0 and selected >= n_scans:
+            break
+        # Mirror Step 1's fail-safe filters exactly so case names line up.
+        try:
+            if float(row.get("anisotropy_ratio") or "nan") >= aniso_max:
+                continue
+        except ValueError:
+            continue
+        try:
+            if int(float(row.get("size_z_vox") or 0)) <= 1:
+                continue
+        except ValueError:
+            continue
+        src = (row.get("image_path") or "").strip()
+        if not src or not Path(src).is_file():
+            continue
+        selected += 1
+        case = f"{row['session_label']}_{row['image_label']}"
+        pred_p = pred_dir / f"{case}.nii.gz"
+        if not pred_p.is_file():
+            missing_pred.append(case)
+            continue
+        row["seg_path"] = str(pred_p)
+        kept_rows.append(row)
+
+if "seg_path" not in fieldnames:
+    fieldnames.append("seg_path")
+
+Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+with open(out_csv, "w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames, restval="", extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(kept_rows)
+
+print(f"[done] selected {selected} scan(s); "
+      f"kept {len(kept_rows)} with a prediction -> {out_csv}")
+if missing_pred:
+    print(f"[note] {len(missing_pred)} selected scan(s) had no prediction "
+          f"(dropped): {', '.join(missing_pred)}", file=sys.stderr)
+PY
 
 echo -e "\n=== Done. predictions: ${PRED_DIR} ==="
+echo "=== CSV: ${OUT_CSV} ==="

@@ -19,7 +19,10 @@ export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DS_DIR_NAME="$(printf "Dataset%03d_%s" "${DATASET_ID}" "${DATASET_NAME}")"
 
-# # ── Step 1-3: Preprocess ──────────────────────────────────────────
+# # ── Step 1-2: Preprocess ──────────────────────────────────────────
+# # Dataset835 already carries its own ${CUSTOM_PLAN_NAME}.json under
+# # ${nnUNet_preprocessed}/${DS_DIR_NAME}/, so we no longer copy a plan
+# # in from another dataset -- just plan/preprocess this dataset.
 # if [[ "$SKIP_PREPROCESS" != "1" ]]; then
 #     echo -e "\n--- Step 1: Default plan_and_preprocess ---"
 #     nnUNetv2_plan_and_preprocess -d "${DATASET_ID}" --verify_dataset_integrity

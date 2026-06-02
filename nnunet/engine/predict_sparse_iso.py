@@ -95,28 +95,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
-
-
-def _import_nnunet():
-    """Import the nnUNetv2 bits we need, failing loudly if absent."""
-    try:
-        import torch  # noqa: F401
-        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-        from nnunetv2.inference.export_prediction import (
-            convert_predicted_logits_to_segmentation_with_correct_shape,
-        )
-    except Exception as e:  # noqa: BLE001
-        raise SystemExit(
-            f"[predict_sparse_iso] could not import nnUNetv2 / torch: {e}\n"
-            f"  This script needs the same environment that runs "
-            f"nnUNetv2_predict. Activate it and retry."
-        )
-    import torch  # noqa: F811
-    return (
-        torch,
-        nnUNetPredictor,
-        convert_predicted_logits_to_segmentation_with_correct_shape,
-    )
+import torch  # noqa: F401
+from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+from nnunetv2.inference.export_prediction import convert_predicted_logits_to_segmentation_with_correct_shape
 
 
 def _resolve_model_folder(cfg: Dict) -> Path:
@@ -149,7 +130,6 @@ def _resolve_model_folder(cfg: Dict) -> Path:
 
 
 def _init_predictor(cfg: Dict):
-    torch, nnUNetPredictor, _convert = _import_nnunet()
     gpu_id = cfg.get("gpu_id", 0)
     # Respect the config GPU the same way the shell scripts do.
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", str(gpu_id))
