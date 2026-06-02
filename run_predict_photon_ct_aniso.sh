@@ -4,8 +4,8 @@
 #
 # Selects EVERY scan in an image_info CSV that passes the known
 # fail-safe filters (anisotropy_ratio < threshold, a real 3D volume,
-# and an existing image_path), copies each source CT into the images/
-# dir using nnUNet's `<case>_0000.nii.gz` convention, runs
+# and an existing image_path), symlinks each source CT into the images/
+# dir using nnUNet's `<case>_0000.nii.gz` convention (no copy), runs
 # nnUNetv2_predict into PRED_DIR, then writes a new CSV that keeps only
 # the rows whose prediction actually landed and adds a `seg_path`
 # column pointing at each prediction mask.
@@ -65,12 +65,12 @@ echo "[predict] images -> ${IMG_DIR}"
 echo "[predict] preds  -> ${PRED_DIR}"
 echo "[predict] out_csv-> ${OUT_CSV}"
 
-# ── Step 1: select scans + stage CTs as <case>_0000.nii.gz ────────
+# ── Step 1: select scans + symlink CTs as <case>_0000.nii.gz ──────
 # A case name is session_label + '_' + image_label so multiple images
 # per session stay distinct (matches the NIfTI naming in the CSV).
-echo -e "\n--- Step 1: select + copy images ---"
+echo -e "\n--- Step 1: select + symlink images ---"
 python3 - "$INFO_CSV" "$ANISO_MAX" "$N_SCANS" "$IMG_DIR" <<'PY'
-import csv, shutil, sys
+import csv, os, sys
 from pathlib import Path
 
 info_csv, aniso_max, n_scans, img_dir = sys.argv[1:5]
@@ -108,9 +108,13 @@ with open(info_csv, newline="") as f:
             continue
         case = f"{row['session_label']}_{row['image_label']}"
         dst = img_dir / f"{case}_0000.nii.gz"
-        shutil.copyfile(src, dst)
+        # Symlink instead of copy: nnUNet just needs the <case>_0000.nii.gz
+        # naming convention in the input dir, no need to duplicate the CT.
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        os.symlink(os.path.abspath(src), dst)
         picked += 1
-        print(f"[copy] {case}  (aniso={aniso:.3f})  <- {src}")
+        print(f"[link] {case}  (aniso={aniso:.3f})  <- {src}")
 
 if picked == 0:
     print("[ERROR] no scans matched the filter", file=sys.stderr)
