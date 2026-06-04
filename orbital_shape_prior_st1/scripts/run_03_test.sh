@@ -27,7 +27,8 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
+REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
+export PYTHONPATH="$PROJECT_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES=1
 
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
@@ -36,13 +37,21 @@ TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
 
 # Read model_name from train config (or override here)
-MODEL_NAME="orbital_ad_v4"
+MODEL_NAME="orbital_ad_v5"
 
 # Option C overrides (optional). Either pass on the command line or set
 # the corresponding fields in the test yaml. When unset, the test yaml
 # wins; the yaml's own default keeps the ceiling-curve behaviour.
 #
 #   ./run_03_test.sh [test_yaml] [test_label_source] [run_tag]
+#
+# Examples:
+#   ./run_03_test.sh                                   # ceiling (atlas_gt)
+#   ./run_03_test.sh "" nnunet_pred nnunet_pred        # deployment curve
+#   ./run_03_test.sh "" real_pair  real_pair           # Turella sim3 (real
+#                                                      # paired data; needs
+#                                                      # build_realpair_patches.py
+#                                                      # to have run first)
 TEST_LABEL_SOURCE="${2:-}"
 RUN_TAG="${3:-}"
 

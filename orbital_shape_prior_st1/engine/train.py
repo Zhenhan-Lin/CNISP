@@ -19,7 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from models.multiclass_ad import MultiClassAutoDecoder
 from models.losses import MultiClassShapeLoss, MultiClassDiceMetric
-from engine.dataset import create_data_loader, PhaseType
+from engine.dataset import create_data_loader, EpochSubsetSampler, PhaseType
 from engine.io_utils import RollingCheckpointWriter, Logger
 from diagnostics.multiview_qc import compute_multiview_metrics
 
@@ -232,6 +232,10 @@ def train_model(params: dict):
     for epoch in range(num_epochs):
         log_this = (epoch % log_every == 0)
 
+        # Strategy C (degradation bank): select random subset for this epoch
+        if isinstance(dl_train.sampler, EpochSubsetSampler):
+            dl_train.sampler.set_epoch(epoch)
+
         train_metrics = train_one_epoch(
             dl_train, net, latents_train, optimizer, criterion, metric,
             lat_reg_lambda, device, epoch, global_step,
@@ -246,7 +250,7 @@ def train_model(params: dict):
             )
 
             # ── Multi-view diagnostics (Strategy B only, less frequent) ──
-            if dl_train.dataset.num_sparsify_offsets > 1 and epoch % (5 * log_every) == 0:
+            if (dl_train.dataset.num_sparsify_offsets or 0) > 1 and epoch % (5 * log_every) == 0:
                 mv_metrics = compute_multiview_metrics(
                     net, dl_train.dataset, latents_train, device,
                     params["num_classes"], max_scans=8,

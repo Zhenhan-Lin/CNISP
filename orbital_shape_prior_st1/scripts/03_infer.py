@@ -50,11 +50,13 @@ def main():
                         help="Which checkpoint to load (default: best)")
     parser.add_argument(
         "--test-label-source", default=None,
-        choices=["atlas_gt", "nnunet_pred"],
+        choices=["atlas_gt", "nnunet_pred", "real_pair"],
         help=("Override test_label_source from the test yaml. "
               "atlas_gt = ceiling curve (sparsified canonical GT). "
               "nnunet_pred = deployment curve (canonical-aligned Dataset835 "
-              "sparse-CT pred as latent-opt input; see test_default.yaml)."),
+              "sparse-CT pred as latent-opt input; see test_default.yaml). "
+              "real_pair = Turella sim3 (REAL low-res nnUNet pred input + "
+              "separate hi-res GT, post-hoc rigid mask registration)."),
     )
     parser.add_argument(
         "--run-tag", default=None,

@@ -20,16 +20,30 @@ val_casefile: null
 test_fraction: 0.2
 
 # --- Sparsification (synthetic anisotropy for training) ---
-# Keep every Nth slice along this axis to simulate thick-slice acquisition
-slice_step_size: 4
-# slice_step_axis: "auto" (DEFAULT) picks per-case argmax(patch_spacing)
-# so each scan is sparsified along its own natural through-plane
-# direction after canonical alignment. Legacy mode is int 0/1/2
-# (uniform RAS axis). The prior learns the distribution of sparsity
-# patterns implied by this choice -- changing it requires retraining
-# AND a matching test_default.yaml. See test_default.yaml for full notes.
+#
+# STRATEGY C (degradation bank — recommended for mixed thin/thick):
+#   When `degradation_bank` is present, it overrides slice_step_size /
+#   use_thick_slices. Each case generates items for multiple (mode, step)
+#   combinations, each with its own latent code.
+#
+degradation_bank:
+  modality: ct                      # "ct" -> box kernel; "mri" -> gaussian/estimated
+  modes: [thin, thick]              # both degradation modes in every training run
+  target_eff_res_increment_mm: 2.0  # ~3 steps/case (half test density)
+  max_eff_resolution_mm: 12.0       # cap effective resolution
+  offsets_per_setting: 1            # offsets per (mode, step); 1 = no offset augment
+  num_classes: 5                    # BG + ON + Globe + Fat + Recti
+  cache_dir: null                   # null -> auto: {output_dir}/degraded_bank/
+
+# Per-epoch sampling (Strategy C only)
+items_per_epoch: 100        # sample 100 items from bank each epoch
+point_sample_fraction: 0.75 # sample 75% of dense voxels per item
+
+# Legacy sparsification (Strategy A/B — used when degradation_bank is absent)
+# slice_step_size: 4
+# slice_step_axis: auto
+# use_thick_slices: false
 slice_step_axis: auto
-use_thick_slices: false
 
 # --- Sampling ---
 # Points per example per dim for training (64^3 = 262144 points total)

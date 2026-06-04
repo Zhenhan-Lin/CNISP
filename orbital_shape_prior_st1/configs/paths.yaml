@@ -44,3 +44,17 @@ labels_dirname: labels
 labels_dataset835_dirname: labels_dataset835
 metadata_dataset835_dirname: metadata_dataset835
 labels_dataset835_step_prefix: labels_dataset835_step_
+
+# ── real_pair (Turella sim3) staging directories ──────────────────
+# REAL paired acquisitions: a low-res scan + a separate hi-res GT scan.
+# Each is canonical-aligned independently (registration-free); the
+# reconstructed mask is rigidly registered to the GT mask at eval time.
+# Written by nnunet/engine/build_realpair_patches.py.
+#
+#   labels_realpair_input_dirname    nnUNet pred on the REAL low-res scan,
+#                                    aligned (latent-opt INPUT for real_pair)
+#   labels_realpair_gt_dirname       separate hi-res GT, aligned (Dice target)
+#   metadata_realpair_gt_dirname     sidecar JSONs for the GT (native unmap)
+labels_realpair_input_dirname: labels_realpair_input
+labels_realpair_gt_dirname: labels_realpair_gt
+metadata_realpair_gt_dirname: metadata_realpair_gt

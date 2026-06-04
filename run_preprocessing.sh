@@ -42,11 +42,37 @@
 # Default (no phases given): cnisp-align nnunet-stage
 #   -- smore is opt-in because it can take many GPU-hours.
 #
+# ── Real paired-data line (Turella sim3) — MANUAL prep, no phase here ──
+# The real_pair evaluation (run_pipeline.sh phases cnisp-prep-realpair +
+# cnisp-infer-realpair) compares a CNISP reconstruction from a REAL low-res
+# scan against a SEPARATE high-resolution GT scan of the same subject. There
+# is no automatable preprocessing phase for it in THIS script because the
+# patch build (nnunet/engine/build_realpair_patches.py) needs the nnUNet
+# prediction on the low-res scan, which is produced on the GPU host. What you
+# must prepare here / by hand before running the real_pair pipeline phases:
+#   1. Stage the REAL low-res CT scans so nnUNet can predict them. The
+#      default nnunet-stage only stages the atlas + PHOTON cohort; add your
+#      low-res scans to ${work_dir}/input/native/ (and source_to_path.json)
+#      by whatever route fits your dataset, OR predict them out-of-band and
+#      point the manifest straight at the resulting masks.
+#   2. Have the high-resolution GT for each subject available as a NIfTI
+#      (manual annotation, or an nnUNet-on-hires pseudo-GT).
+#   3. Author a realpair manifest JSON mapping each source_id to its two
+#      scans and point configs.yaml::realpair_manifest at it (default
+#      ${work_dir}/realpair_manifest.json):
+#        { "subjX": { "lowres_pred": "/abs/lowres_nnunet_pred.nii.gz",
+#                     "hires_gt":    "/abs/hires_gt.nii.gz" } }
+#      Both scans are canonical-aligned INDEPENDENTLY (registration-free) by
+#      the pipeline's cnisp-prep-realpair phase into ${aligned_dir}/
+#      labels_realpair_input/ , labels_realpair_gt/ , metadata_realpair_gt/.
+#
 # Usage:
 #   bash run_preprocessing.sh                                 # cnisp-align + nnunet-stage
 #   bash run_preprocessing.sh cnisp-align                     # one phase
 #   bash run_preprocessing.sh nnunet-stage smore              # stage + run SMORE
 #   bash run_preprocessing.sh --force-align                   # re-do canonical alignment
+#   # (real_pair line: see the "Real paired-data" note above — manual prep,
+#   #  then run the cnisp-{prep,infer}-realpair phases in run_pipeline.sh)
 #   bash run_preprocessing.sh smore --smore-gpu-ids 0,1       # SMORE on two GPUs
 #   bash run_preprocessing.sh --config <path>                 # override nnunet/configs.yaml
 #   bash run_preprocessing.sh --paths <path>                  # override CNISP paths.yaml
@@ -255,4 +281,14 @@ echo "  CNISP caselists:          $CASEFILES_DIR"
 echo "  nnUNet staged inputs:     ${WORK_DIR%/}/input/native/"
 echo "                            ${WORK_DIR%/}/source_to_path.json"
 echo "  (if smore was run)        $SMORE_OUT_ROOT   # already on shared FS"
+echo ""
+echo "Real paired-data (Turella sim3) line — prepare these by hand if you"
+echo "intend to run run_pipeline.sh cnisp-prep-realpair cnisp-infer-realpair:"
+echo "  - low-res scans staged for nnUNet (so a lowres pred mask exists)"
+echo "  - high-res GT NIfTI per subject"
+echo "  - a realpair manifest JSON: configs.yaml::realpair_manifest"
+echo "    (default ${WORK_DIR%/}/realpair_manifest.json)"
+echo "    mapping source_id -> { lowres_pred, hires_gt }"
+echo "  These align (registration-free) into ${ALIGNED_DIR}/{labels_realpair_input,"
+echo "  labels_realpair_gt,metadata_realpair_gt}/ during the pipeline phase."
 echo "============================================================"

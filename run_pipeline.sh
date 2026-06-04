@@ -48,6 +48,16 @@
 #                         + prediction/sweep_manifest.json.
 #                         Requires: nnunet-predict (step_01 baseline)
 #                                   + cnisp-infer (sweep set).
+#                         Degradation type is config-driven:
+#                           configs.yaml::sweep_degrade_mode  thin (default,
+#                             idealised point-sampling) | thick (physical
+#                             partial-volume profile convolution)
+#                           configs.yaml::sweep_modality      ct (default,
+#                             box SSP) | mri (Gaussian SSP)
+#                         These are forwarded to sparsify_inputs.py --mode/
+#                         --modality. thin reproduces the legacy sweep
+#                         exactly; thick runs the physical-degradation
+#                         experiment (see simulation/).
 #                         (nnunet/data_prep/sparsify_inputs.py
 #                          + nnunet/engine/predict_sparse_iso.py)
 #
@@ -104,6 +114,45 @@
 #                         Requires: cnisp-prep-dataset835-gt + sparse.
 #                         (orbital_shape_prior_st1/scripts/run_03_test.sh
 #                          with TEST_LABEL_SOURCE=nnunet_pred, RUN_TAG=nnunet_pred)
+#
+#   cnisp-prep-realpair   (OPT-IN, not in the default phase list) Build the
+#                         REAL paired-data patches for the Turella sim3 line.
+#                         Real paired data = two SEPARATE acquisitions of the
+#                         same subject: a low-resolution scan and a separate
+#                         high-resolution GT scan. For each entry in the
+#                         realpair manifest (configs.yaml::realpair_manifest,
+#                         default ${work_dir}/realpair_manifest.json) this
+#                         canonical-aligns BOTH scans independently
+#                         (registration-free) into:
+#                           ${aligned_dir}/labels_realpair_input/  (nnUNet pred
+#                              on the REAL low-res scan -> CNISP latent input)
+#                           ${aligned_dir}/labels_realpair_gt/      (hi-res GT
+#                              Dice target)
+#                           ${aligned_dir}/metadata_realpair_gt/    (native
+#                              unmap sidecars)
+#                         Patch size is auto-pinned to the training-time
+#                         ``patch_size_mm`` like the dataset835 phases.
+#                         Skipped (with instructions) when the manifest is
+#                         absent. Requires: a manifest mapping source_id ->
+#                         {lowres_pred, hires_gt}; lowres_pred is typically
+#                         ${work_dir}/prediction/native/<sid>.nii.gz once the
+#                         real low-res scan has been staged + predicted.
+#                         (nnunet/engine/build_realpair_patches.py)
+#
+#   cnisp-infer-realpair  (OPT-IN, not in the default phase list) CNISP eval
+#                         for the REAL paired-data line (run_tag=real_pair).
+#                         One observation per case (no resolution sweep): the
+#                         latent is fit on the aligned low-res input, decoded
+#                         at GT resolution, then the reconstructed mask is
+#                         RIGIDLY registered to the hi-res GT mask (post-hoc,
+#                         dependency-free NumPy ICP) before Dice -- the two
+#                         scans live in different frames, so registration
+#                         absorbs the subject's repositioning (Turella et al.).
+#                         Writes output_basedir/<model>/runs/real_pair/.
+#                         Registration backend: test yaml::realpair_reg_kind
+#                         (rigid | none). Requires: cnisp-prep-realpair.
+#                         (orbital_shape_prior_st1/scripts/run_03_test.sh
+#                          with TEST_LABEL_SOURCE=real_pair, RUN_TAG=real_pair)
 #
 #   cnisp-native-remap    Per CNISP run, re-apply the canonical -> native CT
 #                         frame mapping to every (case, step) row in
@@ -204,6 +253,9 @@
 #     -> cnisp-viz
 #     -> compare
 #
+#   OPT-IN (not run unless named explicitly; need a realpair manifest):
+#     cnisp-prep-realpair  -> cnisp-infer-realpair    (real_pair run)
+#
 # Idempotency / skip-if-done:
 #   Each expensive phase auto-detects when its outputs are already complete
 #   and short-circuits with a "[skip]" line. The checks are pure file-
@@ -222,6 +274,11 @@
 #                                       allowed to be partial -- see phase doc)
 #     cnisp-infer-nnunet-pred           runs/nnunet_pred/sweep_results.pkl
 #                                       + runs/nnunet_pred/native_sweep_manifest.json
+#     cnisp-prep-realpair               labels_realpair_gt/ covers every
+#                                       manifest source (OD + OS); absent
+#                                       manifest -> skip with instructions
+#     cnisp-infer-realpair              runs/real_pair/sweep_results.pkl
+#                                       + runs/real_pair/native_sweep_manifest.json
 #     cnisp-native-remap                per-step manifest checked inside
 #                                       build_cnisp_native_sweep.py; skips
 #                                       any step whose
@@ -232,8 +289,9 @@
 #   Pass --force to ignore every check, or --force-train for just training.
 #
 # Usage:
-#   bash run_pipeline.sh                                   # all phases
+#   bash run_pipeline.sh                                   # all default phases
 #   bash run_pipeline.sh cnisp-infer cnisp-viz             # subset
+#   bash run_pipeline.sh cnisp-prep-realpair cnisp-infer-realpair  # real-pair line (opt-in)
 #   bash run_pipeline.sh --force                           # ignore every skip-if-done check
 #   bash run_pipeline.sh --force-train                     # retrain even if checkpoint exists
 #   bash run_pipeline.sh --test-config <path>              # override CNISP test yaml
@@ -314,6 +372,8 @@ VALID_PHASES=(
     cnisp-prep-dataset835-gt
     cnisp-prep-dataset835-sparse
     cnisp-infer-nnunet-pred
+    cnisp-prep-realpair
+    cnisp-infer-realpair
     cnisp-native-remap
     cnisp-viz
     compare
@@ -393,6 +453,27 @@ META835_DIRNAME="${META835_DIRNAME:-metadata_dataset835}"
 SPARSE835_PREFIX="$(read_yaml_field "$CNISP_PATHS_YAML" "labels_dataset835_step_prefix")"
 SPARSE835_PREFIX="${SPARSE835_PREFIX:-labels_dataset835_step_}"
 
+# real_pair (Turella sim3) staging dirnames + manifest. Defaults match
+# orbital_shape_prior_st1/configs/paths.yaml + engine/test_label_sources.py.
+LABELS_RP_INPUT_DIRNAME="$(read_yaml_field "$CNISP_PATHS_YAML" "labels_realpair_input_dirname")"
+LABELS_RP_INPUT_DIRNAME="${LABELS_RP_INPUT_DIRNAME:-labels_realpair_input}"
+LABELS_RP_GT_DIRNAME="$(read_yaml_field "$CNISP_PATHS_YAML" "labels_realpair_gt_dirname")"
+LABELS_RP_GT_DIRNAME="${LABELS_RP_GT_DIRNAME:-labels_realpair_gt}"
+META_RP_GT_DIRNAME="$(read_yaml_field "$CNISP_PATHS_YAML" "metadata_realpair_gt_dirname")"
+META_RP_GT_DIRNAME="${META_RP_GT_DIRNAME:-metadata_realpair_gt}"
+# Manifest path: configs.yaml::realpair_manifest, else ${work_dir}/realpair_manifest.json.
+REALPAIR_MANIFEST="$(read_yaml_field "$CONFIG" "realpair_manifest")"
+REALPAIR_MANIFEST="${REALPAIR_MANIFEST:-${WORK_DIR%/}/realpair_manifest.json}"
+
+# Physical-degradation knobs for the nnUNet sparse sweep. Default thin/ct
+# reproduces the legacy idealised point-sampling sweep exactly. Set
+# sweep_degrade_mode: thick (+ sweep_modality: ct|mri) in configs.yaml to
+# run the partial-volume (profile-convolution) degradation experiment.
+SWEEP_DEGRADE_MODE="$(read_yaml_field "$CONFIG" "sweep_degrade_mode")"
+SWEEP_DEGRADE_MODE="${SWEEP_DEGRADE_MODE:-thin}"
+SWEEP_MODALITY="$(read_yaml_field "$CONFIG" "sweep_modality")"
+SWEEP_MODALITY="${SWEEP_MODALITY:-ct}"
+
 # Resolve the patch_size_mm that the model was trained on so we can
 # echo it in the run banner and so the two `cnisp-prep-dataset835-*`
 # phases inherit the *same* physical extent as the original CNISP
@@ -459,6 +540,14 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
 done
 [[ -n "$TEST_CONFIG"   ]] && echo "  cnisp test yaml:     $TEST_CONFIG"
 [[ -n "$GPU_OVERRIDE"  ]] && echo "  CUDA_VISIBLE_DEVICES=$GPU_OVERRIDE"
+echo "  sweep degradation:   mode=$SWEEP_DEGRADE_MODE modality=$SWEEP_MODALITY"
+# Surface the real_pair config only when those phases are requested.
+for _p in "${PHASES[@]}"; do
+    if [[ "$_p" == cnisp-prep-realpair || "$_p" == cnisp-infer-realpair ]]; then
+        echo "  realpair manifest:   $REALPAIR_MANIFEST"
+        break
+    fi
+done
 echo "  phases:              ${PHASES[*]}"
 echo "============================================================"
 
@@ -468,6 +557,27 @@ _count_sources_json() {
     [[ -f "${WORK_DIR}/source_to_path.json" ]] || { echo ""; return; }
     python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' \
             "${WORK_DIR}/source_to_path.json"
+}
+
+_count_manifest_entries() {
+    # Echo the number of source entries in the realpair manifest ($1), or
+    # "" when the file is missing / unparseable.
+    [[ -f "$1" ]] || { echo ""; return; }
+    python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' \
+            "$1" 2>/dev/null || echo ""
+}
+
+_realpair_gt_complete() {
+    # Returns 0 (done) when the realpair GT label dir ($1) has at least one
+    # .nii.gz per manifest source ($2). Real pairs are defined by the
+    # manifest, not source_to_path.json, so we count manifest entries.
+    local d="$1" manifest="$2"
+    [[ -d "$d" ]] || return 1
+    local n_src; n_src="$(_count_manifest_entries "$manifest")"
+    [[ -n "$n_src" && "$n_src" -gt 0 ]] || return 1
+    local n_files
+    n_files=$(find "$d" -maxdepth 1 -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')
+    [[ "$n_files" -ge "$n_src" ]]
 }
 
 _predict_dir_complete() {
@@ -533,7 +643,9 @@ phase_nnunet_predict_sweep() {
         echo "  -> skipping (pass --force or delete the manifest to rebuild)."
         return 0
     fi
-    python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG"
+    echo "  degradation: mode=$SWEEP_DEGRADE_MODE modality=$SWEEP_MODALITY"
+    python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG" \
+            --mode "$SWEEP_DEGRADE_MODE" --modality "$SWEEP_MODALITY"
     # Single custom-predictor pass writes the sparse-grid mask
     # (sparse_step_XX/), the genuine iso-0.5 plan-spacing prediction
     # (sparse_step_XX_upsampled/), and that iso prediction resampled onto
@@ -663,6 +775,49 @@ phase_cnisp_infer_nnunet_pred() {
     echo "[phase] cnisp-infer-nnunet-pred (run_tag=nnunet_pred) -"
     _skip_cnisp_infer_if_done "nnunet_pred" && return 0
     _run_cnisp_infer_for "nnunet_pred" "nnunet_pred"
+}
+
+phase_cnisp_prep_realpair() {
+    echo ""
+    echo "[phase] cnisp-prep-realpair ---------------------------"
+    if [[ ! -f "$REALPAIR_MANIFEST" ]]; then
+        echo "  realpair manifest not found:"
+        echo "    $REALPAIR_MANIFEST"
+        echo "  -> skipping (this line is opt-in). To enable it, create a JSON"
+        echo "     mapping each source_id to its two scans, e.g.:"
+        echo '       { "subjX": { "lowres_pred": "/abs/lowres_nnunet_pred.nii.gz",'
+        echo '                    "hires_gt":    "/abs/hires_gt.nii.gz" } }'
+        echo "     then set configs.yaml::realpair_manifest (or place it at the"
+        echo "     path above) and re-run this phase."
+        return 0
+    fi
+    local gt_dir="$CNISP_ALIGNED_DIR/$LABELS_RP_GT_DIRNAME"
+    if [[ $FORCE -eq 0 ]] && _realpair_gt_complete "$gt_dir" "$REALPAIR_MANIFEST"; then
+        echo "  $gt_dir already covers every manifest source"
+        echo "  -> skipping (pass --force to rebuild)."
+        return 0
+    fi
+    _require_training_patch_size "cnisp-prep-realpair"
+    local force_args=()
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
+    python3 "$REPO_ROOT/nnunet/engine/build_realpair_patches.py" \
+            --config "$CONFIG" \
+            --manifest "$REALPAIR_MANIFEST" \
+            --patch-size "$CNISP_PATCH_SIZE_MM" \
+            "${force_args[@]}"
+}
+
+phase_cnisp_infer_realpair() {
+    echo ""
+    echo "[phase] cnisp-infer-realpair (run_tag=real_pair) ------"
+    local gt_dir="$CNISP_ALIGNED_DIR/$LABELS_RP_GT_DIRNAME"
+    if [[ ! -d "$gt_dir" || -z "$(ls -A "$gt_dir" 2>/dev/null || true)" ]]; then
+        echo "  $gt_dir is empty/missing."
+        echo "  -> run 'cnisp-prep-realpair' first. Skipping."
+        return 0
+    fi
+    _skip_cnisp_infer_if_done "real_pair" && return 0
+    _run_cnisp_infer_for "real_pair" "real_pair"
 }
 
 phase_cnisp_native_remap() {
@@ -842,6 +997,8 @@ for phase in "${PHASES[@]}"; do
         cnisp-prep-dataset835-gt)      phase_cnisp_prep_dataset835_gt ;;
         cnisp-prep-dataset835-sparse)  phase_cnisp_prep_dataset835_sparse ;;
         cnisp-infer-nnunet-pred)       phase_cnisp_infer_nnunet_pred ;;
+        cnisp-prep-realpair)           phase_cnisp_prep_realpair ;;
+        cnisp-infer-realpair)          phase_cnisp_infer_realpair ;;
         cnisp-native-remap)            phase_cnisp_native_remap ;;
         cnisp-viz)                     phase_cnisp_viz ;;
         compare)                       phase_compare ;;
@@ -885,4 +1042,12 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
 done
 echo "  nnUNet-sparse standalone bundle (run-tag-agnostic; rendered once):"
 echo "    $WORK_DIR/comparison/viz/nnUNet-sparse/nnUNet-sparse_recon_summary.png"
+# real_pair line is opt-in; only point at it when its run dir exists.
+_rp_run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/real_pair"
+if [[ -d "$_rp_run_dir" ]]; then
+    echo "  Real paired-data line (Turella sim3; post-hoc rigid registration):"
+    echo "    $_rp_run_dir/test_results.csv     (per-case Dice vs hi-res GT)"
+    echo "    $_rp_run_dir/sweep_results.pkl"
+    echo "    $_rp_run_dir/native_space_step_01/  (registered pred in GT native frame)"
+fi
 echo "============================================================"

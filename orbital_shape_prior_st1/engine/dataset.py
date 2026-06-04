@@ -41,6 +41,9 @@ The MLP's ``image_size`` buffer is therefore fixed at 64 mm and
                      --place_at(crop_slices_in_full)-->  full-head volume
 """
 
+import hashlib
+import json
+import sys
 import time
 from enum import IntEnum
 from pathlib import Path
@@ -51,12 +54,48 @@ import numpy as np
 import torch
 from torch.utils import data
 
+# Ensure repo root is on sys.path so `simulation/` is importable.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from data_prep.canonical_align import extract_single_eye_lcc
 from data_prep.sparsify import resolve_slice_step_axes, sparsen_volume
+from simulation.degradation import degrade_thin, degrade_thick
+from simulation.slice_profile import get_kernel
 
 SPRSF_SEED = 1
 SPLIT_SEED = 2
 SPRSF_VAL_SEED = 3
+BANK_SEED = 42
+
+
+def adaptive_steps_for_bank(
+    spacing_axis: float,
+    target_eff_res_increment_mm: float = 2.0,
+    max_eff_resolution_mm: float = 12.0,
+) -> List[int]:
+    """Compute per-case step list for the degradation bank (training).
+
+    Uses ~half the density of the test sweep (increment 2.0mm vs 1.0mm)
+    to keep training tractable while covering the same eff-res range.
+    """
+    if spacing_axis <= 0:
+        return [1]
+    delta_step = max(1, int(round(target_eff_res_increment_mm / float(spacing_axis))))
+    steps: List[int] = [1]
+    for k in range(1, 20):
+        s = 1 + k * delta_step
+        if s * spacing_axis > max_eff_resolution_mm:
+            break
+        steps.append(s)
+    return steps
+
+
+def _bank_cache_hash(bank_config: Dict) -> str:
+    """Deterministic hash of the bank config for cache validation."""
+    cfg_str = json.dumps(bank_config, sort_keys=True)
+    return hashlib.md5(cfg_str.encode()).hexdigest()[:12]
 
 # Physical side length of the inner crop the MLP actually sees. Disk patches
 # from canonical_align are 80 mm; this 64 mm sub-patch is centred on the
@@ -299,36 +338,31 @@ class OrbitalImplicitDataset(data.Dataset):
 
     def __init__(self, labels_dir, casenames,
                  num_points_per_dim,
-                 slice_step_size, slice_step_axis, use_thick_slices,
+                 slice_step_size=None, slice_step_axis="auto",
+                 use_thick_slices=False,
                  num_sparsify_offsets=1,
                  val_fraction=0.15,
                  phase_type=PhaseType.TRAIN,
-                 verbose=True):
+                 verbose=True,
+                 degradation_bank=None,
+                 items_per_epoch=None,
+                 point_sample_fraction=None):
         super().__init__()
         if verbose:
             print(f"Loading {len(casenames)} orbital patches "
                   f"(offsets={num_sparsify_offsets}, phase={phase_type.name})...")
         t0 = time.time()
 
-        if slice_step_size < 2:
-            raise ValueError("slice_step_size must be >= 2")
-
-        self.slice_step_size = slice_step_size
-        # Keep the raw config (int or "auto") for diagnostics + downstream
-        # plumbing that wants to know the sweep MODE rather than per-case axes.
-        self.slice_step_axis = slice_step_axis
-        self.num_sparsify_offsets = num_sparsify_offsets
         self.phase_type = phase_type
+        self.items_per_epoch = items_per_epoch
+        self.point_sample_fraction = point_sample_fraction
+        self._epoch_item_indices = None  # set per epoch if items_per_epoch
 
         # ── Load dense volumes (kept for diagnostics + INF) ───────
         labels_dense, spacings_dense = load_orbital_volumes(labels_dir, casenames)
         offsets_dense = [s / 2.0 for s in spacings_dense]
 
         # Per-case axes: int -> uniform list; "auto" -> argmax(patch_spacing).
-        # After canonical alignment the patch is in RAS with diagonal affine,
-        # so axis k IS RAS world axis k. "auto" therefore picks each scan's
-        # natural through-plane direction (S-I for axial, L-R for sagittal,
-        # A-P for coronal), mirroring its original acquisition geometry.
         self.slice_step_axes: List[int] = resolve_slice_step_axes(
             slice_step_axis, spacings_dense
         )
@@ -339,23 +373,39 @@ class OrbitalImplicitDataset(data.Dataset):
             [INNER_PATCH_SIZE_MM] * 3, dtype=torch.float32,
         )
 
-        # ── Strategy A: Amiranashvili val split ───────────────────
-        # Applied only when num_sparsify_offsets == 1 (Strategy A) and
-        # phase is TRAIN or VAL.  Strategy B skips this entirely.
-        use_legacy_split = (num_sparsify_offsets == 1 and phase_type != PhaseType.INF)
-
-        if use_legacy_split:
-            self._init_strategy_a(
+        # ── Strategy dispatch ─────────────────────────────────────
+        if degradation_bank is not None:
+            # Strategy C: mixed thin/thick degradation bank
+            self.slice_step_size = None
+            self.slice_step_axis = slice_step_axis
+            self.num_sparsify_offsets = None
+            self._init_degradation_bank(
                 labels_dense, spacings_dense, offsets_dense, casenames,
-                slice_step_size, self.slice_step_axes, use_thick_slices,
-                val_fraction, phase_type,
+                self.slice_step_axes, degradation_bank, phase_type,
             )
         else:
-            self._init_multi_offset(
-                labels_dense, spacings_dense, offsets_dense, casenames,
-                slice_step_size, self.slice_step_axes, use_thick_slices,
-                num_sparsify_offsets, phase_type,
+            # Legacy strategies A/B
+            if slice_step_size is None or slice_step_size < 2:
+                raise ValueError("slice_step_size must be >= 2 for legacy mode")
+            self.slice_step_size = slice_step_size
+            self.slice_step_axis = slice_step_axis
+            self.num_sparsify_offsets = num_sparsify_offsets
+
+            use_legacy_split = (
+                num_sparsify_offsets == 1 and phase_type != PhaseType.INF
             )
+            if use_legacy_split:
+                self._init_strategy_a(
+                    labels_dense, spacings_dense, offsets_dense, casenames,
+                    slice_step_size, self.slice_step_axes, use_thick_slices,
+                    val_fraction, phase_type,
+                )
+            else:
+                self._init_multi_offset(
+                    labels_dense, spacings_dense, offsets_dense, casenames,
+                    slice_step_size, self.slice_step_axes, use_thick_slices,
+                    num_sparsify_offsets, phase_type,
+                )
 
         # ── Inner crop: from 80 mm disk patch to 64 mm sub-patch around
         # the visible-LCC centroid. Applies to every item AFTER all sparsi-
@@ -499,6 +549,132 @@ class OrbitalImplicitDataset(data.Dataset):
         # so labels_sparse holds the 64 mm sub-patch -- the mm frame the
         # downstream model expects.
 
+    # ── Strategy C init (degradation bank — mixed thin/thick) ─────
+
+    def _init_degradation_bank(
+        self, labels_dense, spacings_dense, offsets_dense,
+        casenames, step_axes, bank_config, phase_type,
+    ):
+        """Static degradation bank: each (scan, mode, step, offset) = one item.
+
+        Items are materialized once at init. Thick labels are computed and
+        cached to disk (expensive one-hot conv); thin items use cheap
+        index_select. The bank is deterministic given the config, so
+        resume rebuilds the same item list → latent indices are stable.
+        """
+        self.labels_sparse = []
+        self.spacings_sparse = []
+        self.offsets_sparse = []
+        self.casenames = []
+        self.caseids = []
+        self.scan_ids = []
+        self.sparsify_offsets_used = []
+        self.bank_modes = []  # "dense" | "thin" | "thick" per item
+
+        self.labels_dense = labels_dense
+        self.spacings_dense = spacings_dense
+        self.offsets_dense = offsets_dense
+
+        modality = bank_config.get("modality", "ct")
+        modes = bank_config.get("modes", ["thin", "thick"])
+        target_inc = bank_config.get("target_eff_res_increment_mm", 2.0)
+        max_eff = bank_config.get("max_eff_resolution_mm", 12.0)
+        offsets_per = bank_config.get("offsets_per_setting", 1)
+        num_classes = bank_config.get("num_classes", 5)
+        cache_dir = bank_config.get("cache_dir")
+
+        # Auto cache dir: default to {labels_dir}/../degraded_bank/
+        if cache_dir is None and "thick" in modes:
+            cache_dir = str(
+                Path(bank_config.get("_labels_dir", ".")).parent / "degraded_bank"
+            )
+        if cache_dir is not None:
+            cache_dir = Path(cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+        latent_idx = 0
+
+        for scan_idx in range(len(casenames)):
+            v = labels_dense[scan_idx]
+            s = spacings_dense[scan_idx]
+            o = offsets_dense[scan_idx]
+            ax = step_axes[scan_idx]
+            spacing_ax = float(s[ax])
+
+            steps = adaptive_steps_for_bank(spacing_ax, target_inc, max_eff)
+
+            for step in steps:
+                if step == 1:
+                    # Dense item (no degradation)
+                    self.labels_sparse.append(v)
+                    self.spacings_sparse.append(s.clone())
+                    self.offsets_sparse.append(o.clone())
+                    self.casenames.append(f"{casenames[scan_idx]}_dense")
+                    self.caseids.append(latent_idx)
+                    self.scan_ids.append(scan_idx)
+                    self.sparsify_offsets_used.append(0)
+                    self.bank_modes.append("dense")
+                    latent_idx += 1
+                    continue
+
+                for mode in modes:
+                    for off in range(offsets_per):
+                        if mode == "thin":
+                            sv, ss, so = degrade_thin(
+                                v, s, o, ax, step, start=off
+                            )
+                        elif mode == "thick":
+                            sv, ss, so = self._get_thick_cached(
+                                v, s, o, ax, step, off,
+                                modality, num_classes, cache_dir,
+                                casenames[scan_idx],
+                            )
+                        else:
+                            raise ValueError(f"Unknown mode: {mode}")
+
+                        suffix = f"_{mode}_s{step}"
+                        if offsets_per > 1:
+                            suffix += f"_o{off}"
+                        self.labels_sparse.append(sv)
+                        self.spacings_sparse.append(ss)
+                        self.offsets_sparse.append(so)
+                        self.casenames.append(
+                            f"{casenames[scan_idx]}{suffix}"
+                        )
+                        self.caseids.append(latent_idx)
+                        self.scan_ids.append(scan_idx)
+                        self.sparsify_offsets_used.append(off)
+                        self.bank_modes.append(mode)
+                        latent_idx += 1
+
+    @staticmethod
+    def _get_thick_cached(
+        volume, spacing, offset, axis, step, start,
+        modality, num_classes, cache_dir, casename,
+    ):
+        """Load thick-degraded label from cache, or compute + save."""
+        kernel = get_kernel(modality, step)
+        fname = f"{casename}_thick_s{step}_o{start}.pt"
+
+        if cache_dir is not None:
+            cache_path = cache_dir / fname
+            if cache_path.exists():
+                cached = torch.load(cache_path, weights_only=True)
+                from simulation.affine_ops import compute_sparse_affine
+                ss, so = compute_sparse_affine(spacing, offset, axis, step, start)
+                return cached, ss, so
+
+        sv, ss, so = degrade_thick(
+            volume, spacing, offset, axis, step, start=start,
+            kernel=kernel, is_label=True, num_classes=num_classes,
+        )
+
+        if cache_dir is not None:
+            cache_path = cache_dir / fname
+            torch.save(sv, cache_path)
+
+        return sv, ss, so
+
     # ── Helpers ───────────────────────────────────────────────────
 
     def _cache_observed_centroids(self):
@@ -613,13 +789,27 @@ class OrbitalImplicitDataset(data.Dataset):
     def __len__(self):
         return len(self.labels_sparse)
 
+    def set_epoch_subset(self, epoch: int):
+        """Legacy hook (no-op). Epoch subsetting is now handled by
+        EpochSubsetSampler in create_data_loader."""
+        pass
+
     def __getitem__(self, item):
         label = self.labels_sparse[item]
 
         if self.num_points > 0:
-            voxel_ids = torch.empty(self.num_points, 3, dtype=torch.int64)
+            # Point count is FIXED across items to allow batch collation.
+            # point_sample_fraction scales the base num_points (from config's
+            # num_points_per_dim^3), NOT the per-item voxel count — this
+            # ensures all items in a batch produce the same tensor shape.
+            if self.point_sample_fraction is not None:
+                num_pts = max(1, int(self.num_points * self.point_sample_fraction))
+            else:
+                num_pts = self.num_points
+
+            voxel_ids = torch.empty(num_pts, 3, dtype=torch.int64)
             for d in range(3):
-                voxel_ids[:, d] = torch.randint(0, label.shape[d], [self.num_points])
+                voxel_ids[:, d] = torch.randint(0, label.shape[d], [num_pts])
             label_values = label[voxel_ids[:, 0], voxel_ids[:, 1], voxel_ids[:, 2]]
             voxel_ids = voxel_ids.unsqueeze(1).unsqueeze(1)
             label_values = label_values.unsqueeze(1).unsqueeze(1)
@@ -664,6 +854,34 @@ class OrbitalImplicitDataset(data.Dataset):
         return result
 
 
+# ── Epoch subset sampler (Strategy C) ─────────────────────────────
+
+class EpochSubsetSampler(data.Sampler):
+    """Yields a random subset of indices each epoch (for degradation bank).
+
+    Call `set_epoch(epoch)` before each epoch to regenerate the subset.
+    The full dataset `__len__` stays constant (for latent table sizing).
+    """
+
+    def __init__(self, dataset_size: int, items_per_epoch: int):
+        self.dataset_size = dataset_size
+        self.items_per_epoch = min(items_per_epoch, dataset_size)
+        self._indices: List[int] = list(range(self.items_per_epoch))
+
+    def set_epoch(self, epoch: int):
+        gen = torch.Generator().manual_seed(BANK_SEED + epoch)
+        perm = torch.randperm(self.dataset_size, generator=gen)
+        self._indices = perm[:self.items_per_epoch].tolist()
+
+    def __iter__(self):
+        # Shuffle within the epoch subset for batch diversity
+        order = torch.randperm(len(self._indices)).tolist()
+        return iter([self._indices[i] for i in order])
+
+    def __len__(self):
+        return self.items_per_epoch
+
+
 # ── DataLoader factory ────────────────────────────────────────────
 
 def create_data_loader(params, phase_type, verbose=True):
@@ -688,24 +906,52 @@ def create_data_loader(params, phase_type, verbose=True):
         num_offsets_ds = num_offsets if is_training else 1
 
     # ── Create dataset ────────────────────────────────────────────
+    bank_cfg = params.get("degradation_bank")
+    if bank_cfg is not None:
+        # Inject labels_dir path for auto cache_dir resolution
+        bank_cfg = dict(bank_cfg)  # copy to avoid mutating params
+        bank_cfg.setdefault("_labels_dir", str(labels_dir))
+
+    # For INF/VAL under Strategy C, the dataset still needs a
+    # slice_step_size for the legacy _init_multi_offset path (which
+    # creates a single-step sparsified view for latent initialization).
+    # The actual multi-resolution sweep is handled by resolution_sweep.py
+    # which sparsifies on-the-fly, so this value only matters as a
+    # baseline starting step for the single-item INF dataset.
+    step_size = params.get("slice_step_size")
+    if step_size is None and bank_cfg is not None and not is_training:
+        step_size = 2  # minimum valid step for INF dataset baseline
+
     ds = OrbitalImplicitDataset(
         labels_dir=labels_dir,
         casenames=casenames,
         num_points_per_dim=(
             params.get("num_points_per_example_per_dim_train", 64) if is_training else -1
         ),
-        slice_step_size=params["slice_step_size"],
-        slice_step_axis=params["slice_step_axis"],
+        slice_step_size=step_size,
+        slice_step_axis=params.get("slice_step_axis", "auto"),
         use_thick_slices=params.get("use_thick_slices", False),
         num_sparsify_offsets=num_offsets_ds,
         val_fraction=params.get("val_fraction", 0.15),
         phase_type=phase_type,
         verbose=verbose,
+        degradation_bank=bank_cfg if is_training else None,
+        items_per_epoch=params.get("items_per_epoch") if is_training else None,
+        point_sample_fraction=params.get("point_sample_fraction") if is_training else None,
     )
+
+    # ── Sampler / shuffle ─────────────────────────────────────────
+    sampler = None
+    shuffle = is_training
+    items_per_epoch = params.get("items_per_epoch")
+    if is_training and bank_cfg is not None and items_per_epoch is not None:
+        sampler = EpochSubsetSampler(len(ds), items_per_epoch)
+        shuffle = False  # sampler handles ordering
 
     batch_size = params["batch_size_train"] if is_training else params.get("batch_size_val", 1)
     return data.DataLoader(
-        ds, batch_size, shuffle=is_training,
+        ds, batch_size, shuffle=shuffle,
+        sampler=sampler,
         num_workers=params.get("num_workers", 2),
         drop_last=is_training,
     )

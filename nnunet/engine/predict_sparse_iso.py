@@ -95,9 +95,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
+from simulation.affine_ops import assert_start_zero as _assert_start_zero  # noqa: E402
 import torch  # noqa: F401
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-from nnunetv2.inference.export_prediction import convert_predicted_logits_to_segmentation_with_correct_shape
+from nnunetv2.inference.export_prediction import (
+    convert_predicted_logits_to_segmentation_with_correct_shape as _convert,
+)
 
 
 def _resolve_model_folder(cfg: Dict) -> Path:
@@ -263,7 +266,12 @@ def _native_properties(
     take the sparse crop bookkeeping and scale that one axis by ``step``.
     All shape/bbox fields are in nnUNet's internal (transposed) order;
     ``spacing`` is in file order (nnUNet transposes it forward itself).
+
+    INVARIANT: This remap is exact only when the sparse input was produced
+    with start=0 (first slice index = 0). All CNISP deployment paths
+    enforce this via simulation.affine_ops.assert_start_zero.
     """
+    assert isinstance(step, int) and step >= 1, f"step must be int>=1, got {step}"
     tf = list(transpose_forward)
     internal_step_axis = tf.index(int(step_axis_orig))
 
@@ -451,6 +459,16 @@ def main() -> int:
                 _save_uint8(iso_arr, iso_aff, dst_iso)
 
                 # 3) native-grid mask via nnUNet's own resampler.
+                # Position-exactness invariant: sparse inputs are produced
+                # with start=0, so sparse voxel i maps to native voxel i*step.
+                # This makes the bbox scaling below exact. Enforce both the
+                # mode and start=0 invariants from the manifest.
+                assert info.get("mode", "thin") in ("thin", "thick"), (
+                    f"step_{step_tag} {sid}: unexpected mode={info.get('mode')}"
+                )
+                # Legacy manifests pre-date the "start" field; default to 0
+                # (which was the only value ever produced).
+                _assert_start_zero(int(info.get("start", 0)))
                 native_props = _native_properties(
                     props, native_shape, native_zooms,
                     step, step_axis, transpose_forward,

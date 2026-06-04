@@ -34,6 +34,20 @@ Two test_label_source modes
         chk_*  cases : ``aligned_dir/metadata_dataset835/<casename>.json``
                        (sidecar JSON produced alongside the dense
                        canonical-aligned target above)
+
+* ``real_pair`` (Turella sim3 — REAL paired acquisitions)
+    The low-res input and the hi-res GT are SEPARATE real acquisitions in
+    different physical frames. No ``simulation/`` degradation is applied
+    (the scanner already produced the anisotropy). Each is canonical-aligned
+    independently (registration-free); at eval time the CNISP-reconstructed
+    mask is rigidly registered to the GT mask (post-hoc) to absorb the
+    subject's inter-acquisition repositioning, following Turella et al.
+    - Dense Dice target  : ``aligned_dir/labels_realpair_gt/<casename>.nii.gz``
+                           (hi-res GT: manual annotation or nnUNet-on-hires)
+    - Latent-opt input   : ``aligned_dir/labels_realpair_input/<casename>.nii.gz``
+                           (nnUNet pred on the REAL low-res scan, aligned)
+    - Native inversion   : ``aligned_dir/metadata_realpair_gt/<casename>.json``
+    - Single observation per case (no resolution sweep).
 """
 
 from __future__ import annotations
@@ -47,7 +61,7 @@ import numpy as np
 import torch
 
 
-VALID_LABEL_SOURCES = ("atlas_gt", "nnunet_pred")
+VALID_LABEL_SOURCES = ("atlas_gt", "nnunet_pred", "real_pair")
 
 
 @dataclass
@@ -72,6 +86,13 @@ class RunLayout:
     metadata_dataset835_dir: Path   # nnunet_pred: chk_* native-mapping metadata
     labels_dataset835_step_prefix: Path  # template; per-step dir = prefix + "XX"
 
+    # real_pair (Turella sim3): real low-res input + separate hi-res GT.
+    # Both are canonical-aligned (registration-free); the predicted mask is
+    # rigidly registered to the GT mask at eval time (post-hoc).
+    labels_realpair_input_dir: Path   # nnUNet pred on REAL low-res, aligned
+    labels_realpair_gt_dir: Path      # hi-res GT (manual or nnUNet-hires), aligned
+    metadata_realpair_gt_dir: Path    # native-mapping metadata for the GT frame
+
     # Outputs (written under output_basedir/<model_name>/runs/<run_tag>/)
     output_dir: Path
 
@@ -93,6 +114,15 @@ def _resolve_aligned_subdirs(params: dict, aligned_dir: Path) -> dict:
         ),
         "labels_dataset835_step_prefix": params.get(
             "labels_dataset835_step_prefix", "labels_dataset835_step_"
+        ),
+        "labels_realpair_input_dirname": params.get(
+            "labels_realpair_input_dirname", "labels_realpair_input"
+        ),
+        "labels_realpair_gt_dirname": params.get(
+            "labels_realpair_gt_dirname", "labels_realpair_gt"
+        ),
+        "metadata_realpair_gt_dirname": params.get(
+            "metadata_realpair_gt_dirname", "metadata_realpair_gt"
         ),
     }
 
@@ -140,6 +170,9 @@ def build_run_layout(params: dict) -> RunLayout:
         labels_dataset835_step_prefix=(
             aligned_dir / sub["labels_dataset835_step_prefix"]
         ),
+        labels_realpair_input_dir=aligned_dir / sub["labels_realpair_input_dirname"],
+        labels_realpair_gt_dir=aligned_dir / sub["labels_realpair_gt_dirname"],
+        metadata_realpair_gt_dir=aligned_dir / sub["metadata_realpair_gt_dirname"],
         output_dir=output_dir,
     )
 
@@ -147,8 +180,12 @@ def build_run_layout(params: dict) -> RunLayout:
 def step_input_patch_path(layout: RunLayout, casename: str, step: int) -> Path:
     """Where to read the latent-opt input patch for a given (case, step).
 
-    Only meaningful when ``layout.test_label_source == "nnunet_pred"``.
+    ``nnunet_pred`` : per-step Dataset835 sparse-CT patch.
+    ``real_pair``   : single real low-res nnUNet-pred patch (step is
+                      informational; the real anisotropy is fixed per case).
     """
+    if layout.test_label_source == "real_pair":
+        return layout.labels_realpair_input_dir / f"{casename}.nii.gz"
     step_dir = Path(
         f"{layout.labels_dataset835_step_prefix.as_posix()}{step:02d}"
     )
@@ -161,10 +198,16 @@ def dense_target_paths(
 ) -> Tuple[Path, Path]:
     """Where to read the dense Dice target and its native-mapping metadata.
 
-    Returns (label_path, metadata_path). For atlas cases both are the
-    existing ceiling-curve files; for chk_* under ``nnunet_pred`` mode
-    both come from the Dataset835 sidecar tree.
+    Returns (label_path, metadata_path).
+    * atlas_gt / atlas cases  : ceiling-curve files (manual GT).
+    * nnunet_pred chk_*       : Dataset835 dense canonical-aligned pred.
+    * real_pair               : separate hi-res GT, canonical-aligned.
     """
+    if layout.test_label_source == "real_pair":
+        return (
+            layout.labels_realpair_gt_dir / f"{casename}.nii.gz",
+            layout.metadata_realpair_gt_dir / f"{casename}.json",
+        )
     is_atlas = casename.startswith("atlas_")
     if layout.test_label_source == "atlas_gt" or is_atlas:
         return (

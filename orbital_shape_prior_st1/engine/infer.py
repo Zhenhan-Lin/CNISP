@@ -375,6 +375,17 @@ def _build_label_obs_loader(
     that sparsity, so the canonical-align step refused to write -- the
     loader returns ``None`` and ``run_sweep`` skips that row.
     """
+    if layout.test_label_source == "real_pair":
+        # Single real low-res input patch per case (step ignored): the real
+        # anisotropy is fixed by the acquisition, not swept.
+        def _rp_loader(casename: str, step: int):
+            p = step_input_patch_path(layout, casename, step)
+            if not p.exists():
+                return None
+            vol, spacing, offset = load_patch_as_label_tensor(p)
+            return vol, spacing, offset
+        return _rp_loader
+
     if layout.test_label_source != "nnunet_pred":
         return None
 
@@ -403,6 +414,8 @@ def _meta_path_for_case(layout: RunLayout) -> Callable[[str], Path]:
     existing ``metadata/`` tree.
     """
     def _resolve(casename: str) -> Path:
+        if layout.test_label_source == "real_pair":
+            return layout.metadata_realpair_gt_dir / f"{casename}.json"
         if (layout.test_label_source == "nnunet_pred"
                 and not casename.startswith("atlas_")):
             return layout.metadata_dataset835_dir / f"{casename}.json"
@@ -504,8 +517,12 @@ def infer_test_set(params):
     # ── Per-(case, step) latent-opt input override (deployment only) ─
     label_obs_loader = _build_label_obs_loader(layout)
     if label_obs_loader is not None:
-        print(f"  label_obs override : enabled (Dataset835 sparse patches in "
-              f"{layout.labels_dataset835_step_prefix.as_posix()}XX/)")
+        if layout.test_label_source == "real_pair":
+            print(f"  label_obs override : enabled (real low-res input patches "
+                  f"in {layout.labels_realpair_input_dir})")
+        else:
+            print(f"  label_obs override : enabled (Dataset835 sparse patches in "
+                  f"{layout.labels_dataset835_step_prefix.as_posix()}XX/)")
 
     # ── Sweep configuration (per-case adaptive) ───────────────────
     # slice_step_axis can be an int (uniform RAS axis across all cases,
@@ -551,6 +568,7 @@ def infer_test_set(params):
         sweep_cfg=sweep_cfg,
         output_dir=output_dir,
         label_obs_override_loader=label_obs_loader,
+        real_pair=(layout.test_label_source == "real_pair"),
     )
 
     # ── Export predictions per step subdirectory ──────────────────

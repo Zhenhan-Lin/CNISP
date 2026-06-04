@@ -17,7 +17,8 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
+REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
+export PYTHONPATH="$PROJECT_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
 
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
 # TRAIN_YAML="$PROJECT_ROOT/configs/train_default.yaml"

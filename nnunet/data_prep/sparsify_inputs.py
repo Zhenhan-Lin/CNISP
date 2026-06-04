@@ -92,6 +92,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from orbital_shape_prior_st1.data_prep.sparsify import sparsen_volume  # noqa: E402
+from simulation.degradation import degrade_thick as _degrade_thick_sim  # noqa: E402
+from simulation.slice_profile import get_kernel as _get_kernel  # noqa: E402
+from simulation.affine_ops import (  # noqa: E402
+    assert_start_zero as _assert_start_zero,
+    assert_odd_kernel as _assert_odd_kernel,
+)
 
 
 def _build_sweep_set(
@@ -177,12 +183,20 @@ def _sparsify_one_ct(
     ct_path: Path,
     step_axis: int,
     step_size: int,
+    mode: str = "thin",
+    modality: str = "ct",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Apply sparsen_volume to a CT NIfTI; return (array, affine).
+    """Apply degradation to a CT NIfTI; return (array, affine).
+
+    Parameters
+    ----------
+    mode : "thin" (point-sample, default) or "thick" (profile-conv)
+    modality : "ct" or "mri" (determines kernel for thick mode)
 
     The affine's ``step_axis`` column is scaled by ``step_size``; origin
-    is unchanged because slice_start_id=0 keeps voxel 0 at the same
-    physical location.
+    is unchanged because start=0 keeps voxel 0 at the same physical
+    location — valid for both thin and thick (centered conv preserves
+    position).
     """
     img = nib.load(str(ct_path))
     arr = np.asarray(img.dataobj)
@@ -191,19 +205,37 @@ def _sparsify_one_ct(
 
     vol_t = torch.from_numpy(np.ascontiguousarray(arr))
     sp_t = torch.from_numpy(spacing)
-    off_t = sp_t / 2.0  # offsets are cosmetic here; we rebuild the affine ourselves
+    off_t = sp_t / 2.0
 
-    sparse_vol, _new_sp, _new_off = sparsen_volume(
-        vol_t, sp_t, off_t,
-        axis=step_axis,
-        slice_step_size=step_size,
-        slice_start_id=0,
-        use_thick_slices=False,
-    )
+    # Guard the position-exactness invariant: deployment sparse inputs MUST
+    # use start=0 so sparse voxel i maps to native voxel i*step exactly.
+    _start = 0
+    _assert_start_zero(_start)
+
+    if mode == "thin":
+        sparse_vol, _new_sp, _new_off = sparsen_volume(
+            vol_t, sp_t, off_t,
+            axis=step_axis,
+            slice_step_size=step_size,
+            slice_start_id=_start,
+            use_thick_slices=False,
+        )
+    elif mode == "thick":
+        kernel = _get_kernel(modality, step_size)
+        _assert_odd_kernel(kernel)  # centered-conv position invariance
+        sparse_vol, _new_sp, _new_off = _degrade_thick_sim(
+            vol_t.float(), sp_t, off_t,
+            axis=step_axis,
+            step=step_size,
+            start=_start,
+            kernel=kernel,
+            is_label=False,
+        )
+    else:
+        raise ValueError(f"Unknown sparsification mode: {mode!r}")
+
     sparse_arr = sparse_vol.numpy()
 
-    # New affine: column `step_axis` of the rotation/scale 3x3 gets
-    # multiplied by step_size; translation stays put.
     new_affine = affine.copy()
     new_affine[:3, step_axis] = new_affine[:3, step_axis] * step_size
 
@@ -225,6 +257,13 @@ def main() -> int:
                          "curve always re-uses the ceiling curve's "
                          "sweep so a single nnUNet sparse-CT sweep "
                          "covers both stories.")
+    ap.add_argument("--mode", choices=["thin", "thick"], default="thin",
+                    help="Degradation mode: 'thin' (point-sample, default) "
+                         "or 'thick' (profile-conv via simulation module). "
+                         "For thick, a modality-appropriate kernel is applied "
+                         "before subsampling.")
+    ap.add_argument("--modality", choices=["ct", "mri"], default="ct",
+                    help="Imaging modality (determines kernel type for thick).")
     args = ap.parse_args()
 
     cfg = load_yaml(Path(args.config))
@@ -407,6 +446,8 @@ def main() -> int:
                     ct_path=ct_path,
                     step_axis=step_axis,
                     step_size=step,
+                    mode=args.mode,
+                    modality=args.modality,
                 )
                 # Post-write sanity: the affine column we scaled by
                 # step_size must yield spacing == base_spacing*step.
@@ -433,6 +474,10 @@ def main() -> int:
                 "eff_res_mm": round(cnisp_eff_res, 4),
                 "actual_eff_res_mm": round(expected_eff_res, 4),
                 "step_axis": step_axis,
+                "mode": args.mode,
+                # start is always 0 (position-exactness invariant); recorded
+                # so predict_sparse_iso.py can assert it before native remap.
+                "start": 0,
             }
 
     if warnings:

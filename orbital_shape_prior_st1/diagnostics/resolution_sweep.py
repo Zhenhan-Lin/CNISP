@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -23,8 +24,16 @@ import nibabel as nib
 import numpy as np
 import torch
 
+# Ensure repo root is on sys.path so `simulation/` is importable.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from data_prep.sparsify import sparsen_volume
 from engine.dataset import INNER_PATCH_SIZE_MM, inner_crop_64mm
+from simulation.degradation import degrade_thick
+from simulation.slice_profile import get_kernel
+from simulation.registration import register_mask_to_gt
 
 
 # ── Adaptive step / eff-res helpers ──────────────────────────────
@@ -127,6 +136,9 @@ def eval_case_at_resolution(
     label_obs_override: Optional[
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     ] = None,
+    mode: str = "thin",
+    modality: str = "ct",
+    num_classes: int = 5,
 ) -> Dict:
     """
     Sparsify → optimize latent → predict dense → Dice vs GT.
@@ -152,6 +164,10 @@ def eval_case_at_resolution(
             transfers between the two patch frames (any centroid jitter
             between the input patch and the GT patch becomes part of the
             Dice penalty -- that's the intended deployment signal).
+        mode: "thin" (point-sample) or "thick" (profile-conv).
+            Ignored if label_obs_override is provided.
+        modality: "ct" or "mri" (kernel selection for thick mode).
+        num_classes: number of label classes (for thick mode argmax).
     """
     t0 = time.time()
     offset_dense = spacing_dense / 2.0
@@ -164,6 +180,13 @@ def eval_case_at_resolution(
         label_obs = label_dense
         spacing_obs = spacing_dense
         offset_obs = offset_dense
+    elif mode == "thick":
+        kernel = get_kernel(modality, step_size)
+        label_obs, spacing_obs, offset_obs = degrade_thick(
+            label_dense, spacing_dense, offset_dense,
+            step_axis, step_size, start=0,
+            kernel=kernel, is_label=True, num_classes=num_classes,
+        )
     else:
         label_obs, spacing_obs, offset_obs = sparsen_volume(
             label_dense, spacing_dense, offset_dense,
@@ -401,6 +424,185 @@ def eval_case_at_resolution(
     }
 
 
+# ── Real paired-data eval (Turella sim3) ─────────────────────────
+
+def _decode_grid(
+    net: torch.nn.Module,
+    latent: torch.Tensor,
+    spacing: torch.Tensor,
+    offset: torch.Tensor,
+    shape: Tuple[int, int, int],
+    device: torch.device,
+) -> np.ndarray:
+    """Decode the latent over a full voxel grid -> [*shape] int32 class map.
+
+    Used by the real_pair path, which decodes a dense hi-res reconstruction
+    in the INPUT patch's local frame (no GT-derived bbox available because
+    the GT is a separate acquisition). The 64 mm sub-patch at GT spacing is
+    ~128^3, comfortably within a single chunk, so no bbox expansion is
+    needed here.
+    """
+    use_amp = (device.type == "cuda" and _SWEEP_AUTOCAST_DTYPE != torch.float32)
+    g0, g1, g2 = shape
+    ii = [torch.arange(g0), torch.arange(g1), torch.arange(g2)]
+    grid = torch.stack(torch.meshgrid(ii, indexing="ij"), dim=-1)
+    vox = grid.reshape(-1, 3)
+    coords = (vox.float() * spacing + offset).reshape(1, -1, 1, 1, 3).to(device)
+    n = coords.shape[1]
+    out = torch.empty(n, dtype=torch.int32, device=device)
+    chunk = 2_000_000
+    with torch.no_grad():
+        for c0 in range(0, n, chunk):
+            c1 = min(c0 + chunk, n)
+            with torch.autocast(device_type=device.type,
+                                dtype=_SWEEP_AUTOCAST_DTYPE, enabled=use_amp):
+                lg = net(latent, coords[:, c0:c1])
+            out[c0:c1] = (
+                lg.squeeze(0).squeeze(1).squeeze(1).argmax(dim=-1).to(torch.int32)
+            )
+    return out.cpu().reshape(shape).numpy().astype(np.int32)
+
+
+def eval_case_real_pair(
+    net: torch.nn.Module,
+    optimize_fn: Callable,
+    input_obs: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    gt_dense: torch.Tensor,
+    gt_spacing: torch.Tensor,
+    step_axis: int,
+    params: dict,
+    device: torch.device,
+    reg_kind: str = "rigid",
+) -> Dict:
+    """Turella sim3: reconstruct from a REAL low-res scan, register to GT.
+
+    Unlike the simulated curves, the low-res input and the hi-res GT are
+    SEPARATE real acquisitions in different physical frames -- there is no
+    voxel correspondence to crop against. We therefore:
+
+      1. Inner-crop the input around its own visible-LCC centroid (input
+         frame) and fit the latent on that 64 mm sub-patch.
+      2. Decode a dense reconstruction at GT spacing in the input frame.
+      3. Inner-crop the GT around its own visible-LCC centroid (GT frame).
+      4. Rigidly register the reconstructed mask to the GT mask (post-hoc)
+         and resample it onto the GT voxel grid (Turella's protocol).
+      5. Dice on the GT grid.
+
+    The returned dict mirrors ``eval_case_at_resolution`` so the existing
+    export / native-mapping code in ``infer.py`` works unchanged. The
+    sub-patch bookkeeping refers to the GT inner crop (the frame the
+    registered prediction now lives in).
+    """
+    t0 = time.time()
+    in_vol, in_sp, in_off = input_obs
+    num_classes = net.num_classes
+
+    # 1. input sub-patch (self inner-crop in the input frame)
+    in_inner = inner_crop_64mm(
+        volume_sparse=in_vol, spacing_sparse=in_sp, offset_sparse=in_off,
+        volume_dense=in_vol, spacing_dense=in_sp, offset_dense=in_off,
+    )
+    label_obs = in_inner["sub_sparse"]
+    off_obs = in_inner["sub_offset_sparse_local"]
+
+    individual = [torch.arange(label_obs.shape[d]) for d in range(3)]
+    voxel_ids = torch.stack(torch.meshgrid(individual, indexing="ij"), dim=-1)
+    coords = (voxel_ids.float() * in_sp + off_obs).unsqueeze(0).to(device)
+    labels_batch = label_obs.unsqueeze(0).to(device)
+
+    latent = optimize_fn(
+        net, labels_batch, coords,
+        latent_dim=params["latent_dim"],
+        lr=params.get("latent_lr", 1e-2),
+        lat_reg_lambda=params["lat_reg_lambda"],
+        num_iters=params.get("latent_num_iters", 1200),
+        max_num_const_dsc=params.get("max_num_const_train_dsc", -1),
+        device=device,
+    )
+
+    # 2. decode a dense reconstruction at GT spacing, in the INPUT frame.
+    # Same shared lower-corner origin as the input sub-patch (offset =
+    # spacing/2), so the input-fit latent decodes correctly on this grid.
+    hr_sp = gt_spacing
+    hr_off = hr_sp / 2.0
+    hr_shape = tuple(
+        int(max(round(float(INNER_PATCH_SIZE_MM) / float(hr_sp[d])), 1))
+        for d in range(3)
+    )
+    pred_hr = torch.from_numpy(_decode_grid(net, latent, hr_sp, hr_off, hr_shape, device))
+
+    # 3. GT sub-patch (self inner-crop in the GT frame)
+    gt_off = gt_spacing / 2.0
+    gt_inner = inner_crop_64mm(
+        volume_sparse=gt_dense, spacing_sparse=gt_spacing, offset_sparse=gt_off,
+        volume_dense=gt_dense, spacing_dense=gt_spacing, offset_dense=gt_off,
+    )
+    gt_sub = gt_inner["sub_dense"]
+    gt_sub_off = gt_inner["sub_offset_dense_local"]
+
+    # 4. rigid post-hoc registration -> resample pred onto GT grid.
+    reg_pred, reg_info = register_mask_to_gt(
+        pred_hr, hr_sp, hr_off,
+        gt_sub, gt_spacing, gt_sub_off,
+        kind=reg_kind,
+    )
+
+    pred_np = reg_pred.numpy().astype(np.int32)
+    gt_np = gt_sub.numpy().astype(np.int32)
+    assert pred_np.shape == gt_np.shape, (
+        f"[real_pair] registered pred {pred_np.shape} != gt {gt_np.shape}; "
+        f"register_mask_to_gt should resample onto the GT grid."
+    )
+
+    dice_dense = _hard_dice(pred_np, gt_np, num_classes)
+
+    # Real anisotropy ratio (informational): how much coarser the input's
+    # through-plane sampling is vs the GT grid.
+    step_ratio = max(int(round(float(in_sp[step_axis]) / float(gt_spacing[step_axis]))), 1)
+    disk_shape = list(gt_dense.shape)
+    n_total = disk_shape[step_axis]
+
+    print(f"  [real_pair] pred={pred_np.shape} gt={gt_np.shape} "
+          f"in_sp={tuple(round(float(s),3) for s in in_sp)} "
+          f"reg={'on' if reg_info.get('applied') else 'off'} "
+          f"rms={reg_info.get('icp_rms_mm', float('nan')):.3f}mm "
+          f"dice={dice_dense['mean']:.3f}")
+
+    return {
+        "dice": dice_dense,
+        # No "observed slices" notion for real pairs; mirror dense.
+        "dice_observed": dice_dense,
+        "pred_class_map": pred_np,
+        "gt_class_map": gt_np,
+        # Sub-patch bookkeeping refers to the GT inner crop (the frame the
+        # registered prediction now lives in) for native unmap.
+        "sub_crop_lo_vox_dense": gt_inner["sub_crop_lo_vox_dense"],
+        "sub_crop_shape_vox_dense": gt_inner["sub_crop_shape_vox_dense"],
+        "sub_origin_mm_in_disk": gt_inner["sub_origin_mm_in_disk"],
+        "disk_patch_dense_shape": disk_shape,
+        "visible_lcc_voxel_count": int(gt_inner["visible_lcc_voxel_count"]),
+        "visible_total_fg_count": int(gt_inner["visible_total_fg_count"]),
+        "latent": latent.cpu().squeeze(0).numpy(),
+        "latent_missing": False,
+        "spacing": gt_spacing.numpy(),
+        # On-disk layout uses step_01 (single observation per real pair);
+        # the real anisotropy is carried by effective_resolution_mm and the
+        # separate anisotropy_ratio field below.
+        "step_size": 1,
+        "anisotropy_ratio": step_ratio,
+        "step_axis": int(step_axis),
+        "effective_resolution_mm": float(in_sp[step_axis]),
+        "n_observed_slices": len(range(0, n_total, step_ratio)),
+        "n_total_slices": n_total,
+        "bbox_min": [0, 0, 0],
+        "bbox_max": list(pred_np.shape),
+        "bbox_points": int(np.prod(pred_np.shape)),
+        "full_points": int(np.prod(pred_np.shape)),
+        "registration": reg_info,
+        "time_s": time.time() - t0,
+    }
+
+
 # ── Resume support: load cached predictions ──────────────────────
 
 def _crop_disk_to_subpatch(label_disk_np, sub_crop_lo, sub_crop_shape):
@@ -566,6 +768,7 @@ def run_sweep(
         Callable[[str, int],
                  Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]
     ] = None,
+    real_pair: bool = False,
 ) -> List[Dict]:
     """
     Per-case adaptive resolution sweep.
@@ -617,6 +820,34 @@ def run_sweep(
     for ci, casename in enumerate(casenames):
         case_axis = step_axes[ci]
         spacing_axis = float(spacings_dense[ci][case_axis])
+
+        # ── real_pair: single observation per case, no resolution sweep ──
+        if real_pair:
+            print(f"\n{'='*60}")
+            print(f"Case {ci+1}/{len(casenames)} [real_pair]: {casename}")
+            print(f"{'='*60}")
+            if label_obs_override_loader is None:
+                raise ValueError(
+                    "real_pair sweep requires a label_obs_override_loader to "
+                    "supply the real low-res input patch."
+                )
+            input_obs = label_obs_override_loader(casename, 1)
+            if input_obs is None:
+                print(f"  real_pair ... SKIP (no input patch for {casename})")
+                continue
+            result = eval_case_real_pair(
+                net=net, optimize_fn=optimize_fn,
+                input_obs=input_obs,
+                gt_dense=labels_dense[ci],
+                gt_spacing=spacings_dense[ci],
+                step_axis=case_axis,
+                params=params, device=device,
+                reg_kind=params.get("realpair_reg_kind", "rigid"),
+            )
+            result["casename"] = casename
+            all_results.append(result)
+            continue
+
         steps = adaptive_steps_for_case(
             spacing_axis,
             target_eff_res_increment_mm=target_inc,
@@ -670,6 +901,9 @@ def run_sweep(
                 params=params, device=device,
                 use_thick_slices=params.get("use_thick_slices", False),
                 label_obs_override=override,
+                mode=params.get("sweep_mode", "thin"),
+                modality=params.get("sweep_modality", "ct"),
+                num_classes=params.get("num_classes", 5),
             )
             result["casename"] = casename
 

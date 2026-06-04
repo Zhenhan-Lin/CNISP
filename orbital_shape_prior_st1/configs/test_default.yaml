@@ -31,11 +31,30 @@
 #                           built by nnunet/engine/build_dataset835_canonical_patches.py).
 #     - Outputs land at   : ${output_basedir}/<model>/runs/nnunet_pred/.
 #
+#   real_pair (Turella sim3, REAL paired acquisitions):
+#     - Latent-opt input  : nnUNet pred on the REAL low-res scan, canonical-
+#                           aligned, at
+#                           ${aligned_dir}/labels_realpair_input/<casename>.nii.gz.
+#     - Dense Dice target : separate hi-res GT (manual or nnUNet-on-hires),
+#                           canonical-aligned, at
+#                           ${aligned_dir}/labels_realpair_gt/<casename>.nii.gz.
+#                           (both built by nnunet/engine/build_realpair_patches.py)
+#     - The reconstructed mask is RIGIDLY registered to the GT mask
+#       (post-hoc) before Dice — the two scans are independent acquisitions
+#       in different frames, so registration absorbs repositioning.
+#     - Single observation per case (no resolution sweep).
+#     - Outputs land at   : ${output_basedir}/<model>/runs/real_pair/.
+#
 # Both runs are GT-conditioned latent optimisation; only the *source* of
 # the sparse observation differs. compare_native.py reads both runs and
 # emits methods CNISP-atlasGT vs CNISP-nnUNetPred (vs nnUNet-sparse).
 test_label_source: atlas_gt
 run_tag: atlas_gt
+
+# Post-hoc registration backend for test_label_source=real_pair only.
+# "rigid" = dependency-free NumPy ICP (centroid+PCA init, Kabsch refine);
+# "none"  = skip registration (ablation; assumes frames already match).
+realpair_reg_kind: rigid
 
 # Which cases to test on
 test_casefile: test_cases.txt

@@ -16,7 +16,7 @@ gpu_id: 0
 
 # ── CNISP-side artefacts to reuse (no re-inference) ───────────────
 cnisp_paths_yaml: /home-local/linz18/CNISP/orbital_shape_prior_st1/configs/paths.yaml
-cnisp_model_name: orbital_ad_v4
+cnisp_model_name: orbital_ad_v5
 
 # ── Option C: which CNISP runs to compare against nnUNet ──────────
 # Each entry is a (run_tag, method_label) pair. CNISP infers per run_tag
@@ -99,6 +99,32 @@ cnisp_slice_step_axis: 2
 sparse_axis_alignment_min: 0.95
 sparse_eff_res_tolerance: 0.05
 sparse_eff_res_max_drift: 0.30
+
+# ── Degradation type for the nnUNet sparse sweep ──────────────────
+# Controls how sparsify_inputs.py degrades each CT before nnUNet predicts.
+#   sweep_degrade_mode:
+#     thin  (DEFAULT) idealised point-sampling: keep every Nth slice
+#           unchanged (legacy behaviour, exact reproduction).
+#     thick physical partial-volume degradation: convolve a centered
+#           slice-sensitivity profile along the through-plane axis before
+#           subsampling (see simulation/). Use for the realistic
+#           thick-slice acquisition experiment.
+#   sweep_modality (only matters for thick):
+#     ct  (DEFAULT) box SSP (rectangular slice profile).
+#     mri Gaussian SSP (FWHM ~ slice separation).
+# These map to sparsify_inputs.py --mode / --modality. For a matched
+# experiment, also set the CNISP-side toggle test yaml::sweep_mode: thick.
+sweep_degrade_mode: thin
+sweep_modality: ct
+
+# ── Real paired-data line (Turella sim3) manifest ─────────────────
+# Used only by the opt-in run_pipeline.sh phases cnisp-prep-realpair /
+# cnisp-infer-realpair. JSON mapping each source_id to its two REAL
+# acquisitions:
+#   { "<source_id>": { "lowres_pred": "/abs/lowres_nnunet_pred.nii.gz",
+#                      "hires_gt":    "/abs/hires_gt.nii.gz" } }
+# Default location if unset: ${work_dir}/realpair_manifest.json.
+# realpair_manifest: /home-local/linz18/CNISP/nnunet/realpair_manifest.json
 
 # ── Aggregation ───────────────────────────────────────────────────
 # Inherit from test_default.yaml so the report buckets line up with
