@@ -67,15 +67,17 @@ from data_prep.canonical_align import (  # noqa: E402
     align_single_case,
     infer_patch_size_mm,
 )
+from engine.test_label_sources import exp_step_prefix  # noqa: E402
 
 
 def _iter_sparse_inputs(
     work_dir: Path,
     sparse_manifest: dict,
+    experiment: str,
 ) -> Iterable[Tuple[int, str, Path]]:
     """Yield ``(step_size, source_id, sparse_pred_path)`` for steps >= 2."""
     by_step = sparse_manifest.get("by_step", {})
-    pred_root = work_dir / "prediction"
+    pred_root = work_dir / "prediction" / experiment
     for step_tag in sorted(by_step.keys()):
         step = int(step_tag)
         step_pred_dir = pred_root / f"sparse_step_{step_tag}"
@@ -123,15 +125,26 @@ def main() -> int:
     ap.add_argument("--skip-step-01", action="store_true",
                     help="Don't emit step_01/ patches (e.g. when the "
                          "dense baseline isn't part of this run).")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default="thin",
+                    help="Experiment directory layer. Reads sparse preds "
+                         "from prediction/<experiment>/ + input/<experiment>/"
+                         "sparse_manifest.json and writes exp-keyed patch "
+                         "dirs (labels_dataset835_<experiment>_step_XX/) so "
+                         "thin/thick deployment inputs coexist.")
     args = ap.parse_args()
 
     cfg = load_yaml(Path(args.config))
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
     work_dir = Path(cfg["work_dir"])
+    experiment = args.experiment
     aligned_dir = Path(cnisp_paths["aligned_dir"])
-    prefix = cnisp_paths.get(
+    base_prefix = cnisp_paths.get(
         "labels_dataset835_step_prefix", "labels_dataset835_step_"
     )
+    # Exp-keyed prefix so the deployment-curve input patches mirror the
+    # exp-keyed sparse nnUNet preds they are carved from.
+    prefix = exp_step_prefix(base_prefix, experiment)
 
     # Pin the patch size to whatever the model was trained on, unless
     # the caller explicitly overrides it. Mismatching patch sizes
@@ -145,10 +158,13 @@ def main() -> int:
         infer_fn=infer_patch_size_mm,
     )
 
-    sparse_manifest_path = work_dir / "input" / "sparse_manifest.json"
+    sparse_manifest_path = (
+        work_dir / "input" / experiment / "sparse_manifest.json"
+    )
     if not sparse_manifest_path.exists():
         print(f"[dataset835_sparse] {sparse_manifest_path} missing -- "
-              f"run nnunet/data_prep/sparsify_inputs.py first.",
+              f"run nnunet/data_prep/sparsify_inputs.py --experiment "
+              f"{experiment} first.",
               file=sys.stderr)
         return 2
     with open(sparse_manifest_path) as f:
@@ -180,7 +196,7 @@ def main() -> int:
     work_items: List[Tuple[int, str, Path]] = []
     if not args.skip_step_01:
         work_items.extend(_iter_step_01(work_dir, all_source_ids))
-    work_items.extend(_iter_sparse_inputs(work_dir, sparse_manifest))
+    work_items.extend(_iter_sparse_inputs(work_dir, sparse_manifest, experiment))
 
     seen_step_dirs: set = set()
     for step, sid, seg_path in work_items:

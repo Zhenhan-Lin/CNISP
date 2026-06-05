@@ -514,8 +514,20 @@ def infer_test_set(params):
     output_dir = layout.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Keep the degradation applied by the sweep consistent with the
+    # experiment folder: experiment is the authoritative knob. For the
+    # ceiling curve (atlas_gt) the sweep degrades canonical GT, so
+    # sweep_mode must equal the experiment (thin/thick). real_pair uses a
+    # real low-res observation (no synthetic degradation), so leave it.
+    if layout.experiment in ("thin", "thick"):
+        if str(params.get("sweep_mode", "thin")) != layout.experiment:
+            print(f"  [infer] syncing sweep_mode -> '{layout.experiment}' "
+                  f"to match experiment folder")
+        params["sweep_mode"] = layout.experiment
+
     print(f"Device: {device}")
     print(f"Run layout:")
+    print(f"  experiment              = {layout.experiment}")
     print(f"  test_label_source       = {layout.test_label_source}")
     print(f"  run_tag                 = {layout.run_tag}")
     print(f"  output_dir              = {output_dir}")

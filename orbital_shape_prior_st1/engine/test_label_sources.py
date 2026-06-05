@@ -63,6 +63,41 @@ import torch
 
 VALID_LABEL_SOURCES = ("atlas_gt", "nnunet_pred", "real_pair")
 
+# Experiment dimension (simulation strategy). Inserted as a directory layer
+# under runs/ -- runs/<experiment>/<run_tag>/ -- so thin / thick / real
+# results coexist on disk instead of overwriting one another.
+VALID_EXPERIMENTS = ("thin", "thick", "real")
+
+
+def resolve_experiment(params: dict) -> str:
+    """Single source of truth for the experiment dir name (thin|thick|real).
+
+    Precedence:
+      1. explicit ``params['experiment']`` (set by the pipeline / CLI),
+      2. ``real`` whenever ``test_label_source == real_pair`` (the real
+         paired-data line is its own degradation regime),
+      3. ``params['sweep_mode']`` (thin|thick) for the latent-opt sweep,
+      4. ``thin`` (legacy default).
+    """
+    exp = params.get("experiment")
+    if exp:
+        return str(exp)
+    if str(params.get("test_label_source", "atlas_gt")) == "real_pair":
+        return "real"
+    return str(params.get("sweep_mode", "thin"))
+
+
+def exp_step_prefix(base_prefix: str, experiment: str) -> str:
+    """Inject the experiment token into the per-step sparse-label prefix.
+
+    ``labels_dataset835_step_`` + ``thin`` -> ``labels_dataset835_thin_step_``
+    so the deployment-curve (nnunet_pred) input patches are exp-keyed and
+    thin / thick never collide one directory level deeper.
+    """
+    if base_prefix.endswith("_step_"):
+        return f"{base_prefix[:-len('_step_')]}_{experiment}_step_"
+    return f"{base_prefix}{experiment}_"
+
 
 @dataclass
 class RunLayout:
@@ -77,6 +112,7 @@ class RunLayout:
     model_name: str
     run_tag: str
     test_label_source: str
+    experiment: str                 # thin | thick | real (runs/<experiment>/)
 
     # Inputs (read from aligned_dir)
     aligned_dir: Path
@@ -155,21 +191,35 @@ def build_run_layout(params: dict) -> RunLayout:
             f"{VALID_LABEL_SOURCES}. Update configs/test_default.yaml."
         )
 
+    experiment = resolve_experiment(params)
+    if experiment not in VALID_EXPERIMENTS:
+        raise ValueError(
+            f"experiment={experiment!r} not in {VALID_EXPERIMENTS}. "
+            f"Set params['experiment'] / sweep_mode to one of these."
+        )
+
     output_basedir = _path(params["output_basedir"])
-    output_dir = output_basedir / model_name / "runs" / run_tag
+    # runs/<experiment>/<run_tag>/ -- the experiment layer keeps thin / thick
+    # / real result trees side by side instead of overwriting each other.
+    output_dir = output_basedir / model_name / "runs" / experiment / run_tag
+
+    # Sparse deployment-curve patches are exp-keyed too (thin vs thick produce
+    # different nnUNet sparse preds, so their canonical-aligned patches differ).
+    step_prefix = exp_step_prefix(
+        sub["labels_dataset835_step_prefix"], experiment
+    )
 
     return RunLayout(
         model_name=model_name,
         run_tag=run_tag,
         test_label_source=test_label_source,
+        experiment=experiment,
         aligned_dir=aligned_dir,
         labels_dir=aligned_dir / sub["labels_dirname"],
         metadata_dir=aligned_dir / sub["metadata_dirname"],
         labels_dataset835_dir=aligned_dir / sub["labels_dataset835_dirname"],
         metadata_dataset835_dir=aligned_dir / sub["metadata_dataset835_dirname"],
-        labels_dataset835_step_prefix=(
-            aligned_dir / sub["labels_dataset835_step_prefix"]
-        ),
+        labels_dataset835_step_prefix=(aligned_dir / step_prefix),
         labels_realpair_input_dir=aligned_dir / sub["labels_realpair_input_dirname"],
         labels_realpair_gt_dir=aligned_dir / sub["labels_realpair_gt_dirname"],
         metadata_realpair_gt_dir=aligned_dir / sub["metadata_realpair_gt_dirname"],

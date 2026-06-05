@@ -263,22 +263,27 @@
 #   to the GPU work they gate. Markers used:
 #     cnisp-train                       best_checkpoint.pth
 #     nnunet-predict                    prediction/native/ has 1 file per source
-#     cnisp-infer (atlas_gt)            runs/atlas_gt/sweep_results.pkl
-#                                       + runs/atlas_gt/native_sweep_manifest.json
-#     nnunet-predict-sweep              prediction/sweep_manifest.json
+# NOTE on the experiment (<EXP>) layer: every degradation-dependent path
+# below is keyed by the simulation strategy so thin / thick / real coexist.
+# <EXP> = sweep_degrade_mode (thin|thick) for the sweep lines, "real" for the
+# real-paired line. Shared dense artifacts (prediction/native, input/native,
+# labels_dataset835/ GT) are NOT exp-scoped.
+#     cnisp-infer (atlas_gt)            runs/<EXP>/atlas_gt/sweep_results.pkl
+#                                       + runs/<EXP>/atlas_gt/native_sweep_manifest.json
+#     nnunet-predict-sweep              prediction/<EXP>/sweep_manifest.json
 #     nnunet-predict-smore              prediction/smore/ has 1 file per source
 #     cnisp-prep-dataset835-gt          labels_dataset835/ + metadata_dataset835/
 #                                       cover every source (OD + OS)
-#     cnisp-prep-dataset835-sparse      labels_dataset835_step_01/ covers every source
-#                                       (per-step files for higher steps are
+#     cnisp-prep-dataset835-sparse      labels_dataset835_<EXP>_step_01/ covers every
+#                                       source (per-step files for higher steps are
 #                                       allowed to be partial -- see phase doc)
-#     cnisp-infer-nnunet-pred           runs/nnunet_pred/sweep_results.pkl
-#                                       + runs/nnunet_pred/native_sweep_manifest.json
+#     cnisp-infer-nnunet-pred           runs/<EXP>/nnunet_pred/sweep_results.pkl
+#                                       + runs/<EXP>/nnunet_pred/native_sweep_manifest.json
 #     cnisp-prep-realpair               labels_realpair_gt/ covers every
 #                                       manifest source (OD + OS); absent
 #                                       manifest -> skip with instructions
-#     cnisp-infer-realpair              runs/real_pair/sweep_results.pkl
-#                                       + runs/real_pair/native_sweep_manifest.json
+#     cnisp-infer-realpair              runs/real/real_pair/sweep_results.pkl
+#                                       + runs/real/real_pair/native_sweep_manifest.json
 #     cnisp-native-remap                per-step manifest checked inside
 #                                       build_cnisp_native_sweep.py; skips
 #                                       any step whose
@@ -474,6 +479,30 @@ SWEEP_DEGRADE_MODE="${SWEEP_DEGRADE_MODE:-thin}"
 SWEEP_MODALITY="$(read_yaml_field "$CONFIG" "sweep_modality")"
 SWEEP_MODALITY="${SWEEP_MODALITY:-ct}"
 
+# Experiment directory layer (simulation strategy). The thin/thick line is
+# driven by sweep_degrade_mode; the real-paired line (cnisp-*-realpair) uses
+# the literal "real". Every degradation-dependent output is keyed by this so
+# thin / thick / real result trees coexist instead of overwriting each other:
+#   nnUNet:  input/<EXP>/sparse_step_XX/, prediction/<EXP>/sparse_step_XX*
+#   CNISP:   runs/<EXP>/<run_tag>/
+#   aligned: labels_dataset835_<EXP>_step_XX/ (deployment-curve input patches)
+#   compare: comparison/paired_*__<run_tag>__<EXP>.*
+# The shared, strategy-independent dense artifacts (input/native,
+# prediction/native, labels_dataset835/ GT) stay at the top level.
+EXP="$SWEEP_DEGRADE_MODE"
+
+_exp_step_prefix() {
+    # base prefix + experiment -> exp-keyed prefix, mirroring
+    # engine/test_label_sources.exp_step_prefix so bash skip-checks and the
+    # python writer/reader agree on the on-disk dir name.
+    local base="$1" exp="$2"
+    if [[ "$base" == *_step_ ]]; then
+        printf '%s_%s_step_' "${base%_step_}" "$exp"
+    else
+        printf '%s%s_' "$base" "$exp"
+    fi
+}
+
 # Resolve the patch_size_mm that the model was trained on so we can
 # echo it in the run banner and so the two `cnisp-prep-dataset835-*`
 # phases inherit the *same* physical extent as the original CNISP
@@ -541,6 +570,7 @@ done
 [[ -n "$TEST_CONFIG"   ]] && echo "  cnisp test yaml:     $TEST_CONFIG"
 [[ -n "$GPU_OVERRIDE"  ]] && echo "  CUDA_VISIBLE_DEVICES=$GPU_OVERRIDE"
 echo "  sweep degradation:   mode=$SWEEP_DEGRADE_MODE modality=$SWEEP_MODALITY"
+echo "  experiment layer:    $EXP (runs/<exp>/<run_tag>, prediction/<exp>/...)"
 # Surface the real_pair config only when those phases are requested.
 for _p in "${PHASES[@]}"; do
     if [[ "$_p" == cnisp-prep-realpair || "$_p" == cnisp-infer-realpair ]]; then
@@ -723,20 +753,41 @@ phase_cnisp_train() {
 phase_nnunet_predict() {
     echo ""
     echo "[phase] nnunet-predict --------------------------------"
-    if [[ $FORCE -eq 0 ]] && _predict_dir_complete "${WORK_DIR}/prediction/native"; then
-        echo "  ${WORK_DIR}/prediction/native/ already covers every source"
+    local pred_dir="${WORK_DIR}/prediction/native"
+    local stamp="${pred_dir}/.native.provenance"
+    # Provenance = nnUNet model identity (incl. folds) + the predict script.
+    # Without this, changing `folds` (e.g. [0] -> best) would silently reuse
+    # the old fold's dense baseline, which feeds step_01 of the sweep and the
+    # standalone native comparison.
+    local sig
+    sig="$(printf '%s\n' \
+        "phase=nnunet-predict" \
+        "nnunet=$(_nnunet_model_token)" \
+        "code=$(_sig_file "$REPO_ROOT/nnunet/run_predict_native.sh")")"
+    if [[ $FORCE -eq 0 ]] \
+        && _predict_dir_complete "$pred_dir" \
+        && _provenance_fresh "$stamp" "$sig"; then
+        echo "  ${pred_dir}/ already covers every source and provenance matches"
         echo "  -> skipping (pass --force to re-predict)."
         return 0
     fi
+    if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
+        echo "  native predictions present but provenance CHANGED -> re-predicting:"
+        _explain_drift "$stamp" "$sig"
+        # nnUNetv2_predict skips cases whose output already exists; wipe the
+        # stale masks so the new fold/model actually regenerates them.
+        _safe_rm_glob "$pred_dir" "$pred_dir"/*.nii.gz
+    fi
     CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_native.sh"
+    _write_provenance "$stamp" "$sig"
 }
 
 phase_nnunet_predict_sweep() {
     echo ""
     echo "[phase] nnunet-predict-sweep --------------------------"
-    local marker="${WORK_DIR}/prediction/sweep_manifest.json"
-    local stamp="${WORK_DIR}/prediction/.sweep.provenance"
-    local atlas_sweep="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/atlas_gt/sweep_results.pkl"
+    local marker="${WORK_DIR}/prediction/${EXP}/sweep_manifest.json"
+    local stamp="${WORK_DIR}/prediction/${EXP}/.sweep.provenance"
+    local atlas_sweep="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/${EXP}/atlas_gt/sweep_results.pkl"
     # Signature: degrade mode/modality + the nnUNet model identity + the
     # upstream atlas_gt sweep (its hash changes whenever CNISP is retrained
     # or the (source, step) set changes) + the CODE that produces the masks
@@ -747,6 +798,7 @@ phase_nnunet_predict_sweep() {
     local sig
     sig="$(printf '%s\n' \
         "phase=nnunet-predict-sweep" \
+        "experiment=$EXP" \
         "mode=$SWEEP_DEGRADE_MODE" \
         "modality=$SWEEP_MODALITY" \
         "nnunet=$(_nnunet_model_token)" \
@@ -763,26 +815,26 @@ phase_nnunet_predict_sweep() {
         echo "  sweep manifest present but provenance CHANGED -> rebuilding:"
         _explain_drift "$stamp" "$sig"
     fi
-    echo "  degradation: mode=$SWEEP_DEGRADE_MODE modality=$SWEEP_MODALITY"
-    # Clear stale sparse inputs/preds before rebuilding. sparsify_inputs.py
-    # has no per-file --force (its skip is unconditional on dst.exists()),
-    # so a mode change (thin<->thick rewrites the geometry) would otherwise
-    # silently reuse the wrong sparse CTs. Wiping here guarantees a clean,
-    # mode-correct rebuild whenever this phase actually runs.
-    echo "  clearing stale sparse inputs/preds for a clean rebuild"
-    _safe_rm_glob "${WORK_DIR}/input"      "${WORK_DIR}/input/sparse_step_"*
-    _safe_rm_glob "${WORK_DIR}/prediction" "${WORK_DIR}/prediction/sparse_step_"*
-    rm -f "${WORK_DIR}/prediction/sweep_manifest.json" \
-          "${WORK_DIR}/input/sparse_manifest.json"
+    echo "  experiment=$EXP degradation: mode=$SWEEP_DEGRADE_MODE modality=$SWEEP_MODALITY"
+    # Clear stale sparse inputs/preds for THIS experiment before rebuilding.
+    # sparsify_inputs.py has no per-file --force (skip is unconditional on
+    # dst.exists()), so a code change to the geometry would otherwise
+    # silently reuse the wrong sparse CTs. Wiping the exp subtree guarantees
+    # a clean rebuild without touching the other experiment's results.
+    echo "  clearing stale sparse inputs/preds under input/$EXP + prediction/$EXP"
+    _safe_rm_glob "${WORK_DIR}/input"      "${WORK_DIR}/input/${EXP}"
+    _safe_rm_glob "${WORK_DIR}/prediction" "${WORK_DIR}/prediction/${EXP}"
     python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG" \
-            --mode "$SWEEP_DEGRADE_MODE" --modality "$SWEEP_MODALITY"
+            --mode "$SWEEP_DEGRADE_MODE" --modality "$SWEEP_MODALITY" \
+            --experiment "$EXP"
     # Single custom-predictor pass writes the sparse-grid mask
     # (sparse_step_XX/), the genuine iso-0.5 plan-spacing prediction
     # (sparse_step_XX_upsampled/), and that iso prediction resampled onto
     # the native grid with nnUNet's own resampler (sparse_step_XX_native/,
     # the Dice target). Replaces the old nnUNetv2_predict CLI sweep +
     # NN slice-duplication upsample.
-    python3 "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py" --config "$CONFIG"
+    python3 "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py" --config "$CONFIG" \
+            --experiment "$EXP"
     _write_provenance "$stamp" "$sig"
 }
 
@@ -799,15 +851,12 @@ phase_nnunet_predict_smore() {
 }
 
 _run_cnisp_infer_for() {
-    # $1 = test_label_source, $2 = run_tag
-    local label_src="$1" run_tag="$2"
-    if [[ -n "$TEST_CONFIG" ]]; then
-        bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_03_test.sh" \
-             "$TEST_CONFIG" "$label_src" "$run_tag"
-    else
-        bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_03_test.sh" \
-             "" "$label_src" "$run_tag"
-    fi
+    # $1 = test_label_source, $2 = run_tag, $3 = experiment (thin|thick|real)
+    local label_src="$1" run_tag="$2" experiment="$3"
+    local cfg_arg=""
+    [[ -n "$TEST_CONFIG" ]] && cfg_arg="$TEST_CONFIG"
+    bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_03_test.sh" \
+         "$cfg_arg" "$label_src" "$run_tag" "$experiment"
 }
 
 _pickle_loadable() {
@@ -829,8 +878,8 @@ _skip_cnisp_infer_if_done() {
     # Returns 0 (caller should skip) iff the per-run sweep + manifest exist
     # AND the sweep pickle is intact. A truncated pickle (e.g. from a
     # disk-full crash mid-dump) is NOT a valid skip marker -- re-run instead.
-    local run_tag="$1"
-    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$run_tag"
+    local run_tag="$1" experiment="$2"
+    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$experiment/$run_tag"
     local sweep_pkl="$run_dir/sweep_results.pkl"
     local native_mf="$run_dir/native_sweep_manifest.json"
     if [[ $FORCE -eq 0 && -f "$sweep_pkl" && -f "$native_mf" ]]; then
@@ -852,10 +901,11 @@ _cnisp_model_sig() {
     # checkpoint (same name)", changed test config, and changed inference
     # code (resolution_sweep / infer) -- so a plain re-run rebuilds instead
     # of serving v4-era reconstructions under the v5 path.
-    local run_tag="$1"
+    local run_tag="$1" experiment="${2:-$EXP}"
     local ckpt="$CNISP_MODEL_BASEDIR/$CNISP_MODEL_NAME/best_checkpoint.pth"
     printf '%s\n' \
         "run_tag=$run_tag" \
+        "experiment=$experiment" \
         "cnisp_model=$CNISP_MODEL_NAME" \
         "checkpoint=$(_sig_meta "$ckpt")" \
         "test_cfg=$( [[ -n "$TEST_CONFIG" ]] && _sig_file "$TEST_CONFIG" || printf 'default' )" \
@@ -865,19 +915,19 @@ _cnisp_model_sig() {
 
 phase_cnisp_infer() {
     echo ""
-    echo "[phase] cnisp-infer (run_tag=atlas_gt) ----------------"
-    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/atlas_gt"
+    echo "[phase] cnisp-infer (experiment=$EXP run_tag=atlas_gt) ----------------"
+    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$EXP/atlas_gt"
     local stamp="$run_dir/.provenance"
-    local sig; sig="$(_cnisp_model_sig "atlas_gt")"
+    local sig; sig="$(_cnisp_model_sig "atlas_gt" "$EXP")"
     if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \
-        && _skip_cnisp_infer_if_done "atlas_gt"; then
+        && _skip_cnisp_infer_if_done "atlas_gt" "$EXP"; then
         return 0
     fi
     if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
         echo "  provenance CHANGED -> re-running CNISP atlas_gt inference:"
         _explain_drift "$stamp" "$sig"
     fi
-    _run_cnisp_infer_for "atlas_gt" "atlas_gt"
+    _run_cnisp_infer_for "atlas_gt" "atlas_gt" "$EXP"
     _write_provenance "$stamp" "$sig"
 }
 
@@ -949,18 +999,20 @@ phase_cnisp_prep_dataset835_sparse() {
     # Use step_01 as the "complete" marker. Higher steps are
     # allowed to be partial (nnUNet may have dropped globes at high
     # sparsity); the inference loader handles missing rows.
-    local step01_dir="$CNISP_ALIGNED_DIR/${SPARSE835_PREFIX}01"
-    local stamp="$CNISP_ALIGNED_DIR/.dataset835_sparse.provenance"
+    local exp_prefix; exp_prefix="$(_exp_step_prefix "$SPARSE835_PREFIX" "$EXP")"
+    local step01_dir="$CNISP_ALIGNED_DIR/${exp_prefix}01"
+    local stamp="$CNISP_ALIGNED_DIR/.dataset835_sparse_${EXP}.provenance"
     # Signature: training patch extent + degrade mode/modality + the
     # upstream sweep provenance stamp (chained: changes to the nnUNet
     # sparse sweep -- new mode, new model, new data -- propagate here).
     local sig
     sig="$(printf '%s\n' \
         "phase=cnisp-prep-dataset835-sparse" \
+        "experiment=$EXP" \
         "patch_size_mm=$CNISP_PATCH_SIZE_MM" \
         "mode=$SWEEP_DEGRADE_MODE" \
         "modality=$SWEEP_MODALITY" \
-        "sweep_stamp=$(_sig_file "${WORK_DIR}/prediction/.sweep.provenance")")"
+        "sweep_stamp=$(_sig_file "${WORK_DIR}/prediction/${EXP}/.sweep.provenance")")"
     local drift=0
     if [[ $FORCE -eq 0 ]] && _eye_dir_complete "$step01_dir"; then
         if _provenance_fresh "$stamp" "$sig"; then
@@ -981,34 +1033,37 @@ phase_cnisp_prep_dataset835_sparse() {
     python3 "$REPO_ROOT/nnunet/engine/build_dataset835_sparse_patches.py" \
             --config "$CONFIG" \
             --patch-size "$CNISP_PATCH_SIZE_MM" \
+            --experiment "$EXP" \
             "${force_args[@]}"
     _write_provenance "$stamp" "$sig"
 }
 
 phase_cnisp_infer_nnunet_pred() {
     echo ""
-    echo "[phase] cnisp-infer-nnunet-pred (run_tag=nnunet_pred) -"
-    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/nnunet_pred"
+    echo "[phase] cnisp-infer-nnunet-pred (experiment=$EXP run_tag=nnunet_pred) -"
+    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$EXP/nnunet_pred"
     local stamp="$run_dir/.provenance"
     # Signature: CNISP model identity (name + checkpoint stat, so a retrain
     # under the SAME name still invalidates) + inference code + the test
     # config + the two upstream dataset835 provenance stamps (chained: any
-    # change to the GT or sparse deployment patches propagates here).
+    # change to the GT or sparse deployment patches propagates here). The
+    # sparse stamp is exp-specific so thin vs thick deployment inputs are
+    # tracked independently.
     local sig
     sig="$(printf '%s\n' \
         "phase=cnisp-infer-nnunet-pred" \
-        "$(_cnisp_model_sig "nnunet_pred")" \
+        "$(_cnisp_model_sig "nnunet_pred" "$EXP")" \
         "ds835_gt_stamp=$(_sig_file "$CNISP_ALIGNED_DIR/.dataset835_gt.provenance")" \
-        "ds835_sparse_stamp=$(_sig_file "$CNISP_ALIGNED_DIR/.dataset835_sparse.provenance")")"
+        "ds835_sparse_stamp=$(_sig_file "$CNISP_ALIGNED_DIR/.dataset835_sparse_${EXP}.provenance")")"
     if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \
-        && _skip_cnisp_infer_if_done "nnunet_pred"; then
+        && _skip_cnisp_infer_if_done "nnunet_pred" "$EXP"; then
         return 0
     fi
     if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
         echo "  provenance CHANGED -> re-running CNISP nnunet_pred inference:"
         _explain_drift "$stamp" "$sig"
     fi
-    _run_cnisp_infer_for "nnunet_pred" "nnunet_pred"
+    _run_cnisp_infer_for "nnunet_pred" "nnunet_pred" "$EXP"
     _write_provenance "$stamp" "$sig"
 }
 
@@ -1051,8 +1106,22 @@ phase_cnisp_infer_realpair() {
         echo "  -> run 'cnisp-prep-realpair' first. Skipping."
         return 0
     fi
-    _skip_cnisp_infer_if_done "real_pair" && return 0
-    _run_cnisp_infer_for "real_pair" "real_pair"
+    # Model/code provenance, identical to atlas_gt / nnunet_pred: a model
+    # rename, retrain (same name) or inference-code change invalidates the
+    # skip so we never serve a stale (e.g. v4) reconstruction under v5.
+    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/real/real_pair"
+    local stamp="$run_dir/.provenance"
+    local sig; sig="$(_cnisp_model_sig "real_pair" "real")"
+    if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \
+        && _skip_cnisp_infer_if_done "real_pair" "real"; then
+        return 0
+    fi
+    if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
+        echo "  provenance CHANGED -> re-running CNISP real_pair inference:"
+        _explain_drift "$stamp" "$sig"
+    fi
+    _run_cnisp_infer_for "real_pair" "real_pair" "real"
+    _write_provenance "$stamp" "$sig"
 }
 
 phase_cnisp_native_remap() {
@@ -1076,10 +1145,11 @@ phase_cnisp_native_remap() {
     fi
     for i in "${!CNISP_RUN_TAGS[@]}"; do
         local run_tag="${CNISP_RUN_TAGS[$i]}"
-        echo "  ── native remap for run_tag=$run_tag ──"
+        echo "  ── native remap for experiment=$EXP run_tag=$run_tag ──"
         # shellcheck disable=SC2086  # force_flag is intentionally word-split
         python3 "$REPO_ROOT/nnunet/engine/build_cnisp_native_sweep.py" \
-                --config "$CONFIG" --run-tag "$run_tag" $force_flag
+                --config "$CONFIG" --run-tag "$run_tag" \
+                --experiment "$EXP" $force_flag
     done
 }
 
@@ -1088,14 +1158,11 @@ phase_cnisp_viz() {
     echo "[phase] cnisp-viz -------------------------------------"
     for i in "${!CNISP_RUN_TAGS[@]}"; do
         local run_tag="${CNISP_RUN_TAGS[$i]}"
-        echo "  viz for run_tag=$run_tag"
-        if [[ -n "$TEST_CONFIG" ]]; then
-            bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_04_visualization.sh" \
-                 "$TEST_CONFIG" "$run_tag"
-        else
-            bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_04_visualization.sh" \
-                 "" "$run_tag"
-        fi
+        echo "  viz for experiment=$EXP run_tag=$run_tag"
+        local cfg_arg=""
+        [[ -n "$TEST_CONFIG" ]] && cfg_arg="$TEST_CONFIG"
+        bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_04_visualization.sh" \
+             "$cfg_arg" "$run_tag" "$EXP"
     done
 }
 
@@ -1105,7 +1172,7 @@ _require_native_masks() {
     # canonical mask producer is ``cnisp-native-remap`` (or, as a side
     # effect, a fresh ``cnisp-infer`` run).
     local run_tag="$1"
-    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$run_tag"
+    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$EXP/$run_tag"
     local found=0
     # shellcheck disable=SC2231  # we want word-splitting + glob expansion
     for d in "$run_dir"/native_space_step_*; do
@@ -1151,15 +1218,16 @@ phase_compare() {
     for i in "${!CNISP_RUN_TAGS[@]}"; do
         local run_tag="${CNISP_RUN_TAGS[$i]}"
         local method="${CNISP_METHOD_LABELS[$i]}"
-        echo "  ─── compare for run_tag=$run_tag (method=$method) ───"
+        echo "  ─── compare for experiment=$EXP run_tag=$run_tag (method=$method) ───"
 
         # 1) Per-source paired Dice CSV/TXT for THIS run.
         python3 "$REPO_ROOT/nnunet/compare_native.py" \
-                --config "$CONFIG" --cnisp-run-tag "$run_tag"
+                --config "$CONFIG" --cnisp-run-tag "$run_tag" \
+                --experiment "$EXP"
 
-        local paired_csv="$WORK_DIR/comparison/paired_per_source__${run_tag}.csv"
-        local cnisp_viz_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$run_tag"
-        local paired_viz_dir="$WORK_DIR/comparison/viz/paired__${run_tag}"
+        local paired_csv="$WORK_DIR/comparison/paired_per_source__${run_tag}__${EXP}.csv"
+        local cnisp_viz_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$EXP/$run_tag"
+        local paired_viz_dir="$WORK_DIR/comparison/viz/paired__${run_tag}__${EXP}"
 
         # 2) CNISP-only by-eff_res bundle for THIS run.
         python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
@@ -1208,16 +1276,26 @@ phase_compare() {
                 break
             fi
         done
-        local canonical_csv="$WORK_DIR/comparison/paired_per_source__${canonical_tag}.csv"
-        local nnunet_viz_dir="$WORK_DIR/comparison/viz/nnUNet-sparse"
+        local canonical_csv="$WORK_DIR/comparison/paired_per_source__${canonical_tag}__${EXP}.csv"
+        local nnunet_viz_dir="$WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}"
 
-        echo "  ─── nnUNet-sparse standalone (canonical CSV = ${canonical_tag}) ───"
+        echo "  ─── nnUNet-sparse standalone (experiment=$EXP canonical CSV = ${canonical_tag}) ───"
         python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
                 --config "$CONFIG" \
                 --method nnUNet-sparse \
                 --paired-csv "$canonical_csv" \
                 --out-dir "$nnunet_viz_dir"
     fi
+
+    # ── Cross-experiment aggregation (thin / thick / real overlaid) ──────
+    # Auto-discovers every paired_per_source__<run_tag>__<exp>.csv present
+    # in comparison/ and (re)builds the side-by-side view, so after thin it
+    # shows 1 experiment and grows as thick/real CSVs appear. Cheap, always
+    # re-runs with the per-experiment compare above.
+    echo "  ─── cross-experiment summary (scanning all __<exp> CSVs) ───"
+    python3 "$REPO_ROOT/nnunet/engine/build_experiment_summary.py" \
+            --config "$CONFIG" \
+            --comparison-dir "$WORK_DIR/comparison"
 }
 
 # ── Dispatch ─────────────────────────────────────────────────
@@ -1246,39 +1324,39 @@ echo "============================================================"
 printf "Pipeline complete in %ds. Phases run: %s\n" \
     "$((END_TS - START_TS))" "${PHASES[*]}"
 echo ""
-echo "Where to look for results:"
+echo "Where to look for results (experiment=$EXP):"
 echo "  CNISP artifacts (per run_tag):"
 for i in "${!CNISP_RUN_TAGS[@]}"; do
     rt="${CNISP_RUN_TAGS[$i]}"
     ml="${CNISP_METHOD_LABELS[$i]}"
-    base="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$rt"
-    echo "    ── $rt ($ml) ──"
+    base="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$EXP/$rt"
+    echo "    ── $EXP/$rt ($ml) ──"
     echo "    $base/recon_layout.txt"
     echo "    $base/cross_resolution_analysis/"
     echo "    $base/native_sweep_summary.json"
     echo "    $base/sweep_results.pkl"
-    echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$rt/${ml}_recon_summary.png"
+    echo "    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/viz/$EXP/$rt/${ml}_recon_summary.png"
 done
 echo "  nnUNet sparse-CT sweep (per-step preds):"
-echo "    $WORK_DIR/prediction/sparse_step_XX_native/    (iso->native, Dice target)"
-echo "    $WORK_DIR/prediction/sparse_step_XX_upsampled/ (iso 0.5 plan spacing)"
-echo "    $WORK_DIR/prediction/sweep_manifest.json"
+echo "    $WORK_DIR/prediction/$EXP/sparse_step_XX_native/    (iso->native, Dice target)"
+echo "    $WORK_DIR/prediction/$EXP/sparse_step_XX_upsampled/ (iso 0.5 plan spacing)"
+echo "    $WORK_DIR/prediction/$EXP/sweep_manifest.json"
 echo "  nnUNet on SMORE'd CTs (mask only):"
 echo "    $WORK_DIR/prediction/smore/"
 echo "  Paired comparison tables (one set per CNISP run):"
 for i in "${!CNISP_RUN_TAGS[@]}"; do
     rt="${CNISP_RUN_TAGS[$i]}"
-    echo "    $WORK_DIR/comparison/paired_per_source__${rt}.csv"
-    echo "    $WORK_DIR/comparison/paired_summary__${rt}.csv"
-    echo "    $WORK_DIR/comparison/paired_summary__${rt}.txt"
-    echo "    $WORK_DIR/comparison/viz/paired__${rt}/paired_dice_vs_eff_res.png"
+    echo "    $WORK_DIR/comparison/paired_per_source__${rt}__${EXP}.csv"
+    echo "    $WORK_DIR/comparison/paired_summary__${rt}__${EXP}.csv"
+    echo "    $WORK_DIR/comparison/paired_summary__${rt}__${EXP}.txt"
+    echo "    $WORK_DIR/comparison/viz/paired__${rt}__${EXP}/paired_dice_vs_eff_res.png"
     echo "      (+ paired_{overall,per_class,delta}_dice_vs_eff_res.png "
     echo "         + paired_summary_by_eff_res.csv -- the head-to-head view)"
 done
-echo "  nnUNet-sparse standalone bundle (run-tag-agnostic; rendered once):"
-echo "    $WORK_DIR/comparison/viz/nnUNet-sparse/nnUNet-sparse_recon_summary.png"
+echo "  nnUNet-sparse standalone bundle (run-tag-agnostic; per experiment):"
+echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}/nnUNet-sparse_recon_summary.png"
 # real_pair line is opt-in; only point at it when its run dir exists.
-_rp_run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/real_pair"
+_rp_run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/real/real_pair"
 if [[ -d "$_rp_run_dir" ]]; then
     echo "  Real paired-data line (Turella sim3; post-hoc rigid registration):"
     echo "    $_rp_run_dir/test_results.csv     (per-case Dice vs hi-res GT)"

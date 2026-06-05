@@ -43,17 +43,22 @@ MODEL_NAME="orbital_ad_v5"
 # the corresponding fields in the test yaml. When unset, the test yaml
 # wins; the yaml's own default keeps the ceiling-curve behaviour.
 #
-#   ./run_03_test.sh [test_yaml] [test_label_source] [run_tag]
+#   ./run_03_test.sh [test_yaml] [test_label_source] [run_tag] [experiment]
 #
 # Examples:
 #   ./run_03_test.sh                                   # ceiling (atlas_gt)
-#   ./run_03_test.sh "" nnunet_pred nnunet_pred        # deployment curve
-#   ./run_03_test.sh "" real_pair  real_pair           # Turella sim3 (real
+#   ./run_03_test.sh "" nnunet_pred nnunet_pred thin   # deployment curve (thin)
+#   ./run_03_test.sh "" atlas_gt    atlas_gt    thick  # ceiling (thick)
+#   ./run_03_test.sh "" real_pair  real_pair    real   # Turella sim3 (real
 #                                                      # paired data; needs
 #                                                      # build_realpair_patches.py
 #                                                      # to have run first)
+# experiment (thin|thick|real) is the runs/<experiment>/ directory layer so
+# different simulation strategies don't overwrite each other; for thin/thick
+# it also drives the sweep degradation. When unset, the test yaml wins.
 TEST_LABEL_SOURCE="${2:-}"
 RUN_TAG="${3:-}"
+EXPERIMENT="${4:-}"
 
 # ── Run ───────────────────────────────────────────────────────
 echo "============================================================"
@@ -64,11 +69,13 @@ echo "  Test config:         $TEST_YAML"
 echo "  Model:               $MODEL_NAME"
 [[ -n "$TEST_LABEL_SOURCE" ]] && echo "  test_label_source:   $TEST_LABEL_SOURCE"
 [[ -n "$RUN_TAG"           ]] && echo "  run_tag:             $RUN_TAG"
+[[ -n "$EXPERIMENT"        ]] && echo "  experiment:          $EXPERIMENT"
 echo "============================================================"
 
 EXTRA=()
 [[ -n "$TEST_LABEL_SOURCE" ]] && EXTRA+=(--test-label-source "$TEST_LABEL_SOURCE")
 [[ -n "$RUN_TAG"           ]] && EXTRA+=(--run-tag "$RUN_TAG")
+[[ -n "$EXPERIMENT"        ]] && EXTRA+=(--experiment "$EXPERIMENT")
 
 python3 "$PROJECT_ROOT/scripts/03_infer.py" \
     -p "$PATHS_YAML" \
@@ -82,7 +89,8 @@ echo "============================================================"
 echo "Step 3 COMPLETE."
 echo ""
 RUN_TAG_DISPLAY="${RUN_TAG:-<from test yaml; defaults to atlas_gt>}"
-echo "Outputs saved to: output_basedir/$MODEL_NAME/runs/$RUN_TAG_DISPLAY/"
+EXP_DISPLAY="${EXPERIMENT:-<thin, or real for real_pair>}"
+echo "Outputs saved to: output_basedir/$MODEL_NAME/runs/$EXP_DISPLAY/$RUN_TAG_DISPLAY/"
 echo "  inference_results.pkl       — primary picks (one per case), feeds map_to_native + 04_visualization"
 echo "  sweep_results.pkl           — full (case × step) sweep"
 echo "  test_results.csv            — per-(case, step) metrics (with eff_res_bucket column)"

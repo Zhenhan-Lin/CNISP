@@ -133,18 +133,43 @@ def _resolve_model_folder(cfg: Dict) -> Path:
     return model_folder
 
 
+def _resolve_folds(model_folder: Path, folds_cfg, checkpoint_name: str):
+    """Map ``folds`` config to trained fold ids. 'best'=highest val Dice,
+    'all'=every trained fold, or an explicit list (untrained ones dropped)."""
+    avail = sorted(int(d.name[5:]) for d in Path(model_folder).glob("fold_*")
+                   if (d / checkpoint_name).is_file())
+    if not avail:
+        raise SystemExit(f"[predict_sparse_iso] no trained fold under {model_folder}")
+    if folds_cfg == "all":
+        return tuple(avail)
+    if folds_cfg == "best":
+        def _dice(f):
+            s = Path(model_folder) / f"fold_{f}" / "validation" / "summary.json"
+            try:
+                return json.loads(s.read_text())["foreground_mean"]["Dice"]
+            except Exception:
+                return -1.0
+        return (max(avail, key=_dice),)
+    req = [folds_cfg] if isinstance(folds_cfg, int) else [int(f) for f in folds_cfg]
+    keep = tuple(f for f in req if f in avail)
+    if not keep:
+        raise SystemExit(f"[predict_sparse_iso] requested folds {req} not trained "
+                         f"(available {avail})")
+    return keep
+
+
 def _init_predictor(cfg: Dict):
     gpu_id = cfg.get("gpu_id", 0)
     # Respect the config GPU the same way the shell scripts do.
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", str(gpu_id))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    folds = cfg.get("folds", [0])
-    if not isinstance(folds, (list, tuple)):
-        folds = [folds]
-    folds = tuple(int(f) for f in folds)
-
     model_folder = _resolve_model_folder(cfg)
+    folds = _resolve_folds(
+        model_folder,
+        cfg.get("folds", [0]),
+        cfg.get("checkpoint_name", "checkpoint_final.pth"),
+    )
     predictor = nnUNetPredictor(
         tile_step_size=0.5,
         use_gaussian=True,
@@ -407,15 +432,24 @@ def main() -> int:
     ap.add_argument("--config", default="nnunet/configs.yaml")
     ap.add_argument("--force", action="store_true",
                     help="Recompute masks even if all three outputs exist.")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default="thin",
+                    help="Experiment directory layer. Reads sparse inputs "
+                         "from input/<experiment>/ and writes preds to "
+                         "prediction/<experiment>/ so thin/thick sweeps "
+                         "coexist. The shared native/ dense baseline is NOT "
+                         "exp-scoped.")
     args = ap.parse_args()
 
     cfg = load_yaml(Path(args.config))
     work_dir = Path(cfg["work_dir"])
+    experiment = args.experiment
 
-    sparse_manifest = work_dir / "input" / "sparse_manifest.json"
+    sparse_manifest = work_dir / "input" / experiment / "sparse_manifest.json"
     if not sparse_manifest.exists():
         print(f"[predict_sparse_iso] missing {sparse_manifest} -- run "
-              f"nnunet/data_prep/sparsify_inputs.py first.", file=sys.stderr)
+              f"nnunet/data_prep/sparsify_inputs.py --experiment "
+              f"{experiment} first.", file=sys.stderr)
         return 2
     with open(sparse_manifest) as f:
         sparse_m = json.load(f)
@@ -430,8 +464,9 @@ def main() -> int:
 
     input_root = work_dir / "input"
     pred_root = work_dir / "prediction"
-    dense_pred_dir = pred_root / "native"
-    pred_root.mkdir(parents=True, exist_ok=True)
+    dense_pred_dir = pred_root / "native"          # shared dense baseline
+    sparse_pred_root = pred_root / experiment       # exp-scoped sparse sweep
+    sparse_pred_root.mkdir(parents=True, exist_ok=True)
 
     predictor, torch, convert_fn, rw = _init_predictor(cfg)
     transpose_forward = list(predictor.plans_manager.transpose_forward)
@@ -471,8 +506,8 @@ def main() -> int:
     # ── step_01: dense baseline ────────────────────────────────
     # _native/01 reuses the shared dense pred; _upsampled/01 is the genuine
     # iso prediction of the native CT (same predictor path as the sweep).
-    up_01 = pred_root / "sparse_step_01_upsampled"
-    native_01 = pred_root / "sparse_step_01_native"
+    up_01 = sparse_pred_root / "sparse_step_01_upsampled"
+    native_01 = sparse_pred_root / "sparse_step_01_native"
     step_01_map: Dict[str, str] = {}
     step_01_ids = sorted(src_to_path)
     for i, sid in enumerate(step_01_ids, 1):
@@ -529,9 +564,9 @@ def main() -> int:
     # ── steps >= 2: sparse-CT sweep ─────────────────────────────
     for step_tag in sorted(sparse_m.get("by_step", {}).keys()):
         step = int(step_tag)
-        sparse_dir = pred_root / f"sparse_step_{step_tag}"
-        up_dir = pred_root / f"sparse_step_{step_tag}_upsampled"
-        native_dir = pred_root / f"sparse_step_{step_tag}_native"
+        sparse_dir = sparse_pred_root / f"sparse_step_{step_tag}"
+        up_dir = sparse_pred_root / f"sparse_step_{step_tag}_upsampled"
+        native_dir = sparse_pred_root / f"sparse_step_{step_tag}_native"
         step_map: Dict[str, str] = {}
         step_entries = sorted(sparse_m["by_step"][step_tag].items())
         n_step = len(step_entries)
@@ -657,9 +692,9 @@ def main() -> int:
             print(f"[predict_sparse_iso] step_{step_tag}: finished "
                   f"{len(step_map)} source(s)", flush=True)
 
-    sweep_manifest_path = pred_root / "sweep_manifest.json"
+    sweep_manifest_path = sparse_pred_root / "sweep_manifest.json"
     with open(sweep_manifest_path, "w") as f:
-        json.dump({"steps": out_steps}, f, indent=2)
+        json.dump({"experiment": experiment, "steps": out_steps}, f, indent=2)
 
     if issues:
         print(f"\n[predict_sparse_iso] {len(issues)} issue(s):", file=sys.stderr)

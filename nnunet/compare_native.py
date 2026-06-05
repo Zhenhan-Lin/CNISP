@@ -297,15 +297,22 @@ def main() -> int:
     ap.add_argument("--work-dir", default=None)
     ap.add_argument("--cnisp-run-tag", default="atlas_gt",
                     help="Which CNISP run to compare against (subdir under "
-                         "output_basedir/<model>/runs/). Default atlas_gt "
-                         "preserves the ceiling-curve comparison.")
+                         "output_basedir/<model>/runs/<experiment>/). Default "
+                         "atlas_gt preserves the ceiling-curve comparison.")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default="thin",
+                    help="Experiment directory layer (thin|thick|real). "
+                         "Reads CNISP masks from runs/<experiment>/<run-tag>/ "
+                         "and nnUNet sparse preds from prediction/<experiment>/"
+                         ", and exp-suffixes the output CSVs so thin/thick "
+                         "comparisons coexist.")
     ap.add_argument("--cnisp-method-label", default=None,
                     help="Override the CNISP method label. If unset, look up "
                          "cnisp_runs_to_compare in the config.")
     ap.add_argument("--out-suffix", default=None,
                     help="Suffix for output filenames. Default is "
-                         "'__<cnisp_run_tag>' so multiple runs do not "
-                         "collide.")
+                         "'__<cnisp_run_tag>__<experiment>' so multiple runs "
+                         "do not collide.")
     ap.add_argument("--strict-shape", action="store_true",
                     help="Fail if a prediction's shape differs from GT "
                          "(default: skip the source with a warning).")
@@ -317,14 +324,16 @@ def main() -> int:
     model_name = args.model_name or cfg["cnisp_model_name"]
     work_dir = Path(args.work_dir or cfg["work_dir"])
     run_tag = str(args.cnisp_run_tag)
+    experiment = str(args.experiment)
     cnisp_method_label = (
         args.cnisp_method_label or _lookup_method_label(cfg, run_tag)
     )
     out_suffix = (args.out_suffix if args.out_suffix is not None
-                  else f"__{run_tag}")
+                  else f"__{run_tag}__{experiment}")
 
     output_base = (
-        Path(cnisp_paths["output_basedir"]) / model_name / "runs" / run_tag
+        Path(cnisp_paths["output_basedir"]) / model_name
+        / "runs" / experiment / run_tag
     )
     meta_dir = Path(cnisp_paths["aligned_dir"]) / cnisp_paths.get(
         "metadata_dirname", "metadata"
@@ -332,12 +341,14 @@ def main() -> int:
     casefiles_dir = Path(cnisp_paths["casefiles_dir"])
     test_cases = casefiles_dir / "test_cases.txt"
 
-    nnunet_sweep_manifest = work_dir / "prediction" / "sweep_manifest.json"
+    nnunet_sweep_manifest = (
+        work_dir / "prediction" / experiment / "sweep_manifest.json"
+    )
     if not nnunet_sweep_manifest.exists():
         print(f"[compare_native] nnUNet sweep manifest not found: "
               f"{nnunet_sweep_manifest}", file=sys.stderr)
-        print(f"  Did you run nnunet/engine/upsample_sparse_preds.py? "
-              f"(`nnunet-predict-sweep` phase)", file=sys.stderr)
+        print(f"  Did you run the `nnunet-predict-sweep` phase for "
+              f"experiment={experiment}?", file=sys.stderr)
         return 2
 
     # The CNISP run's manifest tells us whether it was a deployment-mode
@@ -361,6 +372,7 @@ def main() -> int:
     bucket_edges = list(cfg.get("summary_bucket_edges_mm",
                                 [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]))
 
+    print(f"[compare_native] experiment               = {experiment}")
     print(f"[compare_native] run_tag                  = {run_tag}")
     print(f"[compare_native] cnisp method label       = {cnisp_method_label}")
     print(f"[compare_native] cnisp test_label_source  = {cnisp_test_label_source}")
@@ -472,7 +484,7 @@ def main() -> int:
     # resampler (NOT the old NN slice-duplication). The matching
     # iso-spacing prediction lives in ``sparse_step_{XX}_upsampled/``;
     # Dice uses the native one so GT is never resampled.
-    nn_pred_root = work_dir / "prediction"
+    nn_pred_root = work_dir / "prediction" / experiment
     with open(nnunet_sweep_manifest) as f:
         nn_m = json.load(f)
     nnunet_step_paths: Dict[int, Dict[str, Path]] = {}

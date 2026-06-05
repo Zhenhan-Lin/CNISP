@@ -61,8 +61,17 @@ def main():
     parser.add_argument(
         "--run-tag", default=None,
         help=("Override run_tag from the test yaml. Output lands at "
-              "output_basedir/<model_name>/runs/<run_tag>/. Defaults to "
-              "'atlas_gt' which preserves the ceiling-curve layout."),
+              "output_basedir/<model_name>/runs/<experiment>/<run_tag>/. "
+              "Defaults to 'atlas_gt' which preserves the ceiling-curve layout."),
+    )
+    parser.add_argument(
+        "--experiment", default=None, choices=["thin", "thick", "real"],
+        help=("Simulation-strategy directory layer under runs/. "
+              "thin = idealised point-sampling; thick = physical partial-"
+              "volume degradation; real = Turella sim3 real paired data. "
+              "When set for thin/thick it also drives the sweep degradation "
+              "(sweep_mode) so the applied degradation matches the folder. "
+              "Defaults: 'real' for real_pair, else sweep_mode (thin)."),
     )
     args = parser.parse_args()
 
@@ -80,6 +89,8 @@ def main():
         params["test_label_source"] = args.test_label_source
     if args.run_tag is not None:
         params["run_tag"] = args.run_tag
+    if args.experiment is not None:
+        params["experiment"] = args.experiment
 
     # infer_test_set writes inference_results.pkl + sweep_results.pkl itself
     infer_test_set(params)

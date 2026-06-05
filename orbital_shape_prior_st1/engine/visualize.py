@@ -557,13 +557,25 @@ def resolve_recon_dir(params: dict) -> Path:
             "params['output_basedir'] and params['model_name']."
         )
     run_tag = str(params.get("run_tag", "atlas_gt"))
-    tagged = Path(base) / name / "runs" / run_tag
+    # runs/<experiment>/<run_tag>/ (thin|thick|real). Resolve the experiment
+    # the same way build_run_layout does so the viewer points at the exact
+    # tree infer.py wrote.
+    from engine.test_label_sources import resolve_experiment  # local; avoid cycle
+    experiment = resolve_experiment(params)
+    tagged = Path(base) / name / "runs" / experiment / run_tag
     if tagged.exists():
         return tagged
+    # Backwards compatibility: pre-experiment-layer runs lived at
+    # runs/<run_tag>/ (no experiment dir), older still at <model>/.
+    legacy_runtag = Path(base) / name / "runs" / run_tag
+    if legacy_runtag.exists():
+        print(f"  [visualize] runs/{experiment}/{run_tag}/ not found; "
+              f"falling back to pre-experiment layout at {legacy_runtag}")
+        return legacy_runtag
     legacy = Path(base) / name
     if legacy.exists():
-        print(f"  [visualize] runs/{run_tag}/ not found; falling back to "
-              f"legacy layout at {legacy}")
+        print(f"  [visualize] runs/{experiment}/{run_tag}/ not found; "
+              f"falling back to legacy layout at {legacy}")
         return legacy
     # Neither layout exists yet -- caller will get the "recon_dir does
     # not exist" message they expect.

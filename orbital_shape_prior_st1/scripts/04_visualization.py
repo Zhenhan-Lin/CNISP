@@ -52,8 +52,13 @@ def main():
     parser.add_argument(
         "--run-tag", default=None,
         help=("Visualize a specific run_tag under "
-              "output_basedir/<model_name>/runs/<run_tag>/. Defaults to "
-              "the value from the test yaml (atlas_gt if unset)."),
+              "output_basedir/<model_name>/runs/<experiment>/<run_tag>/. "
+              "Defaults to the value from the test yaml (atlas_gt if unset)."),
+    )
+    parser.add_argument(
+        "--experiment", default=None, choices=["thin", "thick", "real"],
+        help=("Experiment (simulation-strategy) directory layer under runs/. "
+              "Defaults: 'real' for real_pair, else sweep_mode (thin)."),
     )
     args = parser.parse_args()
 
@@ -76,6 +81,8 @@ def main():
         parser.error("Provide either -d/--recon_dir or -m/--model_name.")
     if args.run_tag is not None:
         params["run_tag"] = args.run_tag
+    if args.experiment is not None:
+        params["experiment"] = args.experiment
 
     visualize_results(params)
 

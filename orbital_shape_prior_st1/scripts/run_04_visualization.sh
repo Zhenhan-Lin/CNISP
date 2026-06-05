@@ -30,8 +30,10 @@ TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
 MODEL_NAME="orbital_ad_v5"
 # Optional 2nd arg: run_tag override (atlas_gt / nnunet_pred / ...).
-# When unset, the test yaml's run_tag wins (defaults to atlas_gt).
+# Optional 3rd arg: experiment (thin / thick / real) directory layer.
+# When unset, the test yaml's run_tag / sweep_mode win (defaults atlas_gt/thin).
 RUN_TAG="${2:-}"
+EXPERIMENT="${3:-}"
 
 echo "============================================================"
 echo "Step 4: Result Visualization"
@@ -40,10 +42,12 @@ echo "  Train config: $TRAIN_YAML"
 echo "  Test config:  $TEST_YAML"
 echo "  Model:        $MODEL_NAME"
 [[ -n "$RUN_TAG" ]] && echo "  run_tag:      $RUN_TAG"
+[[ -n "$EXPERIMENT" ]] && echo "  experiment:   $EXPERIMENT"
 echo "============================================================"
 
 EXTRA=()
 [[ -n "$RUN_TAG" ]] && EXTRA+=(--run-tag "$RUN_TAG")
+[[ -n "$EXPERIMENT" ]] && EXTRA+=(--experiment "$EXPERIMENT")
 
 python3 "$PROJECT_ROOT/scripts/04_visualization.py" \
     -p "$PATHS_YAML" \

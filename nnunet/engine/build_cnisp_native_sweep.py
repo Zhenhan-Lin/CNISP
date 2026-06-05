@@ -90,7 +90,11 @@ def main() -> int:
                     help="Override cnisp_model_name from config")
     ap.add_argument("--run-tag", default="atlas_gt",
                     help="Which CNISP run to backfill, under "
-                         "output_basedir/<model>/runs/<run-tag>/.")
+                         "output_basedir/<model>/runs/<experiment>/<run-tag>/.")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default="thin",
+                    help="Experiment directory layer (thin|thick|real) under "
+                         "runs/. Must match the experiment infer.py wrote.")
     ap.add_argument("--steps", default=None,
                     help="Optional comma-separated step_size whitelist "
                          "(default: every step present in sweep_results.pkl)")
@@ -104,7 +108,8 @@ def main() -> int:
 
     model_name = args.model_name or cfg["cnisp_model_name"]
     output_base = (
-        Path(cnisp_paths["output_basedir"]) / model_name / "runs" / args.run_tag
+        Path(cnisp_paths["output_basedir"]) / model_name
+        / "runs" / args.experiment / args.run_tag
     )
     sweep_pkl = output_base / "sweep_results.pkl"
     aligned_dir = Path(cnisp_paths["aligned_dir"])

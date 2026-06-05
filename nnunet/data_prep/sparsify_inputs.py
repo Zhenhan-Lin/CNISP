@@ -264,14 +264,27 @@ def main() -> int:
                          "before subsampling.")
     ap.add_argument("--modality", choices=["ct", "mri"], default="ct",
                     help="Imaging modality (determines kernel type for thick).")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default=None,
+                    help="Experiment directory layer for the sparse inputs: "
+                         "input/<experiment>/sparse_step_XX/. Defaults to "
+                         "--mode (thin/thick) so different degradation "
+                         "strategies coexist instead of overwriting each "
+                         "other. The shared native/ dense inputs are NOT "
+                         "exp-scoped (they are strategy-independent).")
     args = ap.parse_args()
 
     cfg = load_yaml(Path(args.config))
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
+    experiment = args.experiment or args.mode
     work_dir = Path(cfg["work_dir"])
     input_root = work_dir / "input"
     input_root.mkdir(parents=True, exist_ok=True)
+    # Sparse CTs (and their manifest) live under an experiment subdir so a
+    # thin sweep and a thick sweep never clobber each other's geometry.
+    sparse_root = input_root / experiment
+    sparse_root.mkdir(parents=True, exist_ok=True)
     cnisp_run_base = (
         Path(cnisp_paths["output_basedir"])
         / cfg["cnisp_model_name"]
@@ -309,6 +322,8 @@ def main() -> int:
     print(f"[sparsify_inputs] sources in sweep:   {len(by_source)}")
     print(f"[sparsify_inputs] sources in manifest:{len(manifest_in)}")
     print(f"[sparsify_inputs] work_dir:           {work_dir}")
+    print(f"[sparsify_inputs] experiment:         {experiment} "
+          f"(sparse root: {sparse_root})")
     print(f"[sparsify_inputs] step_axis from sweep rows: "
           f"{n_with_axis}/{len(sweep_axis_idx)} (rest fall back to "
           f"config cnisp_slice_step_axis = {canonical_axis})")
@@ -399,7 +414,7 @@ def main() -> int:
         base_spacing_axis = float(zooms[step_axis])
 
         for step in steps:
-            step_dir = input_root / f"sparse_step_{step:02d}"
+            step_dir = sparse_root / f"sparse_step_{step:02d}"
             step_dir.mkdir(parents=True, exist_ok=True)
             dst = step_dir / f"{sid}_0000.nii.gz"
 
@@ -495,7 +510,9 @@ def main() -> int:
     # Convert defaultdicts back to plain dict for JSON.
     out_manifest["by_step"] = dict(out_manifest["by_step"])
 
-    manifest_path = input_root / "sparse_manifest.json"
+    # Record the experiment so downstream readers can sanity-check.
+    out_manifest["experiment"] = experiment
+    manifest_path = sparse_root / "sparse_manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(out_manifest, f, indent=2)
 

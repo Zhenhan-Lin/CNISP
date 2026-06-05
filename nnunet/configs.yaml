@@ -11,7 +11,14 @@ dataset_name: PHOTON_CT_QAfiltered
 plan: nnUNetPlans
 configuration: 3d_fullres
 trainer: nnUNetTrainer
-folds: [0]
+# Fold selection for inference (resolved inline by predict_sparse_iso.py
+# and the run_predict_*.sh `_resolve_folds` helpers):
+#   best -> single fold with highest validation Dice (val/summary.json)
+#   all  -> ensemble of every trained fold (nnUNet's recommended setup)
+#   [..] -> explicit list/int; untrained folds are rejected loudly
+# NOTE: run_nnUNet_iso05.sh trains folds 1-4 (fold 0 collapsed), so a bare
+# [0] would now error instead of silently loading a missing checkpoint.
+folds: best
 gpu_id: 0
 
 # ── CNISP-side artefacts to reuse (no re-inference) ───────────────
