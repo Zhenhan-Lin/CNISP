@@ -16,9 +16,12 @@ trainer: nnUNetTrainer
 #   best -> single fold with highest validation Dice (val/summary.json)
 #   all  -> ensemble of every trained fold (nnUNet's recommended setup)
 #   [..] -> explicit list/int; untrained folds are rejected loudly
-# NOTE: run_nnUNet_iso05.sh trains folds 1-4 (fold 0 collapsed), so a bare
-# [0] would now error instead of silently loading a missing checkpoint.
-folds: best
+# NOTE: run_nnUNet_iso05.sh trains folds 1-4 (fold 0 collapsed). `best`
+# auto-selection has been unreliable here (the stale fold_0 dir on disk +
+# missing/late validation summaries can make it fall onto the worst fold),
+# so we PIN the known-best fold explicitly. fold 2 is the highest-Dice
+# trained fold for Dataset835; change this list to re-pin or to ensemble.
+folds: [2]
 gpu_id: 0
 
 # ── CNISP-side artefacts to reuse (no re-inference) ───────────────

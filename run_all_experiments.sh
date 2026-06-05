@@ -114,16 +114,21 @@ if [[ $PARALLEL -eq 1 ]]; then
     echo "############################################################"
     echo "# [run_all] thin (GPU=$GPU_THIN) || thick (GPU=$GPU_THICK)  [parallel]"
     echo "############################################################"
-    LOG_THIN="$REPO_ROOT/run_all_thin.log"
-    LOG_THICK="$REPO_ROOT/run_all_thick.log"
+    # One visible log per GPU under the CNISP root. We fully redirect each
+    # parallel pipeline to its own file (instead of letting both stream to
+    # the shared terminal) so the two GPUs' prints never interleave.
+    # Follow progress live with e.g.  tail -f run_thin_gpu${GPU_THIN}.log
+    LOG_THIN="$REPO_ROOT/run_thin_gpu${GPU_THIN}.log"
+    LOG_THICK="$REPO_ROOT/run_thick_gpu${GPU_THICK}.log"
     ( run_pipe --gpu "$GPU_THIN"  --config "$BASE_CONFIG"  "${PEREXP_PHASES[@]}" ) \
         >"$LOG_THIN" 2>&1 &
     pid_thin=$!
     ( run_pipe --gpu "$GPU_THICK" --config "$THICK_CONFIG" "${PEREXP_PHASES[@]}" ) \
         >"$LOG_THICK" 2>&1 &
     pid_thick=$!
-    echo "[run_all] thin  pid=$pid_thin  log=$LOG_THIN"
-    echo "[run_all] thick pid=$pid_thick log=$LOG_THICK"
+    echo "[run_all] thin  GPU=$GPU_THIN  pid=$pid_thin  log=$LOG_THIN"
+    echo "[run_all] thick GPU=$GPU_THICK pid=$pid_thick log=$LOG_THICK"
+    echo "[run_all] follow live:  tail -f \"$LOG_THIN\"   (and the thick log)"
     rc=0
     wait "$pid_thin"  || { echo "[run_all] THIN failed (see $LOG_THIN)"  >&2; rc=1; }
     wait "$pid_thick" || { echo "[run_all] THICK failed (see $LOG_THICK)" >&2; rc=1; }
