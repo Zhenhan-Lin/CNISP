@@ -56,6 +56,33 @@ from engine.test_label_sources import (
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _dump_pickle_atomic(obj, path: Path) -> None:
+    """Pickle ``obj`` to ``path`` atomically (temp file + os.replace).
+
+    A direct ``pickle.dump`` to the final path leaves a TRUNCATED file if
+    the write fails midway (e.g. disk full), which then poisons every
+    downstream reader. Writing to a sibling temp file and renaming means the
+    canonical path is only ever the previous valid file or the new complete
+    one -- never a partial dump.
+    """
+    import os
+
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with open(tmp, "wb") as f:
+            pickle.dump(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def _autocast_dtype() -> torch.dtype:
     """
     Pick the best mixed-precision dtype for the current GPU.
@@ -816,10 +843,13 @@ def infer_test_set(params):
     #     consumed by map_to_native.py and downstream visualization
     # sweep_results.pkl     : full per-(case, step) sweep, used by
     #     scripts/04_visualization.py and by nnunet/compare_native.py
-    with open(output_dir / "inference_results.pkl", "wb") as f:
-        pickle.dump(primary_results, f)
-    with open(output_dir / "sweep_results.pkl", "wb") as f:
-        pickle.dump(all_results, f)
+    #
+    # Write atomically (temp file + os.replace) so a disk-full / crashed
+    # dump can never leave a TRUNCATED canonical pickle behind -- the old
+    # valid file (or nothing) survives instead, and downstream consumers
+    # won't hit "UnpicklingError: pickle data was truncated".
+    _dump_pickle_atomic(primary_results, output_dir / "inference_results.pkl")
+    _dump_pickle_atomic(all_results, output_dir / "sweep_results.pkl")
     print(f"\nPickled {len(primary_results)} primary results "
           f"and {len(all_results)} sweep rows under {output_dir}")
 
