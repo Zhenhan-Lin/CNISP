@@ -739,14 +739,20 @@ phase_nnunet_predict_sweep() {
     local atlas_sweep="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/atlas_gt/sweep_results.pkl"
     # Signature: degrade mode/modality + the nnUNet model identity + the
     # upstream atlas_gt sweep (its hash changes whenever CNISP is retrained
-    # or the (source, step) set changes) => captures "new data / new model".
+    # or the (source, step) set changes) + the CODE that produces the masks
+    # (sparsify + predict_sparse_iso). Hashing the scripts means a bug fix
+    # to the sparse/native mask generation (e.g. the orientation fix) auto-
+    # invalidates the cache, so a plain re-run rebuilds instead of leaving
+    # stale masks for compare_native to read.
     local sig
     sig="$(printf '%s\n' \
         "phase=nnunet-predict-sweep" \
         "mode=$SWEEP_DEGRADE_MODE" \
         "modality=$SWEEP_MODALITY" \
         "nnunet=$(_nnunet_model_token)" \
-        "atlas_sweep=$(_sig_meta "$atlas_sweep")")"
+        "atlas_sweep=$(_sig_meta "$atlas_sweep")" \
+        "code_sparsify=$(_sig_file "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py")" \
+        "code_predict=$(_sig_file "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py")")"
     if [[ $FORCE -eq 0 && -f "$marker" ]]; then
         if _provenance_fresh "$stamp" "$sig"; then
             echo "  sweep manifest present and provenance matches:"
@@ -840,11 +846,39 @@ _skip_cnisp_infer_if_done() {
     return 1
 }
 
+_cnisp_model_sig() {
+    # Identity of the CNISP model+code that drive a latent-opt inference,
+    # for a given run_tag ($1). Captures "new model name", "retrained
+    # checkpoint (same name)", changed test config, and changed inference
+    # code (resolution_sweep / infer) -- so a plain re-run rebuilds instead
+    # of serving v4-era reconstructions under the v5 path.
+    local run_tag="$1"
+    local ckpt="$CNISP_MODEL_BASEDIR/$CNISP_MODEL_NAME/best_checkpoint.pth"
+    printf '%s\n' \
+        "run_tag=$run_tag" \
+        "cnisp_model=$CNISP_MODEL_NAME" \
+        "checkpoint=$(_sig_meta "$ckpt")" \
+        "test_cfg=$( [[ -n "$TEST_CONFIG" ]] && _sig_file "$TEST_CONFIG" || printf 'default' )" \
+        "code_infer=$(_sig_file "$REPO_ROOT/orbital_shape_prior_st1/engine/infer.py")" \
+        "code_sweep=$(_sig_file "$REPO_ROOT/orbital_shape_prior_st1/diagnostics/resolution_sweep.py")"
+}
+
 phase_cnisp_infer() {
     echo ""
     echo "[phase] cnisp-infer (run_tag=atlas_gt) ----------------"
-    _skip_cnisp_infer_if_done "atlas_gt" && return 0
+    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/atlas_gt"
+    local stamp="$run_dir/.provenance"
+    local sig; sig="$(_cnisp_model_sig "atlas_gt")"
+    if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \
+        && _skip_cnisp_infer_if_done "atlas_gt"; then
+        return 0
+    fi
+    if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
+        echo "  provenance CHANGED -> re-running CNISP atlas_gt inference:"
+        _explain_drift "$stamp" "$sig"
+    fi
     _run_cnisp_infer_for "atlas_gt" "atlas_gt"
+    _write_provenance "$stamp" "$sig"
 }
 
 _require_training_patch_size() {
@@ -956,17 +990,14 @@ phase_cnisp_infer_nnunet_pred() {
     echo "[phase] cnisp-infer-nnunet-pred (run_tag=nnunet_pred) -"
     local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/nnunet_pred"
     local stamp="$run_dir/.provenance"
-    local ckpt="$CNISP_MODEL_BASEDIR/$CNISP_MODEL_NAME/best_checkpoint.pth"
     # Signature: CNISP model identity (name + checkpoint stat, so a retrain
-    # under the SAME name still invalidates), the test config, and the two
-    # upstream dataset835 provenance stamps (chained: any change to the GT
-    # or sparse deployment patches propagates here).
+    # under the SAME name still invalidates) + inference code + the test
+    # config + the two upstream dataset835 provenance stamps (chained: any
+    # change to the GT or sparse deployment patches propagates here).
     local sig
     sig="$(printf '%s\n' \
         "phase=cnisp-infer-nnunet-pred" \
-        "cnisp_model=$CNISP_MODEL_NAME" \
-        "checkpoint=$(_sig_meta "$ckpt")" \
-        "test_cfg=$( [[ -n "$TEST_CONFIG" ]] && _sig_file "$TEST_CONFIG" || printf 'default' )" \
+        "$(_cnisp_model_sig "nnunet_pred")" \
         "ds835_gt_stamp=$(_sig_file "$CNISP_ALIGNED_DIR/.dataset835_gt.provenance")" \
         "ds835_sparse_stamp=$(_sig_file "$CNISP_ALIGNED_DIR/.dataset835_sparse.provenance")")"
     if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \

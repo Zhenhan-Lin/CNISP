@@ -142,12 +142,40 @@ def _detect_pred_offset(arr: np.ndarray, scheme: str) -> int:
 # ── Generic helpers ──────────────────────────────────────────────
 
 
-def _load_label_volume(p: Path) -> np.ndarray:
+def _load_label_volume_with_affine(p: Path) -> Tuple[np.ndarray, np.ndarray]:
     img = nib.load(str(p))
     arr = np.asarray(img.dataobj)
     if np.issubdtype(arr.dtype, np.floating):
         arr = np.rint(arr)
-    return arr.astype(np.int32, copy=False)
+    return arr.astype(np.int32, copy=False), np.asarray(img.affine, dtype=np.float64)
+
+
+def _load_label_volume(p: Path) -> np.ndarray:
+    arr, _ = _load_label_volume_with_affine(p)
+    return arr
+
+
+def _affines_consistent(
+    pred_aff: np.ndarray, gt_aff: np.ndarray,
+    *, rot_atol: float = 1e-3, trans_atol: float = 1e-2,
+) -> bool:
+    """True iff two affines describe the SAME voxel grid.
+
+    ``compare_native`` Dices element-wise on the raw arrays (affines are
+    dropped at load), which is only valid when voxel (i,j,k) maps to the
+    same physical point in pred and GT -- i.e. their affines match. We
+    check the 3x3 direction/spacing block tightly and the origin within a
+    sub-voxel tolerance (nibabel always returns RAS-based affines, so this
+    is storage-convention agnostic). A mismatch means a remap-back step
+    failed to restore orientation; we refuse to report a Dice computed on
+    misaligned voxels.
+    """
+    pred_aff = np.asarray(pred_aff, dtype=np.float64)
+    gt_aff = np.asarray(gt_aff, dtype=np.float64)
+    return (
+        np.allclose(pred_aff[:3, :3], gt_aff[:3, :3], atol=rot_atol, rtol=0.0)
+        and np.allclose(pred_aff[:3, 3], gt_aff[:3, 3], atol=trans_atol, rtol=0.0)
+    )
 
 
 def _binary_dice(pred: np.ndarray, gt: np.ndarray) -> float:
@@ -484,7 +512,7 @@ def main() -> int:
             print(f"  [skip] {sid}: GT not found at {gt_path}", file=sys.stderr)
             continue
         try:
-            gt = _load_label_volume(gt_path)
+            gt, gt_affine = _load_label_volume_with_affine(gt_path)
         except Exception as e:  # noqa: BLE001
             n_skipped_gt += 1
             print(f"  [skip] {sid}: failed to read GT ({e})", file=sys.stderr)
@@ -506,7 +534,7 @@ def main() -> int:
                       f"{nnunet_pred_path}", file=sys.stderr)
                 continue
             try:
-                nn_pred = _load_label_volume(nnunet_pred_path)
+                nn_pred, nn_aff = _load_label_volume_with_affine(nnunet_pred_path)
             except Exception as e:  # noqa: BLE001
                 n_skipped_nnunet += 1
                 print(f"  [skip nnUNet step{step:02d}] {sid}: load failed "
@@ -515,6 +543,17 @@ def main() -> int:
             if nn_pred.shape != gt.shape:
                 msg = (f"{sid} nnUNet step{step:02d}: pred shape "
                        f"{nn_pred.shape} != GT shape {gt.shape}")
+                if args.strict_shape:
+                    print(f"  [error] {msg}", file=sys.stderr)
+                    return 3
+                print(f"  [skip nnUNet step{step:02d}] {msg}", file=sys.stderr)
+                continue
+            if not _affines_consistent(nn_aff, gt_affine):
+                msg = (f"{sid} nnUNet step{step:02d}: pred/GT affine mismatch "
+                       f"(orientation not restored on remap). "
+                       f"pred axcodes={nib.aff2axcodes(nn_aff)} "
+                       f"GT axcodes={nib.aff2axcodes(gt_affine)}. Element-wise "
+                       f"Dice would be on misaligned voxels -- NOT comparing.")
                 if args.strict_shape:
                     print(f"  [error] {msg}", file=sys.stderr)
                     return 3
@@ -565,7 +604,7 @@ def main() -> int:
                       f"{cnisp_path}", file=sys.stderr)
                 continue
             try:
-                cn_pred = _load_label_volume(cnisp_path)
+                cn_pred, cn_aff = _load_label_volume_with_affine(cnisp_path)
             except Exception as e:  # noqa: BLE001
                 print(f"  [skip CNISP step{step:02d}] {sid}: load failed ({e})",
                       file=sys.stderr)
@@ -573,6 +612,17 @@ def main() -> int:
             if cn_pred.shape != gt.shape:
                 msg = (f"{sid} CNISP step{step:02d}: shape "
                        f"{cn_pred.shape} != GT {gt.shape}")
+                if args.strict_shape:
+                    print(f"  [error] {msg}", file=sys.stderr)
+                    return 3
+                print(f"  [skip CNISP step{step:02d}] {msg}", file=sys.stderr)
+                continue
+            if not _affines_consistent(cn_aff, gt_affine):
+                msg = (f"{sid} CNISP step{step:02d}: pred/GT affine mismatch "
+                       f"(orientation not restored on remap). "
+                       f"pred axcodes={nib.aff2axcodes(cn_aff)} "
+                       f"GT axcodes={nib.aff2axcodes(gt_affine)}. Element-wise "
+                       f"Dice would be on misaligned voxels -- NOT comparing.")
                 if args.strict_shape:
                     print(f"  [error] {msg}", file=sys.stderr)
                     return 3

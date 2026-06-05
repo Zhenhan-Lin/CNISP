@@ -85,6 +85,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -159,9 +160,83 @@ def _init_predictor(cfg: Dict):
         use_folds=folds,
         checkpoint_name=cfg.get("checkpoint_name", "checkpoint_final.pth"),
     )
+    # nnUNet's own reader/writer. CRITICAL: for .nii.gz this is SimpleITKIO,
+    # whose numpy axis order is the REVERSE of nibabel's. Every segmentation
+    # nnUNet returns is in this "as-read" order, so we must save the consumed
+    # masks through this same rw (round-trip-safe) rather than pairing an
+    # as-read array with a nibabel affine.
+    rw = predictor.plans_manager.image_reader_writer_class()
     print(f"[predict_sparse_iso] model:  {model_folder}")
     print(f"[predict_sparse_iso] folds:  {folds}  device: {device}")
-    return predictor, torch, _convert
+    print(f"[predict_sparse_iso] reader/writer: "
+          f"{type(rw).__name__} (nnUNet as-read axis order)")
+    return predictor, torch, _convert, rw
+
+
+def _detect_io2nib(rw, path) -> List[int]:
+    """Permutation ``p`` such that ``nib_array == rw_array.transpose(p)``.
+
+    i.e. nibabel spatial axis ``k`` corresponds to nnUNet-as-read axis
+    ``p[k]``. Resolved per file by matching (shape, spacing) between how
+    nibabel reads the file and how nnUNet's reader_writer reads it, so it is
+    correct regardless of which reader (SimpleITKIO reverses axes; NibabelIO
+    does not) and regardless of the scan's anatomical orientation.
+    """
+    nimg = nib.load(str(path))
+    nib_shape = tuple(int(x) for x in nimg.shape[:3])
+    nib_zooms = tuple(float(z) for z in nimg.header.get_zooms()[:3])
+    data, props = rw.read_images([str(path)])
+    rw_shape = tuple(int(x) for x in np.asarray(data).shape[-3:])
+    rw_spacing = tuple(float(z) for z in props["spacing"][:3])
+
+    perm: List[Optional[int]] = [None, None, None]
+    used: set = set()
+    for k in range(3):
+        cands = [
+            i for i in range(3)
+            if i not in used and rw_shape[i] == nib_shape[k]
+            and abs(rw_spacing[i] - nib_zooms[k]) <= 1e-3 * max(nib_zooms[k], 1e-6)
+        ]
+        if len(cands) != 1:
+            # Degenerate (≥2 axes share shape AND spacing): fall back to the
+            # pure-reversal (SimpleITK) or identity convention if it is at
+            # least shape-consistent; otherwise fail loudly.
+            if tuple(reversed(rw_shape)) == nib_shape:
+                return [2, 1, 0]
+            if rw_shape == nib_shape:
+                return [0, 1, 2]
+            raise SystemExit(
+                f"[predict_sparse_iso] cannot resolve nnUNet<->nibabel axis "
+                f"order for {path}: rw {rw_shape}/{rw_spacing} vs nibabel "
+                f"{nib_shape}/{nib_zooms}. Report so the map can be set."
+            )
+        perm[k] = cands[0]
+        used.add(cands[0])
+    assert sorted(p for p in perm if p is not None) == [0, 1, 2]
+    return [int(p) for p in perm]  # type: ignore[arg-type]
+
+
+def _rw_vec_to_nib(vec_rw: List, io2nib: List[int]) -> List:
+    """Reorder a per-axis vector from nnUNet-as-read order to nibabel order."""
+    return [vec_rw[io2nib[k]] for k in range(3)]
+
+
+def _native_geom(rw, ct_path, cache: Dict) -> Tuple:
+    """Cached ``(rw_shape, rw_spacing, rw_props, io2nib)`` for a native CT.
+
+    Read once per source via nnUNet's reader_writer (so shape/spacing are in
+    as-read order and ``rw_props`` carries the writer metadata) plus the
+    nibabel<->as-read permutation. Cached because every step of a source
+    re-uses the same native grid.
+    """
+    key = str(Path(ct_path).resolve())
+    if key not in cache:
+        data, props = rw.read_images([str(ct_path)])
+        rw_shape = tuple(int(x) for x in np.asarray(data).shape[-3:])
+        rw_spacing = tuple(float(z) for z in props["spacing"][:3])
+        io2nib = _detect_io2nib(rw, ct_path)
+        cache[key] = (rw_shape, rw_spacing, props, io2nib)
+    return cache[key]
 
 
 def _predict_logits(predictor, torch, input_file: Path):
@@ -207,16 +282,23 @@ def _save_uint8(arr: np.ndarray, affine: np.ndarray, dst: Path) -> None:
 
 
 def _iso_mask_from_logits(
-    logits, torch, transpose_backward: List[int],
+    logits, torch, transpose_backward: List[int], io2nib: List[int],
 ) -> np.ndarray:
-    """Plan-spacing prediction == argmax over classes, in file axis order.
+    """Plan-spacing prediction == argmax over classes, in NIBABEL axis order.
 
     Labels {0:bg, 1:ON, 2:recti, 3:globe, 4:fat} are consecutive and the
     dataset is not region-based, so a plain argmax reproduces nnUNet's
     label values without the region-merge logic.
+
+    ``transpose_backward`` brings the argmax from nnUNet internal order to
+    its as-read order; ``io2nib`` then brings it to nibabel order so it can
+    be paired with a nibabel affine (this iso mask is reference-only and is
+    saved with a hand-built affine, not through the reader_writer).
     """
     seg_internal = torch.argmax(logits, dim=0).cpu().numpy().astype(np.uint8)
-    return np.ascontiguousarray(seg_internal.transpose(transpose_backward))
+    seg_rw = seg_internal.transpose(transpose_backward)   # nnUNet as-read order
+    seg_nib = seg_rw.transpose(io2nib)                    # nibabel file order
+    return np.ascontiguousarray(seg_nib)
 
 
 def _iso_affine(
@@ -224,6 +306,7 @@ def _iso_affine(
     sparse_bbox_internal: List,
     plan_spacing_internal: List[float],
     transpose_forward: List[int],
+    io2nib: List[int],
 ) -> np.ndarray:
     """Affine for the cropped iso prediction in the sparse CT's world frame.
 
@@ -231,10 +314,16 @@ def _iso_affine(
     the plan (iso) spacing. Its voxel (0,0,0) is the crop's lower corner
     in sparse-voxel space; its direction matches the sparse CT with each
     axis rescaled to the plan spacing.
+
+    ``transpose_forward`` maps the internal bbox/spacing to nnUNet as-read
+    order; ``io2nib`` then maps to nibabel voxel order so the vectors line up
+    with ``sparse_affine`` (a nibabel affine whose columns are nibabel axes).
     """
     bbox_lower_internal = [lo for (lo, _hi) in sparse_bbox_internal]
-    bbox_lower_orig = _internal_to_original(bbox_lower_internal, transpose_forward)
-    p_orig = _internal_to_original(list(plan_spacing_internal), transpose_forward)
+    bbox_lower_rw = _internal_to_original(bbox_lower_internal, transpose_forward)
+    p_rw = _internal_to_original(list(plan_spacing_internal), transpose_forward)
+    bbox_lower_orig = _rw_vec_to_nib(bbox_lower_rw, io2nib)
+    p_orig = _rw_vec_to_nib(p_rw, io2nib)
 
     R = np.asarray(sparse_affine[:3, :3], dtype=np.float64)
     col_norms = np.linalg.norm(R, axis=0)
@@ -264,8 +353,10 @@ def _native_properties(
     Only the through-plane axis differs between the sparse and native
     grids (native has ``step`` times more slices over the same FOV), so we
     take the sparse crop bookkeeping and scale that one axis by ``step``.
-    All shape/bbox fields are in nnUNet's internal (transposed) order;
-    ``spacing`` is in file order (nnUNet transposes it forward itself).
+    ``native_shape_orig`` / ``native_zooms_orig`` / ``step_axis_orig`` are
+    in nnUNet's AS-READ (reader_writer) order, matching ``sparse_props``;
+    ``spacing`` is in that same file order (nnUNet transposes it forward
+    itself). Exact when transpose_forward is identity (see caller's guard).
 
     INVARIANT: This remap is exact only when the sparse input was produced
     with start=0 (first slice index = 0). All CNISP deployment paths
@@ -342,10 +433,35 @@ def main() -> int:
     dense_pred_dir = pred_root / "native"
     pred_root.mkdir(parents=True, exist_ok=True)
 
-    predictor, torch, convert_fn = _init_predictor(cfg)
+    predictor, torch, convert_fn, rw = _init_predictor(cfg)
     transpose_forward = list(predictor.plans_manager.transpose_forward)
     transpose_backward = list(predictor.plans_manager.transpose_backward)
     plan_spacing_internal = list(predictor.configuration_manager.spacing)
+    # Cache of per-source native geometry (rw shape/spacing/props + the
+    # nibabel<->as-read permutation), filled lazily and reused across steps.
+    geom_cache: Dict[str, Tuple] = {}
+
+    # The native-grid synthesis (_native_properties) keeps the sparse crop
+    # bookkeeping and scales the through-plane axis. nnUNet records bbox /
+    # shape_before_cropping in as-read order; this code is exact when the
+    # plan's transpose_forward is identity (internal order == as-read order),
+    # which is the usual 3d_fullres case. If it is NOT identity, the per-axis
+    # bbox/shape ordering must be re-verified against the native CT overlay.
+    if transpose_forward != [0, 1, 2]:
+        print(f"[predict_sparse_iso] WARNING: transpose_forward="
+              f"{transpose_forward} is non-identity. Native-grid masks assume "
+              f"as-read order == internal order; spot-check that each "
+              f"sparse_step_XX_native mask overlays its CT correctly.",
+              flush=True)
+
+    n_sparse_jobs = sum(
+        len(v) for v in sparse_m.get("by_step", {}).values()
+    )
+    print(f"[predict_sparse_iso] workload: step_01 iso up to "
+          f"{len(src_to_path)} source(s); sparse sweep "
+          f"{n_sparse_jobs} (source, step) pair(s). "
+          f"Each inference is silent for several minutes -- per-case "
+          f"progress is logged below.", flush=True)
 
     out_steps: Dict[str, Dict[str, str]] = {}
     n_inferred = 0
@@ -358,7 +474,8 @@ def main() -> int:
     up_01 = pred_root / "sparse_step_01_upsampled"
     native_01 = pred_root / "sparse_step_01_native"
     step_01_map: Dict[str, str] = {}
-    for sid in sorted(src_to_path):
+    step_01_ids = sorted(src_to_path)
+    for i, sid in enumerate(step_01_ids, 1):
         dense_pred = dense_pred_dir / f"{sid}.nii.gz"
         if not dense_pred.exists():
             issues.append(f"step_01 {sid}: no dense baseline at {dense_pred}")
@@ -374,6 +491,8 @@ def main() -> int:
         # _upsampled/01 -> iso prediction of the native CT.
         dst_iso = up_01 / f"{sid}.nii.gz"
         if dst_iso.exists() and not args.force:
+            print(f"[predict_sparse_iso] step_01 [{i}/{len(step_01_ids)}] "
+                  f"{sid}: _upsampled exists -- skip")
             continue
         native_input = input_root / "native" / f"{sid}_0000.nii.gz"
         if not native_input.exists():
@@ -381,16 +500,25 @@ def main() -> int:
                           f"iso mask skipped (native baseline still symlinked).")
             continue
         try:
+            t0 = time.time()
+            print(f"[predict_sparse_iso] step_01 [{i}/{len(step_01_ids)}] "
+                  f"{sid}: iso inference ...", flush=True)
             logits, props = _predict_logits(predictor, torch, native_input)
-            iso_arr = _iso_mask_from_logits(logits, torch, transpose_backward)
+            _, _, _, io2nib = _native_geom(rw, native_input, geom_cache)
+            iso_arr = _iso_mask_from_logits(
+                logits, torch, transpose_backward, io2nib,
+            )
             iso_aff = _iso_affine(
                 nib.load(str(native_input)).affine,
                 props["bbox_used_for_cropping"],
                 plan_spacing_internal,
                 transpose_forward,
+                io2nib,
             )
             _save_uint8(iso_arr, iso_aff, dst_iso)
             n_inferred += 1
+            print(f"[predict_sparse_iso] step_01 [{i}/{len(step_01_ids)}] "
+                  f"{sid}: done ({time.time() - t0:.1f}s)", flush=True)
         except Exception as e:  # noqa: BLE001
             issues.append(f"step_01 {sid}: iso inference failed ({e})")
     if step_01_map:
@@ -405,8 +533,12 @@ def main() -> int:
         up_dir = pred_root / f"sparse_step_{step_tag}_upsampled"
         native_dir = pred_root / f"sparse_step_{step_tag}_native"
         step_map: Dict[str, str] = {}
+        step_entries = sorted(sparse_m["by_step"][step_tag].items())
+        n_step = len(step_entries)
+        print(f"[predict_sparse_iso] step_{step_tag}: {n_step} source(s) "
+              f"-> sparse + _upsampled(iso) + _native", flush=True)
 
-        for sid, info in sorted(sparse_m["by_step"][step_tag].items()):
+        for j, (sid, info) in enumerate(step_entries, 1):
             sparse_input = Path(info["input"])
             if not sparse_input.exists():
                 issues.append(f"step_{step_tag} {sid}: sparse input missing "
@@ -420,6 +552,8 @@ def main() -> int:
                     and dst_iso.exists() and dst_native.exists()):
                 step_map[sid] = dst_native.name
                 n_skipped += 1
+                print(f"[predict_sparse_iso] step_{step_tag} [{j}/{n_step}] "
+                      f"{sid}: all outputs exist -- skip", flush=True)
                 continue
 
             ct_info = src_to_path.get(sid)
@@ -427,34 +561,52 @@ def main() -> int:
                 issues.append(f"step_{step_tag} {sid}: no ct_image_path in "
                               f"source_to_path.json")
                 continue
-            native_ct = nib.load(str(ct_info["ct_image_path"]))
-            native_shape = tuple(int(x) for x in native_ct.shape[:3])
-            native_zooms = tuple(float(z) for z in native_ct.header.get_zooms()[:3])
-            step_axis = int(info["step_axis"])
+            ct_path = ct_info["ct_image_path"]
+            # Native geometry in nnUNet's as-read order (the same convention
+            # every nnUNet segmentation comes back in). The sparse input was
+            # written from this CT preserving orientation, so they share the
+            # nibabel<->as-read permutation.
+            (native_rw_shape, native_rw_spacing,
+             native_rw_props, io2nib) = _native_geom(rw, ct_path, geom_cache)
+            # step_axis from the manifest is a nibabel voxel-axis index; map
+            # it to nnUNet's as-read order for the native-grid synthesis.
+            nib_step_axis = int(info["step_axis"])
+            rw_step_axis = io2nib[nib_step_axis]
 
             try:
+                t0 = time.time()
+                print(f"[predict_sparse_iso] step_{step_tag} [{j}/{n_step}] "
+                      f"{sid}: inference ...", flush=True)
                 logits, props = _predict_logits(predictor, torch, sparse_input)
 
-                # 1) sparse-grid mask (nnUNet's normal output).
+                # 1) sparse-grid mask (nnUNet's normal output). Saved through
+                # nnUNet's own writer so the as-read array and its geometry
+                # round-trip exactly (no nibabel/SimpleITK axis-order mix).
                 sparse_seg = _segmentation_from_logits(
                     convert_fn, predictor, logits.clone(), props,
                 )
-                sparse_img = nib.load(str(sparse_input))
-                if tuple(sparse_seg.shape) != tuple(int(x) for x in sparse_img.shape[:3]):
+                expected_sparse = tuple(int(x) for x in props["shape_before_cropping"])
+                if tuple(sparse_seg.shape) != expected_sparse:
                     issues.append(
                         f"step_{step_tag} {sid}: sparse mask shape "
-                        f"{sparse_seg.shape} != sparse input {sparse_img.shape[:3]}"
+                        f"{sparse_seg.shape} != as-read input {expected_sparse}"
                     )
                     continue
-                _save_uint8(sparse_seg, sparse_img.affine, dst_sparse)
+                dst_sparse.parent.mkdir(parents=True, exist_ok=True)
+                rw.write_seg(sparse_seg.astype(np.uint8), str(dst_sparse), props)
 
                 # 2) iso plan-spacing mask (genuine network output).
-                iso_arr = _iso_mask_from_logits(logits, torch, transpose_backward)
+                # Reference-only: saved with a hand-built nibabel affine, so
+                # the array is converted to nibabel order inside the helpers.
+                iso_arr = _iso_mask_from_logits(
+                    logits, torch, transpose_backward, io2nib,
+                )
                 iso_aff = _iso_affine(
-                    sparse_img.affine,
+                    nib.load(str(sparse_input)).affine,
                     props["bbox_used_for_cropping"],
                     plan_spacing_internal,
                     transpose_forward,
+                    io2nib,
                 )
                 _save_uint8(iso_arr, iso_aff, dst_iso)
 
@@ -469,32 +621,41 @@ def main() -> int:
                 # Legacy manifests pre-date the "start" field; default to 0
                 # (which was the only value ever produced).
                 _assert_start_zero(int(info.get("start", 0)))
+                # All geometry args are in nnUNet as-read order, matching the
+                # sparse props (also as-read), so _native_properties stays
+                # self-consistent. The shape assert below is a hard guard:
+                # if anything is mis-ordered the source is skipped loudly
+                # rather than silently writing a transposed Dice target.
                 native_props = _native_properties(
-                    props, native_shape, native_zooms,
-                    step, step_axis, transpose_forward,
+                    props, native_rw_shape, native_rw_spacing,
+                    step, rw_step_axis, transpose_forward,
                 )
                 native_seg = _segmentation_from_logits(
                     convert_fn, predictor, logits.clone(), native_props,
                 )
-                if tuple(native_seg.shape) != native_shape:
+                if tuple(native_seg.shape) != native_rw_shape:
                     issues.append(
                         f"step_{step_tag} {sid}: native mask shape "
-                        f"{native_seg.shape} != native CT {native_shape}. "
-                        f"Axis-order/scale bug -- NOT writing this source."
+                        f"{native_seg.shape} != native CT {native_rw_shape} "
+                        f"(as-read order). Axis-order/scale bug -- NOT writing."
                     )
                     continue
-                _save_uint8(native_seg, native_ct.affine, dst_native)
+                dst_native.parent.mkdir(parents=True, exist_ok=True)
+                rw.write_seg(native_seg.astype(np.uint8), str(dst_native),
+                             native_rw_props)
 
                 step_map[sid] = dst_native.name
                 n_inferred += 1
+                print(f"[predict_sparse_iso] step_{step_tag} [{j}/{n_step}] "
+                      f"{sid}: done ({time.time() - t0:.1f}s)", flush=True)
             except Exception as e:  # noqa: BLE001
                 issues.append(f"step_{step_tag} {sid}: inference failed ({e})")
                 continue
 
         if step_map:
             out_steps[step_tag] = step_map
-            print(f"[predict_sparse_iso] step_{step_tag}: {len(step_map)} "
-                  f"source(s) -> sparse + _upsampled(iso) + _native")
+            print(f"[predict_sparse_iso] step_{step_tag}: finished "
+                  f"{len(step_map)} source(s)", flush=True)
 
     sweep_manifest_path = pred_root / "sweep_manifest.json"
     with open(sweep_manifest_path, "w") as f:
