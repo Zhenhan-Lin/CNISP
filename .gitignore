@@ -25,4 +25,5 @@ nnunet/source_to_path.json
 results_when_model_learned_both_eyes
 nnUNet-master
 ECLARE-main
+.DS_Store
 main.py
