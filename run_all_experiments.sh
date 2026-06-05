@@ -114,8 +114,8 @@ if [[ $PARALLEL -eq 1 ]]; then
     echo "############################################################"
     echo "# [run_all] thin (GPU=$GPU_THIN) || thick (GPU=$GPU_THICK)  [parallel]"
     echo "############################################################"
-    LOG_THIN="$REPO_ROOT/.run_all_thin.log"
-    LOG_THICK="$REPO_ROOT/.run_all_thick.log"
+    LOG_THIN="$REPO_ROOT/run_all_thin.log"
+    LOG_THICK="$REPO_ROOT/run_all_thick.log"
     ( run_pipe --gpu "$GPU_THIN"  --config "$BASE_CONFIG"  "${PEREXP_PHASES[@]}" ) \
         >"$LOG_THIN" 2>&1 &
     pid_thin=$!
