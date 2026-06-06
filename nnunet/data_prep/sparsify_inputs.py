@@ -285,22 +285,32 @@ def main() -> int:
     # thin sweep and a thick sweep never clobber each other's geometry.
     sparse_root = input_root / experiment
     sparse_root.mkdir(parents=True, exist_ok=True)
-    cnisp_run_base = (
-        Path(cnisp_paths["output_basedir"])
-        / cfg["cnisp_model_name"]
-        / "runs"
-        / args.cnisp_sweep_source
+    cnisp_model_root = (
+        Path(cnisp_paths["output_basedir"]) / cfg["cnisp_model_name"]
     )
-    sweep_pkl = cnisp_run_base / "sweep_results.pkl"
-    # Backward compat: pre-Option-C runs wrote sweep_results.pkl directly
-    # under output_basedir/<model>/ without a runs/<run_tag>/ wrapper.
-    if not sweep_pkl.exists():
-        legacy = (Path(cnisp_paths["output_basedir"])
-                  / cfg["cnisp_model_name"] / "sweep_results.pkl")
-        if legacy.exists():
-            print(f"[sparsify_inputs] {sweep_pkl} not found; "
-                  f"falling back to legacy layout at {legacy}")
-            sweep_pkl = legacy
+    # CNISP writes sweep_results.pkl under runs/<experiment>/<run_tag>/. The
+    # experiment layer (thin|thick|real) keeps degradation strategies from
+    # clobbering each other -- see test_label_sources.build_run_layout. We
+    # MUST read from the same experiment-scoped path, then fall back to older
+    # layouts so pre-existing runs still resolve:
+    #   1. runs/<experiment>/<run_tag>/   (current, experiment-scoped)
+    #   2. runs/<run_tag>/                (pre-experiment-layer)
+    #   3. <model>/                       (pre-Option-C flat)
+    sweep_candidates = [
+        cnisp_model_root / "runs" / experiment / args.cnisp_sweep_source
+        / "sweep_results.pkl",
+        cnisp_model_root / "runs" / args.cnisp_sweep_source
+        / "sweep_results.pkl",
+        cnisp_model_root / "sweep_results.pkl",
+    ]
+    sweep_pkl = sweep_candidates[0]
+    for cand in sweep_candidates:
+        if cand.exists():
+            if cand != sweep_candidates[0]:
+                print(f"[sparsify_inputs] {sweep_candidates[0]} not found; "
+                      f"falling back to {cand}")
+            sweep_pkl = cand
+            break
     soft_tol = float(cfg.get("sparse_eff_res_tolerance", 0.05))
     drift_tol = float(cfg.get("sparse_eff_res_max_drift", 0.30))
     canonical_axis = int(cfg.get("cnisp_slice_step_axis", 2))
