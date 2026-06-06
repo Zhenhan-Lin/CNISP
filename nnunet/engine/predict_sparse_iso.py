@@ -23,22 +23,25 @@ What this script does instead
 It runs inference through nnUNet's Python predictor and intercepts the
 **plan-spacing logits** (the network output *before* nnUNet maps it back
 to the input/original space). From one inference per input it writes
-three masks per ``(source_id, step)``:
+two masks per ``(source_id, step)``:
 
 * ``prediction/sparse_step_{XX}/{sid}.nii.gz``
-      nnUNet's normal output on the sparse input grid. Kept verbatim for
-      the deployment-curve consumer
+      nnUNet's normal output on the sparse input grid (identical to what
+      ``nnUNetv2_predict`` would write for the sparse CT). Kept verbatim
+      for the deployment-curve consumer
       (``engine/build_dataset835_sparse_patches.py``), which still reads
       this directory.
-* ``prediction/sparse_step_{XX}_upsampled/{sid}.nii.gz``
-      the **isotropic plan-spacing** prediction == ``argmax`` of the
-      logits (nonzero-cropped FOV, iso 0.5 mm grid). This is the genuine
-      network output the old pipeline discarded.
 * ``prediction/sparse_step_{XX}_native/{sid}.nii.gz``
       the plan-spacing prediction resampled onto the **native CT grid**
       using **nnUNet's own segmentation resampler** (not NN slice
       duplication). This is the mask ``compare_native.py`` Dices against
       the native GT; GT is never resampled.
+
+The intermediate iso-0.5 plan-spacing mask the network produces is NOT
+saved -- it had no downstream consumer (it was reference-only), and it
+can be regenerated on demand straight from ``nnUNetv2_predict`` if ever
+needed. Dropping it also lets step_01 skip a full per-source inference
+(its native target is just a symlink to the dense baseline; see below).
 
 How the native mask reuses nnUNet's resampler honestly
 ------------------------------------------------------
@@ -64,13 +67,12 @@ step_01 (dense baseline)
 ------------------------
 step_01 isn't sparsified. Its native-grid Dice target is the existing
 dense baseline ``prediction/native/{sid}.nii.gz`` (shared with other
-consumers), so ``_native/01`` is symlinked there rather than recomputed.
-``_upsampled/01`` is the genuine iso-0.5 prediction of the native CT,
-produced through the same predictor for consistency with the sweep.
+consumers), so ``_native/01`` is just a symlink there -- step_01 runs no
+inference of its own.
 
 Output
 ------
-* the three directories above, and
+* the two directories above, and
 * ``prediction/sweep_manifest.json`` -- ``{steps: {XX: {sid: basename}}}``
   anchored by ``compare_native.py`` against ``sparse_step_{XX}_native/``.
 
@@ -241,11 +243,6 @@ def _detect_io2nib(rw, path) -> List[int]:
     return [int(p) for p in perm]  # type: ignore[arg-type]
 
 
-def _rw_vec_to_nib(vec_rw: List, io2nib: List[int]) -> List:
-    """Reorder a per-axis vector from nnUNet-as-read order to nibabel order."""
-    return [vec_rw[io2nib[k]] for k in range(3)]
-
-
 def _native_geom(rw, ct_path, cache: Dict) -> Tuple:
     """Cached ``(rw_shape, rw_spacing, rw_props, io2nib)`` for a native CT.
 
@@ -282,87 +279,6 @@ def _predict_logits(predictor, torch, input_file: Path):
     data_t = torch.from_numpy(np.ascontiguousarray(data)).float()
     logits = predictor.predict_logits_from_preprocessed_data(data_t)
     return logits, properties
-
-
-def _internal_to_original(values_internal: List, transpose_forward: List[int]) -> List:
-    """Reorder a per-axis list from nnUNet internal order to file order.
-
-    nnUNet builds the internal array as ``original.transpose(transpose_
-    forward)``, so internal axis ``i`` carries original axis
-    ``transpose_forward[i]``. Therefore the file-order value for original
-    axis ``transpose_forward[i]`` is the internal value at ``i``.
-    """
-    out = [None, None, None]
-    for i, a in enumerate(transpose_forward):
-        out[a] = values_internal[i]
-    return out
-
-
-def _save_uint8(arr: np.ndarray, affine: np.ndarray, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    img = nib.Nifti1Image(arr.astype(np.uint8), affine)
-    img.set_qform(affine)
-    img.set_sform(affine)
-    nib.save(img, str(dst))
-
-
-def _iso_mask_from_logits(
-    logits, torch, transpose_backward: List[int], io2nib: List[int],
-) -> np.ndarray:
-    """Plan-spacing prediction == argmax over classes, in NIBABEL axis order.
-
-    Labels {0:bg, 1:ON, 2:recti, 3:globe, 4:fat} are consecutive and the
-    dataset is not region-based, so a plain argmax reproduces nnUNet's
-    label values without the region-merge logic.
-
-    ``transpose_backward`` brings the argmax from nnUNet internal order to
-    its as-read order; ``io2nib`` then brings it to nibabel order so it can
-    be paired with a nibabel affine (this iso mask is reference-only and is
-    saved with a hand-built affine, not through the reader_writer).
-    """
-    seg_internal = torch.argmax(logits, dim=0).cpu().numpy().astype(np.uint8)
-    seg_rw = seg_internal.transpose(transpose_backward)   # nnUNet as-read order
-    seg_nib = seg_rw.transpose(io2nib)                    # nibabel file order
-    return np.ascontiguousarray(seg_nib)
-
-
-def _iso_affine(
-    sparse_affine: np.ndarray,
-    sparse_bbox_internal: List,
-    plan_spacing_internal: List[float],
-    transpose_forward: List[int],
-    io2nib: List[int],
-) -> np.ndarray:
-    """Affine for the cropped iso prediction in the sparse CT's world frame.
-
-    The iso volume is nnUNet's nonzero-crop of the sparse CT resampled to
-    the plan (iso) spacing. Its voxel (0,0,0) is the crop's lower corner
-    in sparse-voxel space; its direction matches the sparse CT with each
-    axis rescaled to the plan spacing.
-
-    ``transpose_forward`` maps the internal bbox/spacing to nnUNet as-read
-    order; ``io2nib`` then maps to nibabel voxel order so the vectors line up
-    with ``sparse_affine`` (a nibabel affine whose columns are nibabel axes).
-    """
-    bbox_lower_internal = [lo for (lo, _hi) in sparse_bbox_internal]
-    bbox_lower_rw = _internal_to_original(bbox_lower_internal, transpose_forward)
-    p_rw = _internal_to_original(list(plan_spacing_internal), transpose_forward)
-    bbox_lower_orig = _rw_vec_to_nib(bbox_lower_rw, io2nib)
-    p_orig = _rw_vec_to_nib(p_rw, io2nib)
-
-    R = np.asarray(sparse_affine[:3, :3], dtype=np.float64)
-    col_norms = np.linalg.norm(R, axis=0)
-    col_norms[col_norms == 0] = 1.0
-    unit = R / col_norms
-    iso_R = unit * np.asarray(p_orig, dtype=np.float64)[None, :]
-
-    corner_world = R @ np.asarray(bbox_lower_orig, dtype=np.float64) \
-        + np.asarray(sparse_affine[:3, 3], dtype=np.float64)
-
-    iso_affine = np.eye(4, dtype=np.float64)
-    iso_affine[:3, :3] = iso_R
-    iso_affine[:3, 3] = corner_world
-    return iso_affine
 
 
 def _native_properties(
@@ -431,7 +347,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="nnunet/configs.yaml")
     ap.add_argument("--force", action="store_true",
-                    help="Recompute masks even if all three outputs exist.")
+                    help="Recompute masks even if both outputs exist.")
     ap.add_argument("--experiment", choices=["thin", "thick", "real"],
                     default="thin",
                     help="Experiment directory layer. Reads sparse inputs "
@@ -462,7 +378,6 @@ def main() -> int:
     with open(source_to_path) as f:
         src_to_path = json.load(f)
 
-    input_root = work_dir / "input"
     pred_root = work_dir / "prediction"
     dense_pred_dir = pred_root / "native"          # shared dense baseline
     sparse_pred_root = pred_root / experiment       # exp-scoped sparse sweep
@@ -470,8 +385,6 @@ def main() -> int:
 
     predictor, torch, convert_fn, rw = _init_predictor(cfg)
     transpose_forward = list(predictor.plans_manager.transpose_forward)
-    transpose_backward = list(predictor.plans_manager.transpose_backward)
-    plan_spacing_internal = list(predictor.configuration_manager.spacing)
     # Cache of per-source native geometry (rw shape/spacing/props + the
     # nibabel<->as-read permutation), filled lazily and reused across steps.
     geom_cache: Dict[str, Tuple] = {}
@@ -492,9 +405,9 @@ def main() -> int:
     n_sparse_jobs = sum(
         len(v) for v in sparse_m.get("by_step", {}).values()
     )
-    print(f"[predict_sparse_iso] workload: step_01 iso up to "
-          f"{len(src_to_path)} source(s); sparse sweep "
-          f"{n_sparse_jobs} (source, step) pair(s). "
+    print(f"[predict_sparse_iso] workload: step_01 dense baseline "
+          f"{len(src_to_path)} source(s) (symlink only, no inference); "
+          f"sparse sweep {n_sparse_jobs} (source, step) pair(s). "
           f"Each inference is silent for several minutes -- per-case "
           f"progress is logged below.", flush=True)
 
@@ -504,9 +417,9 @@ def main() -> int:
     issues: List[str] = []
 
     # ── step_01: dense baseline ────────────────────────────────
-    # _native/01 reuses the shared dense pred; _upsampled/01 is the genuine
-    # iso prediction of the native CT (same predictor path as the sweep).
-    up_01 = sparse_pred_root / "sparse_step_01_upsampled"
+    # _native/01 is just a symlink to the shared dense baseline, so step_01
+    # runs no inference of its own (the previous iso-upsampled output had no
+    # consumer and has been removed).
     native_01 = sparse_pred_root / "sparse_step_01_native"
     step_01_map: Dict[str, str] = {}
     step_01_ids = sorted(src_to_path)
@@ -522,56 +435,21 @@ def main() -> int:
             dst_native.unlink()
         dst_native.symlink_to(dense_pred.resolve())
         step_01_map[sid] = dst_native.name
-
-        # _upsampled/01 -> iso prediction of the native CT.
-        dst_iso = up_01 / f"{sid}.nii.gz"
-        if dst_iso.exists() and not args.force:
-            print(f"[predict_sparse_iso] step_01 [{i}/{len(step_01_ids)}] "
-                  f"{sid}: _upsampled exists -- skip")
-            continue
-        native_input = input_root / "native" / f"{sid}_0000.nii.gz"
-        if not native_input.exists():
-            issues.append(f"step_01 {sid}: native input {native_input} missing; "
-                          f"iso mask skipped (native baseline still symlinked).")
-            continue
-        try:
-            t0 = time.time()
-            print(f"[predict_sparse_iso] step_01 [{i}/{len(step_01_ids)}] "
-                  f"{sid}: iso inference ...", flush=True)
-            logits, props = _predict_logits(predictor, torch, native_input)
-            _, _, _, io2nib = _native_geom(rw, native_input, geom_cache)
-            iso_arr = _iso_mask_from_logits(
-                logits, torch, transpose_backward, io2nib,
-            )
-            iso_aff = _iso_affine(
-                nib.load(str(native_input)).affine,
-                props["bbox_used_for_cropping"],
-                plan_spacing_internal,
-                transpose_forward,
-                io2nib,
-            )
-            _save_uint8(iso_arr, iso_aff, dst_iso)
-            n_inferred += 1
-            print(f"[predict_sparse_iso] step_01 [{i}/{len(step_01_ids)}] "
-                  f"{sid}: done ({time.time() - t0:.1f}s)", flush=True)
-        except Exception as e:  # noqa: BLE001
-            issues.append(f"step_01 {sid}: iso inference failed ({e})")
     if step_01_map:
         out_steps["01"] = step_01_map
         print(f"[predict_sparse_iso] step_01: {len(step_01_map)} dense "
-              f"baseline(s) -> _native (symlink) + _upsampled (iso)")
+              f"baseline(s) -> _native (symlink, no inference)")
 
     # ── steps >= 2: sparse-CT sweep ─────────────────────────────
     for step_tag in sorted(sparse_m.get("by_step", {}).keys()):
         step = int(step_tag)
         sparse_dir = sparse_pred_root / f"sparse_step_{step_tag}"
-        up_dir = sparse_pred_root / f"sparse_step_{step_tag}_upsampled"
         native_dir = sparse_pred_root / f"sparse_step_{step_tag}_native"
         step_map: Dict[str, str] = {}
         step_entries = sorted(sparse_m["by_step"][step_tag].items())
         n_step = len(step_entries)
         print(f"[predict_sparse_iso] step_{step_tag}: {n_step} source(s) "
-              f"-> sparse + _upsampled(iso) + _native", flush=True)
+              f"-> sparse + _native", flush=True)
 
         for j, (sid, info) in enumerate(step_entries, 1):
             sparse_input = Path(info["input"])
@@ -581,10 +459,9 @@ def main() -> int:
                 continue
 
             dst_sparse = sparse_dir / f"{sid}.nii.gz"
-            dst_iso = up_dir / f"{sid}.nii.gz"
             dst_native = native_dir / f"{sid}.nii.gz"
             if (not args.force and dst_sparse.exists()
-                    and dst_iso.exists() and dst_native.exists()):
+                    and dst_native.exists()):
                 step_map[sid] = dst_native.name
                 n_skipped += 1
                 print(f"[predict_sparse_iso] step_{step_tag} [{j}/{n_step}] "
@@ -630,22 +507,7 @@ def main() -> int:
                 dst_sparse.parent.mkdir(parents=True, exist_ok=True)
                 rw.write_seg(sparse_seg.astype(np.uint8), str(dst_sparse), props)
 
-                # 2) iso plan-spacing mask (genuine network output).
-                # Reference-only: saved with a hand-built nibabel affine, so
-                # the array is converted to nibabel order inside the helpers.
-                iso_arr = _iso_mask_from_logits(
-                    logits, torch, transpose_backward, io2nib,
-                )
-                iso_aff = _iso_affine(
-                    nib.load(str(sparse_input)).affine,
-                    props["bbox_used_for_cropping"],
-                    plan_spacing_internal,
-                    transpose_forward,
-                    io2nib,
-                )
-                _save_uint8(iso_arr, iso_aff, dst_iso)
-
-                # 3) native-grid mask via nnUNet's own resampler.
+                # 2) native-grid mask via nnUNet's own resampler.
                 # Position-exactness invariant: sparse inputs are produced
                 # with start=0, so sparse voxel i maps to native voxel i*step.
                 # This makes the bbox scaling below exact. Enforce both the
