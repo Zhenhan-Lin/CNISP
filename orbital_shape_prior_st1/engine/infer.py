@@ -427,6 +427,17 @@ def _build_label_obs_loader(
         if not p.exists():
             return None
         vol, spacing, offset = load_patch_as_label_tensor(p)
+        if step > 1:
+            # load_patch_as_label_tensor uses offset = spacing/2.  On the
+            # through-plane (step) axis spacing = step * dense_spacing, so
+            # offset becomes step*dense_spacing/2.  But the ceiling curve
+            # (compute_sparse_affine with start=0) keeps offset =
+            # dense_spacing/2 — the position of sparse voxel 0's center
+            # coincides with dense voxel 0's center, not shifted by
+            # (step-1)*dense_spacing/2.  Correct by dividing the step-axis
+            # offset by step so both curves share the same coordinate frame.
+            step_axis = int(torch.argmax(spacing))
+            offset[step_axis] = spacing[step_axis] / (2.0 * step)
         return vol, spacing, offset
 
     return _loader
