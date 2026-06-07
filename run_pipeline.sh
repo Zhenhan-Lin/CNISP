@@ -288,7 +288,10 @@
 #   Each expensive phase auto-detects when its outputs are already complete
 #   and short-circuits with a "[skip]" line. The checks are pure file-
 #   existence tests so they are essentially free (~ms total) compared
-#   to the GPU work they gate. Markers used:
+#   to the GPU work they gate. There is NO content/provenance tracking:
+#   a change to the CODE, the model/checkpoint, the degrade mode, or
+#   upstream data will NOT auto-trigger a rebuild -- after such a change you
+#   must pass --force (or delete the stale outputs) yourself. Markers used:
 #     cnisp-train                       best_checkpoint.pth
 #     nnunet-predict                    prediction/native/ has 1 file per source
 # NOTE on the experiment (<EXP>) layer: every degradation-dependent path
@@ -667,91 +670,14 @@ _eye_dir_complete() {
     [[ "$n_files" -ge "$n_src" ]]
 }
 
-# ── Provenance stamping (content-aware skip) ─────────────────
-# Existence-only skip checks let stale artifacts survive a config/model
-# change -- the bug that produced absurd nnunet_pred Dice after a v4->v5
-# retrain and after the thin/thick degradation work. Each guarded phase
-# now records a SIGNATURE of the inputs that determine its output in a
-# sibling ".provenance" stamp, and rebuilds whenever that signature
-# changes (new data OR new CNISP model OR new degrade mode). Stamps chain:
-# a downstream phase folds in its upstream stamp so changes propagate.
-#
-#   _sig_file  <path>  -> "f:<md5>"     content hash (small key files)
-#   _sig_meta  <path>  -> "m:<size:mtime>" cheap stat (large checkpoints)
-#   _sig_tree  <dir>   -> "t:<md5>"     recursive name+size listing
-#   _provenance_fresh <stamp> <sig>     rc 0 iff stamp exists and matches
-#   _explain_drift    <stamp> <sig>     prints the components that changed
-#   _write_provenance <stamp> <sig>     persist after a successful build
-
-_sig_file() {
-    if [[ -f "$1" ]]; then
-        printf 'f:%s' "$(md5sum "$1" 2>/dev/null | awk '{print $1}')"
-    else
-        printf 'f:missing'
-    fi
-}
-
-_sig_meta() {
-    # size+mtime fingerprint -- a retrain rewrites the .pth so mtime/size
-    # change; far cheaper than content-hashing a multi-hundred-MB weight.
-    if [[ -f "$1" ]]; then
-        printf 'm:%s' "$(stat -c '%s:%Y' "$1" 2>/dev/null)"
-    else
-        printf 'm:missing'
-    fi
-}
-
-_sig_tree() {
-    # Hash of a sorted "relpath size" listing under $1 (default *.nii.gz).
-    # name+size (NOT mtime) so symlink/file re-staging with identical
-    # content doesn't trigger false rebuilds, while added / removed /
-    # resized files do.
-    local dir="$1" glob="${2:-*.nii.gz}"
-    if [[ ! -d "$dir" ]]; then
-        printf 't:missing'
-        return
-    fi
-    local listing
-    listing="$(cd "$dir" && find . -name "$glob" -type f -printf '%p %s\n' \
-              2>/dev/null | LC_ALL=C sort)"
-    printf 't:%s' "$(printf '%s' "$listing" | md5sum | awk '{print $1}')"
-}
-
-_nnunet_model_token() {
-    # Identity of the nnUNet model the sweep predicts with: the config
-    # fields that select the results folder. Captures "pointed at a
-    # different nnUNet model"; weight changes under a fixed config are
-    # rare and the results dir often lives on slow NFS, so not hashed.
-    printf '%s/%s/%s__%s__%s/folds=%s' \
-        "$(read_yaml_field "$CONFIG" dataset_id)" \
-        "$(read_yaml_field "$CONFIG" dataset_name)" \
-        "$(read_yaml_field "$CONFIG" trainer)" \
-        "$(read_yaml_field "$CONFIG" plan)" \
-        "$(read_yaml_field "$CONFIG" configuration)" \
-        "$(read_yaml_field "$CONFIG" folds)"
-}
-
-_provenance_fresh() {
-    local stamp="$1" sig="$2"
-    [[ -f "$stamp" ]] || return 1
-    [[ "$(cat "$stamp")" == "$sig" ]]
-}
-
-_explain_drift() {
-    local stamp="$1" sig="$2"
-    if [[ ! -f "$stamp" ]]; then
-        echo "    (no prior provenance stamp -- first build under new logic)"
-        return
-    fi
-    diff <(cat "$stamp") <(printf '%s' "$sig") 2>/dev/null \
-        | grep -E '^[<>]' | sed 's/^< /    was: /; s/^> /    now: /' || true
-}
-
-_write_provenance() {
-    local stamp="$1" sig="$2"
-    mkdir -p "$(dirname "$stamp")"
-    printf '%s' "$sig" > "$stamp"
-}
+# ── Skip-if-done (existence only) ────────────────────────────
+# Each guarded phase skips when its output already exists and rebuilds
+# otherwise. There is NO content/provenance tracking: a change to the
+# CODE, the model, or upstream data will NOT auto-trigger a rebuild --
+# you must pass --force (or delete the stale outputs) yourself after such
+# a change. Existence checks live in the helpers above
+# (_predict_dir_complete / _eye_dir_complete / _skip_cnisp_infer_if_done /
+# _realpair_gt_complete).
 
 # ── Phase implementations ────────────────────────────────────
 
@@ -772,87 +698,44 @@ phase_nnunet_predict() {
     echo ""
     echo "[phase] nnunet-predict --------------------------------"
     local pred_dir="${WORK_DIR}/prediction/native"
-    local stamp="${pred_dir}/.native.provenance"
-    # Provenance = nnUNet model identity (incl. folds) + the predict script.
-    # Without this, changing `folds` (e.g. [0] -> best) would silently reuse
-    # the old fold's dense baseline, which feeds step_01 of the sweep and the
-    # standalone native comparison.
-    local sig
-    sig="$(printf '%s\n' \
-        "phase=nnunet-predict" \
-        "nnunet=$(_nnunet_model_token)" \
-        "code=$(_sig_file "$REPO_ROOT/nnunet/run_predict_native.sh")")"
-    if [[ $FORCE -eq 0 ]] \
-        && _predict_dir_complete "$pred_dir" \
-        && _provenance_fresh "$stamp" "$sig"; then
-        echo "  ${pred_dir}/ already covers every source and provenance matches"
-        echo "  -> skipping (pass --force to re-predict)."
+    if [[ $FORCE -eq 0 ]] && _predict_dir_complete "$pred_dir"; then
+        echo "  ${pred_dir}/ already covers every source"
+        echo "  -> skipping (pass --force to re-predict, e.g. after a model/fold change)."
         return 0
     fi
-    if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
-        echo "  native predictions present but provenance CHANGED -> re-predicting:"
-        _explain_drift "$stamp" "$sig"
-    fi
     # nnUNetv2_predict overwrites existing outputs in place (no --continue_prediction
-    # is passed), so a changed fold/model regenerates the masks without deleting
-    # anything first.
+    # is passed), so a re-run regenerates the masks without deleting anything first.
     CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_native.sh"
-    _write_provenance "$stamp" "$sig"
 }
 
 phase_nnunet_predict_sweep() {
     echo ""
     echo "[phase] nnunet-predict-sweep --------------------------"
     local marker="${WORK_DIR}/prediction/${EXP}/sweep_manifest.json"
-    local stamp="${WORK_DIR}/prediction/${EXP}/.sweep.provenance"
-    local atlas_sweep="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/${EXP}/atlas_gt/sweep_results.pkl"
-    # Signature: degrade mode/modality + the nnUNet model identity + the
-    # upstream atlas_gt sweep (its hash changes whenever CNISP is retrained
-    # or the (source, step) set changes) + the CODE that produces the masks
-    # (sparsify + predict_sparse_iso). Hashing the scripts means a bug fix
-    # to the sparse/native mask generation (e.g. the orientation fix) auto-
-    # invalidates the cache, so a plain re-run rebuilds instead of leaving
-    # stale masks for compare_native to read.
-    local sig
-    sig="$(printf '%s\n' \
-        "phase=nnunet-predict-sweep" \
-        "experiment=$EXP" \
-        "mode=$SWEEP_DEGRADE_MODE" \
-        "modality=$SWEEP_MODALITY" \
-        "nnunet=$(_nnunet_model_token)" \
-        "atlas_sweep=$(_sig_meta "$atlas_sweep")" \
-        "code_sparsify=$(_sig_file "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py")" \
-        "code_predict=$(_sig_file "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py")")"
     if [[ $FORCE -eq 0 && -f "$marker" ]]; then
-        if _provenance_fresh "$stamp" "$sig"; then
-            echo "  sweep manifest present and provenance matches:"
-            echo "    $marker"
-            echo "  -> skipping (pass --force or delete the manifest to rebuild)."
-            return 0
-        fi
-        echo "  sweep manifest present but provenance CHANGED -> rebuilding:"
-        _explain_drift "$stamp" "$sig"
+        echo "  sweep manifest present:"
+        echo "    $marker"
+        echo "  -> skipping (pass --force to rebuild, e.g. after a code/model/sweep change)."
+        return 0
     fi
     echo "  experiment=$EXP degradation: mode=$SWEEP_DEGRADE_MODE modality=$SWEEP_MODALITY"
-    # Overwrite in place -- never delete. When the geometry code or upstream
-    # atlas sweep changed (provenance drift) we pass --force so sparsify_inputs
-    # and predict_sparse_iso overwrite the existing sparse CTs/masks rather than
-    # skip-if-exists. A first run (no manifest yet) writes fresh files without
-    # --force. Stale orphans from a shrunk (source, step) set are harmless:
-    # downstream reads the freshly written manifests, not a directory glob.
+    # Overwrite in place -- never delete. With --force, sparsify_inputs and
+    # predict_sparse_iso overwrite existing sparse CTs/masks; a first run (no
+    # manifest yet) writes fresh files. Stale orphans from a shrunk
+    # (source, step) set are harmless: downstream reads the freshly written
+    # manifests, not a directory glob.
     local force_args=()
-    [[ $FORCE -eq 1 || -f "$marker" ]] && force_args+=("--force")
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
     python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG" \
             --mode "$SWEEP_DEGRADE_MODE" --modality "$SWEEP_MODALITY" \
             --experiment "$EXP" "${force_args[@]}"
     # Single custom-predictor pass writes the sparse-grid mask
     # (sparse_step_XX/) and that prediction resampled onto the native grid
     # (sparse_step_XX_native/, the Dice target). --force overwrites existing
-    # masks in place on drift; without it predict_sparse_iso skips pairs whose
-    # outputs already exist (resume-friendly).
+    # masks in place; without it predict_sparse_iso skips pairs whose outputs
+    # already exist (resume-friendly).
     python3 "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py" --config "$CONFIG" \
             --experiment "$EXP" "${force_args[@]}"
-    _write_provenance "$stamp" "$sig"
 }
 
 phase_nnunet_predict_smore() {
@@ -912,40 +795,13 @@ _skip_cnisp_infer_if_done() {
     return 1
 }
 
-_cnisp_model_sig() {
-    # Identity of the CNISP model+code that drive a latent-opt inference,
-    # for a given run_tag ($1). Captures "new model name", "retrained
-    # checkpoint (same name)", changed test config, and changed inference
-    # code (resolution_sweep / infer) -- so a plain re-run rebuilds instead
-    # of serving v4-era reconstructions under the v5 path.
-    local run_tag="$1" experiment="${2:-$EXP}"
-    local ckpt="$CNISP_MODEL_BASEDIR/$CNISP_MODEL_NAME/best_checkpoint.pth"
-    printf '%s\n' \
-        "run_tag=$run_tag" \
-        "experiment=$experiment" \
-        "cnisp_model=$CNISP_MODEL_NAME" \
-        "checkpoint=$(_sig_meta "$ckpt")" \
-        "test_cfg=$( [[ -n "$TEST_CONFIG" ]] && _sig_file "$TEST_CONFIG" || printf 'default' )" \
-        "code_infer=$(_sig_file "$REPO_ROOT/orbital_shape_prior_st1/engine/infer.py")" \
-        "code_sweep=$(_sig_file "$REPO_ROOT/orbital_shape_prior_st1/diagnostics/resolution_sweep.py")"
-}
-
 phase_cnisp_infer() {
     echo ""
     echo "[phase] cnisp-infer (experiment=$EXP run_tag=atlas_gt) ----------------"
-    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$EXP/atlas_gt"
-    local stamp="$run_dir/.provenance"
-    local sig; sig="$(_cnisp_model_sig "atlas_gt" "$EXP")"
-    if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \
-        && _skip_cnisp_infer_if_done "atlas_gt" "$EXP"; then
+    if [[ $FORCE -eq 0 ]] && _skip_cnisp_infer_if_done "atlas_gt" "$EXP"; then
         return 0
     fi
-    if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
-        echo "  provenance CHANGED -> re-running CNISP atlas_gt inference:"
-        _explain_drift "$stamp" "$sig"
-    fi
     _run_cnisp_infer_for "atlas_gt" "atlas_gt" "$EXP"
-    _write_provenance "$stamp" "$sig"
 }
 
 _require_training_patch_size() {
@@ -970,44 +826,26 @@ phase_cnisp_prep_dataset835_gt() {
     echo "[phase] cnisp-prep-dataset835-gt ----------------------"
     local labels_dir="$CNISP_ALIGNED_DIR/$LABELS835_DIRNAME"
     local meta_dir="$CNISP_ALIGNED_DIR/$META835_DIRNAME"
-    local stamp="$CNISP_ALIGNED_DIR/.dataset835_gt.provenance"
-    # Signature: training patch extent + the nnUNet dense native preds
-    # these patches canonical-align from (their listing changes whenever
-    # nnunet-predict re-ran).
-    local sig
-    sig="$(printf '%s\n' \
-        "phase=cnisp-prep-dataset835-gt" \
-        "patch_size_mm=$CNISP_PATCH_SIZE_MM" \
-        "native_pred=$(_sig_tree "${WORK_DIR}/prediction/native")")"
-    local drift=0
     if [[ $FORCE -eq 0 ]] \
         && _eye_dir_complete "$labels_dir" \
         && _eye_dir_complete "$meta_dir"; then
-        if _provenance_fresh "$stamp" "$sig"; then
-            echo "  $labels_dir + $meta_dir cover every source; provenance matches"
-            echo "  -> skipping (pass --force to rebuild)."
-            return 0
-        fi
-        echo "  dataset835-gt patches present but provenance CHANGED -> rebuilding:"
-        _explain_drift "$stamp" "$sig"
-        drift=1
+        echo "  $labels_dir + $meta_dir cover every source"
+        echo "  -> skipping (pass --force to rebuild, e.g. after nnunet-predict re-ran)."
+        return 0
     fi
     _require_training_patch_size "cnisp-prep-dataset835-gt"
     # The python script reads the same $TRAINING_META_DIR so passing
     # --patch-size explicitly is redundant; we still forward it to
     # surface a single value in the log and so a future user can
     # override it from the shell without editing python.
-    # Forward --force to the python (bypassing its per-case "both eyes
-    # already on disk -> skip") when the caller forced OR provenance drift
-    # means the on-disk patches are stale; otherwise stale 64 mm /
-    # old-centroid / old-pred patches would survive.
+    # --force bypasses the python's per-case "both eyes already on disk ->
+    # skip" so stale patches get overwritten in place.
     local force_args=()
-    [[ $FORCE -eq 1 || $drift -eq 1 ]] && force_args+=("--force")
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
     python3 "$REPO_ROOT/nnunet/engine/build_dataset835_canonical_patches.py" \
             --config "$CONFIG" \
             --patch-size "$CNISP_PATCH_SIZE_MM" \
             "${force_args[@]}"
-    _write_provenance "$stamp" "$sig"
 }
 
 phase_cnisp_prep_dataset835_sparse() {
@@ -1018,70 +856,30 @@ phase_cnisp_prep_dataset835_sparse() {
     # sparsity); the inference loader handles missing rows.
     local exp_prefix; exp_prefix="$(_exp_step_prefix "$SPARSE835_PREFIX" "$EXP")"
     local step01_dir="$CNISP_ALIGNED_DIR/${exp_prefix}01"
-    local stamp="$CNISP_ALIGNED_DIR/.dataset835_sparse_${EXP}.provenance"
-    # Signature: training patch extent + degrade mode/modality + the
-    # upstream sweep provenance stamp (chained: changes to the nnUNet
-    # sparse sweep -- new mode, new model, new data -- propagate here).
-    local sig
-    sig="$(printf '%s\n' \
-        "phase=cnisp-prep-dataset835-sparse" \
-        "experiment=$EXP" \
-        "patch_size_mm=$CNISP_PATCH_SIZE_MM" \
-        "mode=$SWEEP_DEGRADE_MODE" \
-        "modality=$SWEEP_MODALITY" \
-        "sweep_stamp=$(_sig_file "${WORK_DIR}/prediction/${EXP}/.sweep.provenance")")"
-    local drift=0
     if [[ $FORCE -eq 0 ]] && _eye_dir_complete "$step01_dir"; then
-        if _provenance_fresh "$stamp" "$sig"; then
-            echo "  $step01_dir covers every source; provenance matches"
-            echo "  -> skipping (pass --force to rebuild)."
-            return 0
-        fi
-        echo "  dataset835-sparse patches present but provenance CHANGED -> rebuilding:"
-        _explain_drift "$stamp" "$sig"
-        drift=1
+        echo "  $step01_dir covers every source"
+        echo "  -> skipping (pass --force to rebuild, e.g. after nnunet-predict-sweep re-ran)."
+        return 0
     fi
     _require_training_patch_size "cnisp-prep-dataset835-sparse"
-    # See sibling phase: forward --force to bypass the python script's
-    # per-(case, step) "already on disk -> skip" when the caller forced OR
-    # provenance drift means the on-disk sparse patches are stale.
+    # See sibling phase: --force bypasses the python script's per-(case, step)
+    # "already on disk -> skip" so stale sparse patches get overwritten.
     local force_args=()
-    [[ $FORCE -eq 1 || $drift -eq 1 ]] && force_args+=("--force")
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
     python3 "$REPO_ROOT/nnunet/engine/build_dataset835_sparse_patches.py" \
             --config "$CONFIG" \
             --patch-size "$CNISP_PATCH_SIZE_MM" \
             --experiment "$EXP" \
             "${force_args[@]}"
-    _write_provenance "$stamp" "$sig"
 }
 
 phase_cnisp_infer_nnunet_pred() {
     echo ""
     echo "[phase] cnisp-infer-nnunet-pred (experiment=$EXP run_tag=nnunet_pred) -"
-    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/$EXP/nnunet_pred"
-    local stamp="$run_dir/.provenance"
-    # Signature: CNISP model identity (name + checkpoint stat, so a retrain
-    # under the SAME name still invalidates) + inference code + the test
-    # config + the two upstream dataset835 provenance stamps (chained: any
-    # change to the GT or sparse deployment patches propagates here). The
-    # sparse stamp is exp-specific so thin vs thick deployment inputs are
-    # tracked independently.
-    local sig
-    sig="$(printf '%s\n' \
-        "phase=cnisp-infer-nnunet-pred" \
-        "$(_cnisp_model_sig "nnunet_pred" "$EXP")" \
-        "ds835_gt_stamp=$(_sig_file "$CNISP_ALIGNED_DIR/.dataset835_gt.provenance")" \
-        "ds835_sparse_stamp=$(_sig_file "$CNISP_ALIGNED_DIR/.dataset835_sparse_${EXP}.provenance")")"
-    if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \
-        && _skip_cnisp_infer_if_done "nnunet_pred" "$EXP"; then
+    if [[ $FORCE -eq 0 ]] && _skip_cnisp_infer_if_done "nnunet_pred" "$EXP"; then
         return 0
     fi
-    if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
-        echo "  provenance CHANGED -> re-running CNISP nnunet_pred inference:"
-        _explain_drift "$stamp" "$sig"
-    fi
     _run_cnisp_infer_for "nnunet_pred" "nnunet_pred" "$EXP"
-    _write_provenance "$stamp" "$sig"
 }
 
 phase_cnisp_prep_realpair() {
@@ -1123,22 +921,10 @@ phase_cnisp_infer_realpair() {
         echo "  -> run 'cnisp-prep-realpair' first. Skipping."
         return 0
     fi
-    # Model/code provenance, identical to atlas_gt / nnunet_pred: a model
-    # rename, retrain (same name) or inference-code change invalidates the
-    # skip so we never serve a stale (e.g. v4) reconstruction under v5.
-    local run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/real/real_pair"
-    local stamp="$run_dir/.provenance"
-    local sig; sig="$(_cnisp_model_sig "real_pair" "real")"
-    if [[ $FORCE -eq 0 ]] && _provenance_fresh "$stamp" "$sig" \
-        && _skip_cnisp_infer_if_done "real_pair" "real"; then
+    if [[ $FORCE -eq 0 ]] && _skip_cnisp_infer_if_done "real_pair" "real"; then
         return 0
     fi
-    if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
-        echo "  provenance CHANGED -> re-running CNISP real_pair inference:"
-        _explain_drift "$stamp" "$sig"
-    fi
     _run_cnisp_infer_for "real_pair" "real_pair" "real"
-    _write_provenance "$stamp" "$sig"
 }
 
 phase_cnisp_native_remap() {

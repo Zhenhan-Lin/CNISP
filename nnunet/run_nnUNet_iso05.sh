@@ -36,7 +36,7 @@ DS_DIR_NAME="$(printf "Dataset%03d_%s" "${DATASET_ID}" "${DATASET_NAME}")"
 
 # ── Step 4: Train ─────────────────────────────────────────────────
 echo -e "\n--- Step 4: Train ---"
-CONT_FLAG=""
+CONT_FLAG="--c"
 [[ "$CONTINUE" == "1" ]] && CONT_FLAG="--c"
 for F in ${TRAIN_FOLDS}; do
     echo "[FOLD ${F}] nnUNetv2_train ${DATASET_ID} ${CFG} ${F} -p ${CUSTOM_PLAN_NAME} ${CONT_FLAG}"
