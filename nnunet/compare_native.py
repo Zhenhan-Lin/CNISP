@@ -80,6 +80,7 @@ from typing import Dict, List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
+from nibabel.processing import resample_from_to
 
 # Make ``nnunet.*`` importable when run as ``python nnunet/compare_native.py``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -91,6 +92,10 @@ from nnunet.helpers.buckets import (  # noqa: E402
     bucket_sort_key,
 )
 from nnunet.helpers.config import load_yaml  # noqa: E402
+from nnunet.helpers.paired_csv import (  # noqa: E402
+    apply_source_filter,
+    resolve_source_prefix_filters,
+)
 from nnunet.resolve_gt import (  # noqa: E402
     build_struct_to_value, resolve_sources,
 )
@@ -176,6 +181,31 @@ def _affines_consistent(
         np.allclose(pred_aff[:3, :3], gt_aff[:3, :3], atol=rot_atol, rtol=0.0)
         and np.allclose(pred_aff[:3, 3], gt_aff[:3, 3], atol=trans_atol, rtol=0.0)
     )
+
+
+def _resample_pred_onto_gt(
+    pred: np.ndarray,
+    pred_aff: np.ndarray,
+    gt_shape: Tuple[int, ...],
+    gt_aff: np.ndarray,
+) -> np.ndarray:
+    """Nearest-neighbour resample a label volume onto the GT voxel grid.
+
+    Used when a prediction legitimately lives on a different grid than its
+    GT -- e.g. the nnUNet dense baseline saved on the raw CT grid vs a
+    ``chk_*`` pseudo-GT that the previous nnUNet saved on a coarser/resampled
+    grid. The mapping is by WORLD coordinates (via the two affines), so the
+    anatomy stays aligned; ``order=0`` keeps label values intact. GT is never
+    resampled -- only the pred is moved onto the GT grid.
+    """
+    img = nib.Nifti1Image(np.asarray(pred).astype(np.int16),
+                          np.asarray(pred_aff, dtype=np.float64))
+    out = resample_from_to(
+        img,
+        (tuple(int(x) for x in gt_shape), np.asarray(gt_aff, dtype=np.float64)),
+        order=0, mode="constant", cval=0,
+    )
+    return np.asarray(out.dataobj).astype(np.int32)
 
 
 def _binary_dice(pred: np.ndarray, gt: np.ndarray) -> float:
@@ -514,6 +544,7 @@ def main() -> int:
     n_done = 0
     n_skipped_gt = 0
     n_skipped_nnunet = 0
+    n_nnunet_resampled = 0
     n_pred_offset_fixed = 0
 
     for src in sources:
@@ -531,10 +562,13 @@ def main() -> int:
             continue
 
         # ── nnUNet per step ───────────────────────────────────────
-        # nnUNet predictions live on the same native CT grid as the GT;
-        # for step>1 they've already been resampled from plan (iso 0.5)
-        # spacing onto the native grid by engine/predict_sparse_iso.py
-        # (nnUNet's own segmentation resampler) before reaching here.
+        # nnUNet predictions live on the raw CT (native) grid; for step>1
+        # they've been resampled from plan (iso 0.5) spacing onto that grid
+        # by engine/predict_sparse_iso.py (world-coordinate resample) before
+        # reaching here. For atlas sources the GT shares that grid, so Dice is
+        # voxel-for-voxel. For chk_* sources the pseudo-GT was saved on a
+        # different (resampled) grid, so the pred is resampled onto the GT grid
+        # below (GT itself is never resampled).
         for step in sorted(nnunet_step_paths):
             path_map = nnunet_step_paths[step]
             if sid not in path_map:
@@ -552,25 +586,39 @@ def main() -> int:
                 print(f"  [skip nnUNet step{step:02d}] {sid}: load failed "
                       f"({e})", file=sys.stderr)
                 continue
-            if nn_pred.shape != gt.shape:
-                msg = (f"{sid} nnUNet step{step:02d}: pred shape "
-                       f"{nn_pred.shape} != GT shape {gt.shape}")
+            grid_mismatch = (
+                nn_pred.shape != gt.shape
+                or not _affines_consistent(nn_aff, gt_affine)
+            )
+            if grid_mismatch:
+                is_chk = src.gt_source.startswith("chk_")
+                msg = (f"{sid} nnUNet step{step:02d}: pred grid "
+                       f"{nn_pred.shape}/{nib.aff2axcodes(nn_aff)} != GT grid "
+                       f"{gt.shape}/{nib.aff2axcodes(gt_affine)}")
                 if args.strict_shape:
                     print(f"  [error] {msg}", file=sys.stderr)
                     return 3
-                print(f"  [skip nnUNet step{step:02d}] {msg}", file=sys.stderr)
-                continue
-            if not _affines_consistent(nn_aff, gt_affine):
-                msg = (f"{sid} nnUNet step{step:02d}: pred/GT affine mismatch "
-                       f"(orientation not restored on remap). "
-                       f"pred axcodes={nib.aff2axcodes(nn_aff)} "
-                       f"GT axcodes={nib.aff2axcodes(gt_affine)}. Element-wise "
-                       f"Dice would be on misaligned voxels -- NOT comparing.")
-                if args.strict_shape:
-                    print(f"  [error] {msg}", file=sys.stderr)
-                    return 3
-                print(f"  [skip nnUNet step{step:02d}] {msg}", file=sys.stderr)
-                continue
+                if not is_chk:
+                    # atlas sources MUST already sit on the GT (= raw CT) grid;
+                    # a mismatch there is a real remap/orientation bug, so keep
+                    # the loud skip rather than silently resampling.
+                    print(f"  [skip nnUNet step{step:02d}] {msg} (atlas pred "
+                          f"should already be on the GT grid -- NOT comparing).",
+                          file=sys.stderr)
+                    n_skipped_nnunet += 1
+                    continue
+                # chk_* pseudo-GT lives on a different (resampled) grid than the
+                # raw-CT prediction (e.g. the step01 dense baseline). Resample
+                # the PRED onto the GT grid by world coordinates so Dice is
+                # voxel-for-voxel; GT is never resampled.
+                nn_pred = _resample_pred_onto_gt(
+                    nn_pred, nn_aff, gt.shape, gt_affine)
+                nn_aff = gt_affine
+                n_nnunet_resampled += 1
+                if n_nnunet_resampled <= 3:
+                    print(f"  [info nnUNet step{step:02d}] {sid}: pred resampled "
+                          f"onto chk_* GT grid {gt.shape} (world-aware, order=0).",
+                          file=sys.stderr)
             # nnUNet predictions are always written in the bare nnunet
             # scheme {ON:1, Recti:2, Globe:3, Fat:4} with no offset, so
             # the pred scheme map is fixed regardless of source / GT
@@ -682,6 +730,10 @@ def main() -> int:
 
     print(f"\n[compare_native] processed {n_done} source(s); "
           f"skipped: gt={n_skipped_gt} nnUNet={n_skipped_nnunet}")
+    if n_nnunet_resampled:
+        print(f"[compare_native] nnUNet pred resampled onto chk_* GT grid for "
+              f"{n_nnunet_resampled} (source, step) row(s) (world-aware, "
+              f"order=0; GT never resampled).")
     if n_pred_offset_fixed:
         print(f"[compare_native] CNISP pred offset auto-corrected for "
               f"{n_pred_offset_fixed} (source, step) row(s) -- pred file's "
@@ -702,6 +754,22 @@ def main() -> int:
     print(f"[compare_native] wrote {per_source_csv}")
 
     # ── Aggregate into summary CSV + TXT ──────────────────────────
+    # The aggregated summary (and the PNGs built from it) is the
+    # head-to-head VISUALIZATION; we keep it focused on the human-labelled
+    # atlas cohort and drop chk_* rows (the per-source CSV above still holds
+    # every source, so chk_* Dice stays on record and correct -- it is just
+    # not counted in the comparison summary). Same viz_*_source_prefixes
+    # mechanism the plot scripts use (default excludes 'chk_').
+    summary_include, summary_exclude = resolve_source_prefix_filters(
+        None, None, cfg)
+    summary_rows = apply_source_filter(
+        per_source_rows, summary_include, summary_exclude)
+    n_summary_dropped = len(per_source_rows) - len(summary_rows)
+    if n_summary_dropped:
+        print(f"[compare_native] summary excludes {n_summary_dropped} row(s) "
+              f"by source prefix (include={summary_include or '[]'}, "
+              f"exclude={summary_exclude or '[]'}); per-source CSV keeps all.")
+
     table_by_struct: Dict[str, Dict[str, Tuple[float, float, int]]] = {
         s: {} for s in STRUCT_ORDER + ["mean"]
     }
@@ -712,7 +780,7 @@ def main() -> int:
     grouped: Dict[Tuple[str, str], Dict[str, List[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    for r in per_source_rows:
+    for r in summary_rows:
         method = r["method"]
         eff = float(r["eff_res_mm"]) if r["eff_res_mm"] else None
         _, label = assign_bucket(eff, bucket_edges)
@@ -723,7 +791,7 @@ def main() -> int:
     # buckets sorted by lower bound, unknown sinking to the bottom.
     bucket_order: List[str] = []
     seen_buckets = set()
-    for r in per_source_rows:
+    for r in summary_rows:
         if r["eff_res_mm"]:
             eff = float(r["eff_res_mm"])
             _, label = assign_bucket(eff, bucket_edges)
@@ -773,18 +841,24 @@ def main() -> int:
 
     # ── Plaintext table ───────────────────────────────────────────
     txt_path = out_dir / f"paired_summary{out_suffix}.txt"
+    # The summary/visualization below is restricted to the source cohort
+    # surviving the viz prefix filter (default: atlas only, chk_* dropped).
+    summary_atlas_only = ("chk_" in tuple(summary_exclude)) or bool(summary_include)
     if cnisp_test_label_source == "nnunet_pred":
         chk_note = (
-            "  - DEPLOYMENT MODE: chk_* sources are Diced against\n"
-            "    Dataset835's dense pred (prediction/native/), shared\n"
-            "    between both methods; atlas sources Dice against the\n"
-            "    atlas manual GT.\n")
+            "  - DEPLOYMENT MODE: chk_* sources Dice against Dataset835's\n"
+            "    dense pred (prediction/native/); atlas sources Dice against\n"
+            "    the atlas manual GT.\n")
     else:
         chk_note = (
-            "  - 6 chk_* sources use the legacy chk_pseudo GT (previous\n"
-            "    nnUNet's QA-kept predictions). Filter on\n"
-            "    gt_source=='atlas' in paired_per_source.csv for the\n"
-            "    manual-GT-only view.\n")
+            "  - chk_* sources use the legacy chk_pseudo GT (previous\n"
+            "    nnUNet's QA-kept predictions).\n")
+    if summary_atlas_only:
+        chk_note += (
+            "  - This summary table is ATLAS-ONLY: chk_* rows are excluded\n"
+            "    from the aggregation/visualization (viz source filter). They\n"
+            "    are still computed and kept -- in full -- in\n"
+            "    paired_per_source.csv (filter gt_source there to inspect).\n")
     with open(txt_path, "w") as f:
         f.write("=" * 78 + "\n")
         f.write(f"{NNUNET_METHOD_LABEL} vs {cnisp_method_label} -- "

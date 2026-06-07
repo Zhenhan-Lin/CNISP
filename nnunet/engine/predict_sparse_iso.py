@@ -33,9 +33,9 @@ two masks per ``(source_id, step)``:
       this directory.
 * ``prediction/sparse_step_{XX}_native/{sid}.nii.gz``
       the plan-spacing prediction resampled onto the **native CT grid**
-      using **nnUNet's own segmentation resampler** (not NN slice
-      duplication). This is the mask ``compare_native.py`` Dices against
-      the native GT; GT is never resampled.
+      by **world coordinates** (not NN slice duplication, and not nnUNet's
+      affine-blind shape resampler). This is the mask ``compare_native.py``
+      Dices against the native GT; GT is never resampled.
 
 The intermediate iso-0.5 plan-spacing mask the network produces is NOT
 saved -- it had no downstream consumer (it was reference-only), and it
@@ -43,25 +43,38 @@ can be regenerated on demand straight from ``nnUNetv2_predict`` if ever
 needed. Dropping it also lets step_01 skip a full per-source inference
 (its native target is just a symlink to the dense baseline; see below).
 
-How the native mask reuses nnUNet's resampler honestly
-------------------------------------------------------
-nnUNet's ``convert_predicted_logits_to_segmentation_with_correct_shape``
-resamples logits from plan spacing to ``properties['shape_after_...']``
-and pads back to ``properties['shape_before_cropping']`` via the crop
-bbox, then transposes to the file's axis order. We call it twice:
+How the native mask is placed (and the offset bug this fixes)
+-------------------------------------------------------------
+The sparse mask (output 1) uses nnUNet's own export
+(``convert_predicted_logits_to_segmentation_with_correct_shape``): it
+resamples logits to the sparse crop shape and pads back via the crop
+bbox -- correct, because it round-trips onto the same sparse grid.
 
-1. with the *original* (sparse) properties  -> the sparse-grid mask;
-2. with a *native* properties dict we synthesize -- the sparse crop
-   geometry with the through-plane axis scaled by ``step`` -- so the very
-   same nnUNet resampler lands the logits directly on the native grid.
+The native mask (output 2) does NOT reuse that export. nnUNet's resampler
+is purely array-SHAPE based (it aligns array *extents*, ignoring the
+affine). If we just scaled the crop bbox by ``step`` and re-ran it (the
+previous approach), the plan FOV's extent got aligned to the native
+crop's extent -- two FOVs of equal width but offset by half a coarse
+voxel -- so every kept sparse slice landed at the CENTER of its
+``step``-wide slab instead of at its start. That is a through-plane shift
+of ``(step-1)/2`` native voxels, growing with ``step`` (0.5 vox at
+step=2 ... 3.5 vox at step=8), silently dragging Dice down vs the
+start=0 GT. ``compare_native``'s affine check could not catch it: the
+grid geometry was right; only the *content* was shifted.
 
-Because sparsification kept every ``step``-th slice starting at index 0
-(``slice_start_id=0`` in ``data_prep/sparsify_inputs.py``), sparse voxel
-``i`` along the through-plane axis sits at native voxel ``i * step``, so
-the sparse crop ``[lo, hi)`` maps to native ``[lo*step, hi*step)`` (clipped
-to the native extent). We assert the resulting native mask matches the
-native CT's shape exactly -- a hard guard against any axis-order slip in
-the internal/original transpose bookkeeping.
+Instead we resample the plan/iso logits onto the native grid by WORLD
+coordinates (``_native_seg_world_aware`` -> ``nibabel.resample_from_to``).
+The plan grid's world affine is reconstructed from the *sparse CT's own*
+nibabel affine -- the true start=0 sweep geometry (``_plan_affine_nib``,
+FOV-preserving half-pixel, matching skimage's resize that nnUNet uses on
+the forward pass). Because sparsification kept every ``step``-th slice
+starting at index 0, sparse voxel ``i`` sits at native voxel ``i*step``;
+the world-coordinate resample honours that to sub-voxel precision for any
+``step`` (even or odd) and for both thin and thick degradation. A
+self-contained numerical check of all three reconstructions lives in
+``nnunet/engine/_audit_native_offset.py``. We still assert the produced
+native mask matches the native CT's nibabel shape exactly as an
+axis-order guard.
 
 step_01 (dense baseline)
 ------------------------
@@ -93,11 +106,13 @@ from typing import Dict, List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
+from nibabel.processing import resample_from_to
 
 # Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
+from nnunet.engine.native_resample import resample_plan_to_native  # noqa: E402
 from simulation.affine_ops import assert_start_zero as _assert_start_zero  # noqa: E402
 import torch  # noqa: F401
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
@@ -244,12 +259,16 @@ def _detect_io2nib(rw, path) -> List[int]:
 
 
 def _native_geom(rw, ct_path, cache: Dict) -> Tuple:
-    """Cached ``(rw_shape, rw_spacing, rw_props, io2nib)`` for a native CT.
+    """Cached native-CT geometry: as-read + nibabel views + the permutation.
 
-    Read once per source via nnUNet's reader_writer (so shape/spacing are in
-    as-read order and ``rw_props`` carries the writer metadata) plus the
-    nibabel<->as-read permutation. Cached because every step of a source
-    re-uses the same native grid.
+    Returns ``(rw_shape, rw_spacing, rw_props, io2nib, nib_shape, nib_affine)``.
+
+    The as-read view (``rw_*`` from nnUNet's reader_writer) is kept only for
+    the legacy shape bookkeeping; the world-aware native resampling uses the
+    nibabel view (``nib_shape``/``nib_affine``) so the produced mask lands on
+    EXACTLY the native CT's voxel grid (and therefore the GT's grid, which
+    ``compare_native`` Dices against without resampling). Cached because every
+    step of a source re-uses the same native grid.
     """
     key = str(Path(ct_path).resolve())
     if key not in cache:
@@ -257,7 +276,10 @@ def _native_geom(rw, ct_path, cache: Dict) -> Tuple:
         rw_shape = tuple(int(x) for x in np.asarray(data).shape[-3:])
         rw_spacing = tuple(float(z) for z in props["spacing"][:3])
         io2nib = _detect_io2nib(rw, ct_path)
-        cache[key] = (rw_shape, rw_spacing, props, io2nib)
+        nimg = nib.load(str(ct_path))
+        nib_shape = tuple(int(x) for x in nimg.shape[:3])
+        nib_affine = np.asarray(nimg.affine, dtype=np.float64)
+        cache[key] = (rw_shape, rw_spacing, props, io2nib, nib_shape, nib_affine)
     return cache[key]
 
 
@@ -279,52 +301,6 @@ def _predict_logits(predictor, torch, input_file: Path):
     data_t = torch.from_numpy(np.ascontiguousarray(data)).float()
     logits = predictor.predict_logits_from_preprocessed_data(data_t)
     return logits, properties
-
-
-def _native_properties(
-    sparse_props: Dict,
-    native_shape_orig: Tuple[int, int, int],
-    native_zooms_orig: Tuple[float, float, float],
-    step: int,
-    step_axis_orig: int,
-    transpose_forward: List[int],
-) -> Dict:
-    """Synthesize an nnUNet ``properties`` dict describing the native grid.
-
-    Only the through-plane axis differs between the sparse and native
-    grids (native has ``step`` times more slices over the same FOV), so we
-    take the sparse crop bookkeeping and scale that one axis by ``step``.
-    ``native_shape_orig`` / ``native_zooms_orig`` / ``step_axis_orig`` are
-    in nnUNet's AS-READ (reader_writer) order, matching ``sparse_props``;
-    ``spacing`` is in that same file order (nnUNet transposes it forward
-    itself). Exact when transpose_forward is identity (see caller's guard).
-
-    INVARIANT: This remap is exact only when the sparse input was produced
-    with start=0 (first slice index = 0). All CNISP deployment paths
-    enforce this via simulation.affine_ops.assert_start_zero.
-    """
-    assert isinstance(step, int) and step >= 1, f"step must be int>=1, got {step}"
-    tf = list(transpose_forward)
-    internal_step_axis = tf.index(int(step_axis_orig))
-
-    # Native full shape in internal order (file shape, transposed forward).
-    native_full_internal = [int(native_shape_orig[a]) for a in tf]
-
-    sparse_bbox = [list(map(int, b)) for b in sparse_props["bbox_used_for_cropping"]]
-    native_bbox = [list(b) for b in sparse_bbox]
-    lo, hi = native_bbox[internal_step_axis]
-    native_bbox[internal_step_axis] = [
-        lo * step,
-        min(hi * step, native_full_internal[internal_step_axis]),
-    ]
-    native_after_crop = [int(hi_ - lo_) for (lo_, hi_) in native_bbox]
-
-    props = dict(sparse_props)
-    props["spacing"] = [float(z) for z in native_zooms_orig]  # file order
-    props["shape_before_cropping"] = tuple(native_full_internal)
-    props["bbox_used_for_cropping"] = native_bbox
-    props["shape_after_cropping_and_before_resampling"] = tuple(native_after_crop)
-    return props
 
 
 def _segmentation_from_logits(convert_fn, predictor, logits, properties):
@@ -389,16 +365,15 @@ def main() -> int:
     # nibabel<->as-read permutation), filled lazily and reused across steps.
     geom_cache: Dict[str, Tuple] = {}
 
-    # The native-grid synthesis (_native_properties) keeps the sparse crop
-    # bookkeeping and scales the through-plane axis. nnUNet records bbox /
-    # shape_before_cropping in as-read order; this code is exact when the
-    # plan's transpose_forward is identity (internal order == as-read order),
-    # which is the usual 3d_fullres case. If it is NOT identity, the per-axis
-    # bbox/shape ordering must be re-verified against the native CT overlay.
+    # The world-aware native resampling reorders nnUNet's INTERNAL-order
+    # logits/crop-bbox into nibabel order via _internal_to_nib_perm, so it is
+    # correct for any transpose_forward. The usual 3d_fullres plan is identity
+    # anyway; if it is NOT, spot-check that each sparse_step_XX_native mask
+    # overlays its CT correctly (the perm path is exercised but rarely).
     if transpose_forward != [0, 1, 2]:
-        print(f"[predict_sparse_iso] WARNING: transpose_forward="
-              f"{transpose_forward} is non-identity. Native-grid masks assume "
-              f"as-read order == internal order; spot-check that each "
+        print(f"[predict_sparse_iso] NOTE: transpose_forward="
+              f"{transpose_forward} is non-identity. The native resampler "
+              f"reorders internal->nibabel explicitly; spot-check that each "
               f"sparse_step_XX_native mask overlays its CT correctly.",
               flush=True)
 
@@ -474,16 +449,14 @@ def main() -> int:
                               f"source_to_path.json")
                 continue
             ct_path = ct_info["ct_image_path"]
-            # Native geometry in nnUNet's as-read order (the same convention
-            # every nnUNet segmentation comes back in). The sparse input was
-            # written from this CT preserving orientation, so they share the
-            # nibabel<->as-read permutation.
-            (native_rw_shape, native_rw_spacing,
-             native_rw_props, io2nib) = _native_geom(rw, ct_path, geom_cache)
-            # step_axis from the manifest is a nibabel voxel-axis index; map
-            # it to nnUNet's as-read order for the native-grid synthesis.
-            nib_step_axis = int(info["step_axis"])
-            rw_step_axis = io2nib[nib_step_axis]
+            # Native geometry. The world-aware native resampling uses the
+            # nibabel (shape, affine) view so the produced mask lands on the
+            # native CT's exact grid (== GT grid). io2nib carries the nnUNet
+            # internal/as-read <-> nibabel permutation used to reorder the
+            # plan logits and crop bbox into nibabel order.
+            (native_rw_shape, native_rw_spacing, native_rw_props, io2nib,
+             native_nib_shape, native_nib_affine) = _native_geom(
+                rw, ct_path, geom_cache)
 
             try:
                 t0 = time.time()
@@ -507,39 +480,48 @@ def main() -> int:
                 dst_sparse.parent.mkdir(parents=True, exist_ok=True)
                 rw.write_seg(sparse_seg.astype(np.uint8), str(dst_sparse), props)
 
-                # 2) native-grid mask via nnUNet's own resampler.
-                # Position-exactness invariant: sparse inputs are produced
-                # with start=0, so sparse voxel i maps to native voxel i*step.
-                # This makes the bbox scaling below exact. Enforce both the
-                # mode and start=0 invariants from the manifest.
+                # 2) native-grid mask via WORLD-COORDINATE resampling of the
+                # plan/iso logits (see _native_seg_world_aware). This places
+                # each kept sparse slice at native voxel i*step (start=0),
+                # instead of nnUNet's affine-blind resampler which centred it
+                # in the step-wide slab (a (step-1)/2 through-plane shift).
+                # Enforce the mode and start=0 invariants from the manifest:
+                # the start=0 sweep geometry is what _plan_affine_nib assumes.
                 assert info.get("mode", "thin") in ("thin", "thick"), (
                     f"step_{step_tag} {sid}: unexpected mode={info.get('mode')}"
                 )
                 # Legacy manifests pre-date the "start" field; default to 0
                 # (which was the only value ever produced).
                 _assert_start_zero(int(info.get("start", 0)))
-                # All geometry args are in nnUNet as-read order, matching the
-                # sparse props (also as-read), so _native_properties stays
-                # self-consistent. The shape assert below is a hard guard:
-                # if anything is mis-ordered the source is skipped loudly
-                # rather than silently writing a transposed Dice target.
-                native_props = _native_properties(
-                    props, native_rw_shape, native_rw_spacing,
-                    step, rw_step_axis, transpose_forward,
+                sparse_affine = np.asarray(
+                    nib.load(str(sparse_input)).affine, dtype=np.float64
                 )
-                native_seg = _segmentation_from_logits(
-                    convert_fn, predictor, logits.clone(), native_props,
+                # argmax the plan-spacing logits (INTERNAL axis order), then
+                # resample that label map onto the native grid by world coords.
+                plan_internal = np.asarray(
+                    logits.argmax(0).cpu().numpy()
+                ).astype(np.uint8)
+                native_seg = resample_plan_to_native(
+                    plan_internal, transpose_forward, io2nib,
+                    props["bbox_used_for_cropping"], sparse_affine,
+                    native_nib_shape, native_nib_affine,
                 )
-                if tuple(native_seg.shape) != native_rw_shape:
+                # Hard guard: world-aware resample is constructed to output the
+                # native CT's exact nibabel shape; a mismatch means an axis or
+                # geometry slip, so skip loudly rather than write a bad Dice
+                # target.
+                if tuple(native_seg.shape) != tuple(native_nib_shape):
                     issues.append(
                         f"step_{step_tag} {sid}: native mask shape "
-                        f"{native_seg.shape} != native CT {native_rw_shape} "
-                        f"(as-read order). Axis-order/scale bug -- NOT writing."
+                        f"{native_seg.shape} != native CT {native_nib_shape} "
+                        f"(nibabel order). Axis-order/geometry bug -- NOT writing."
                     )
                     continue
                 dst_native.parent.mkdir(parents=True, exist_ok=True)
-                rw.write_seg(native_seg.astype(np.uint8), str(dst_native),
-                             native_rw_props)
+                nib.save(
+                    nib.Nifti1Image(native_seg, native_nib_affine),
+                    str(dst_native),
+                )
 
                 step_map[sid] = dst_native.name
                 n_inferred += 1

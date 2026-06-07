@@ -240,6 +240,26 @@
 #                          + nnunet/engine/build_method_summary.py
 #                          + nnunet/engine/build_paired_summary.py)
 #
+#   nnunet-native-summary nnUNet-only native-space Dice, re-shaped by
+#                         sparsification STEP (the per-step counterpart to
+#                         the by-eff_res nnUNet-sparse bundle `compare`
+#                         renders). Carves the nnUNet-sparse rows out of
+#                         the canonical paired CSV (prefers
+#                         paired_per_source__nnunet_pred__<exp>.csv) and
+#                         writes, into
+#                         ${work_dir}/comparison/viz/nnUNet-sparse__<exp>/:
+#                           nnunet_native_per_source__<tag>__<exp>.csv
+#                             (WIDE: one row per (source,step), a column
+#                              per structure + mean + eff_res_mm)
+#                           nnunet_native_by_step__<tag>__<exp>.csv
+#                             (aggregated by step: n_sources + mean/std
+#                              per structure)
+#                           nnunet_native_dice_vs_step__<tag>__<exp>.png
+#                         Re-shapes, never re-measures, so it can run any
+#                         time AFTER `compare`. Standalone:
+#                           bash run_pipeline.sh nnunet-native-summary
+#                         (nnunet/engine/build_nnunet_native_summary.py)
+#
 # Dependency order (the order phases run when none are specified):
 #   cnisp-train
 #     -> nnunet-predict
@@ -252,6 +272,7 @@
 #     -> cnisp-native-remap                           (canonical->native masks)
 #     -> cnisp-viz
 #     -> compare
+#     -> nnunet-native-summary                        (per-step nnUNet reshape)
 #
 #   OPT-IN (not run unless named explicitly; need a realpair manifest):
 #     cnisp-prep-realpair  -> cnisp-infer-realpair    (real_pair run)
@@ -328,6 +349,7 @@ PHASES_DEFAULT=(
     cnisp-native-remap
     cnisp-viz
     compare
+    nnunet-native-summary
 )
 PHASES=()
 
@@ -382,6 +404,7 @@ VALID_PHASES=(
     cnisp-native-remap
     cnisp-viz
     compare
+    nnunet-native-summary
 )
 for phase in "${PHASES[@]}"; do
     found=0
@@ -1298,6 +1321,49 @@ phase_compare() {
             --comparison-dir "$WORK_DIR/comparison"
 }
 
+# ── Pick the canonical paired CSV for the nnUNet-sparse rows ──────────
+# nnUNet-sparse Dice is independent of the CNISP run_tag, so any paired
+# CSV carries identical nnUNet rows for shared sources. We prefer the
+# nnunet_pred CSV (a strict superset that also carries chk_* rows), and
+# fall back to the last configured run_tag. Echoes the chosen CSV path on
+# stdout; returns non-zero (with a hint on stderr) when nothing is found.
+_canonical_paired_csv() {
+    if [[ ${#CNISP_RUN_TAGS[@]} -eq 0 ]]; then
+        echo "[run_pipeline] no cnisp_runs_to_compare configured" >&2
+        return 1
+    fi
+    local canonical_tag="${CNISP_RUN_TAGS[-1]}"
+    for t in "${CNISP_RUN_TAGS[@]}"; do
+        if [[ "$t" == "nnunet_pred" ]]; then canonical_tag="$t"; break; fi
+    done
+    local csv="$WORK_DIR/comparison/paired_per_source__${canonical_tag}__${EXP}.csv"
+    if [[ ! -f "$csv" ]]; then
+        echo "[run_pipeline] paired CSV not found: $csv" >&2
+        echo "  Run the \`compare\` phase first (it writes paired_per_source__*.csv)." >&2
+        return 1
+    fi
+    echo "$csv"
+}
+
+phase_nnunet_native_summary() {
+    echo ""
+    echo "[phase] nnunet-native-summary -------------------------------"
+    # Reshape the nnUNet-sparse rows out of the (already-computed) paired
+    # CSV into a per-STEP bundle for analysing the nnUNet native curve on
+    # its own: a wide per-(source,step) CSV, a by-step aggregate CSV, and
+    # a Dice-vs-step figure. This is the per-step counterpart to the
+    # by-eff_res nnUNet-sparse bundle that `compare` already renders; it
+    # re-shapes, never re-measures, so it can run any time after `compare`.
+    local canonical_csv
+    canonical_csv="$(_canonical_paired_csv)" || return 2
+    local out_dir="$WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}"
+    echo "  ─── nnUNet-sparse per-step summary (experiment=$EXP, CSV=$(basename "$canonical_csv")) ───"
+    python3 "$REPO_ROOT/nnunet/engine/build_nnunet_native_summary.py" \
+            --config "$CONFIG" \
+            --paired-csv "$canonical_csv" \
+            --out-dir "$out_dir"
+}
+
 # ── Dispatch ─────────────────────────────────────────────────
 START_TS="$(date +%s)"
 for phase in "${PHASES[@]}"; do
@@ -1315,6 +1381,7 @@ for phase in "${PHASES[@]}"; do
         cnisp-native-remap)            phase_cnisp_native_remap ;;
         cnisp-viz)                     phase_cnisp_viz ;;
         compare)                       phase_compare ;;
+        nnunet-native-summary)         phase_nnunet_native_summary ;;
     esac
 done
 END_TS="$(date +%s)"
@@ -1355,6 +1422,9 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
 done
 echo "  nnUNet-sparse standalone bundle (run-tag-agnostic; per experiment):"
 echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}/nnUNet-sparse_recon_summary.png"
+echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}/nnunet_native_by_step__*.csv"
+echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}/nnunet_native_dice_vs_step__*.png"
+echo "      (per-step nnUNet view from \`nnunet-native-summary\`)"
 # real_pair line is opt-in; only point at it when its run dir exists.
 _rp_run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/real/real_pair"
 if [[ -d "$_rp_run_dir" ]]; then
