@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""nnUNet-only native-space Dice summary, indexed by sparsification step.
+"""Visualise nnUNet's own Dice on the degraded (sparsified) images, by step.
 
-This is a SELF-CONTAINED collector for the nnUNet sparse-CT sweep: it reads
-the nnUNet native-grid predictions straight out of the prediction tree and
-Dices them against the native-head GT itself. It does NOT depend on the
-``compare`` phase / any CNISP run -- the nnUNet curve is independent of
-which CNISP latent-opt input is in flight, so there is no reason to wait
-for the head-to-head comparison.
+This answers a single question -- "how good is nnUNet's segmentation of the
+sparse-CT scan, as the through-plane sparsification grows?" -- and nothing
+else. It reads ONLY nnUNet's own native-grid predictions and the native GT;
+NO CNISP prediction is ever touched, and it does not depend on the
+``compare`` phase.
 
-Inputs (all under ``{work_dir}`` + the CNISP GT roots)
-------------------------------------------------------
+Inputs
+------
 * ``{work_dir}/prediction/{exp}/sweep_manifest.json`` -- ``{steps: {XX:
   {sid: basename}}}``, the per-(step, source) index written by
   ``nnunet/engine/predict_sparse_iso.py``.
 * ``{work_dir}/prediction/{exp}/sparse_step_{XX}_native/{sid}.nii.gz`` --
-  the plan-spacing (iso 0.5) prediction resampled onto the native CT grid
-  (the Dice target). step_01 is a symlink to the dense baseline.
+  nnUNet's prediction on the step-XX sparsified CT, resampled onto the
+  native CT grid (the thing we Dice). step_01 is the dense baseline.
 * ``{work_dir}/input/{exp}/sparse_manifest.json`` (optional) -- supplies
   ``eff_res_mm`` per (source, step) for the eff_res column. Missing -> NaN.
-* native-head GT, resolved exactly as ``compare_native.py`` does
-  (atlas manual GT for atlas_* sources; chk_pseudo for chk_* unless
-  ``--deployment-chk-gt`` swaps it to Dataset835's dense pred).
+* native-head GT (the ground-truth masks, which live under the CNISP
+  aligned/metadata tree). This is the segmentation target, not a CNISP
+  result; it is resolved with the shared ``resolve_gt`` helper so the GT
+  scheme/offset handling matches the rest of the project.
 
-Dice handling is shared verbatim with ``compare_native.py`` (same loaders,
-same affine check, same chk_* world-aware pred resample, same per-side
-label maps) so this summary can never disagree with the comparison.
+The mask loader, affine check and Dice scorer are imported from
+``compare_native`` purely as generic utilities so the numbers match how
+Dice is computed elsewhere.
 
 Outputs (under ``{work_dir}/prediction/{exp}/native_summary/``)
 --------------------------------------------------------------
@@ -33,8 +33,19 @@ Outputs (under ``{work_dir}/prediction/{exp}/native_summary/``)
   the 4-class ``mean`` + ``eff_res_mm``. Mirrors CNISP's ``test_results.csv``.
 * ``nnunet_native_by_step__{exp}.csv``     -- aggregated by step_size:
   ``n_sources`` + ``mean +/- std`` per structure.
+* ``nnunet_native_by_eff_res__{exp}.csv``  -- the same rows aggregated into
+  the effective-resolution buckets used by ``build_method_summary`` (shared
+  ``summary_bucket_edges_mm``), so this table/figure line up point-for-point
+  with CNISP's ``*_dice_vs_eff_res`` plots. NOTE: step axis and eff_res axis
+  are NOT interchangeable -- eff_res = base_spacing * step and base_spacing
+  varies per scan, so one step spreads across several eff_res buckets.
 * ``nnunet_native_dice_vs_step__{exp}.png`` -- overall mean Dice vs step
   (left) and the four per-class curves vs step (right).
+* ``nnunet_native_dice_vs_eff_res__{exp}.png`` -- the same, on the eff_res
+  axis (comparable to CNISP's per-method/paired summaries).
+
+Outputs land under the prediction tree (like CNISP keeps its summaries
+under its own run dir): ``{work_dir}/prediction/{exp}/native_summary/``.
 
 Usage
 -----
@@ -66,19 +77,22 @@ import numpy as np  # noqa: E402
 # Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# Reuse the comparison machinery verbatim so the standalone nnUNet summary
-# and the head-to-head comparison can never drift apart on Dice/GT handling.
+# Reuse the generic loaders / Dice helpers so this nnUNet-only summary and
+# the (separate) head-to-head comparison can never drift apart on how a
+# mask is read or how Dice is scored. These are plain utilities -- no CNISP
+# prediction is ever read here.
 from nnunet.compare_native import (  # noqa: E402
     _affines_consistent,
-    _build_eff_res_index,
     _dice_for_source,
     _load_label_volume_with_affine,
-    _override_chk_gt_for_deployment,
     _resample_pred_onto_gt,
 )
 from nnunet.helpers.buckets import (  # noqa: E402
+    DEFAULT_BUCKET_EDGES_MM,
     NNUNET_METHOD_LABEL,
     STRUCT_ORDER,
+    assign_bucket,
+    bucket_sort_key,
 )
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.helpers.paired_csv import resolve_source_prefix_filters  # noqa: E402
@@ -271,6 +285,50 @@ def aggregate_by_step(wide_rows: List[Dict]) -> List[Dict]:
     return out
 
 
+def aggregate_by_eff_res(
+    wide_rows: List[Dict], edges: List[float],
+) -> List[Dict]:
+    """Aggregate wide per-(source, step) rows into eff_res buckets.
+
+    Same bucket edges as ``build_method_summary`` / the CNISP plots, so the
+    nnUNet eff_res figure lines up point-for-point with CNISP's. Rows whose
+    eff_res is NaN (e.g. step_01, which the sparsify manifest doesn't list)
+    fall into an explicit 'unknown' bucket at the right edge.
+    """
+    by_bucket: Dict[str, List[Dict]] = defaultdict(list)
+    bucket_eff: Dict[str, List[float]] = defaultdict(list)
+    for r in wide_rows:
+        eff = r["eff_res_mm"]
+        if math.isnan(eff):
+            label = "unknown"
+        else:
+            _, label = assign_bucket(eff, edges)
+            bucket_eff[label].append(eff)
+        by_bucket[label].append(r)
+
+    labels = sorted(by_bucket.keys(), key=bucket_sort_key)
+    out: List[Dict] = []
+    for label in labels:
+        group = by_bucket[label]
+        effs = bucket_eff.get(label, [])
+        agg: Dict = {
+            "eff_res_bucket": label,
+            "n_sources": len(group),
+            "eff_res_mm": float(np.mean(effs)) if effs else float("nan"),
+        }
+        for c in COLS:
+            vals = [r[c] for r in group if not math.isnan(r[c])]
+            if vals:
+                arr = np.asarray(vals, dtype=np.float64)
+                agg[f"{c}_mean"] = float(arr.mean())
+                agg[f"{c}_std"] = float(arr.std())
+            else:
+                agg[f"{c}_mean"] = float("nan")
+                agg[f"{c}_std"] = float("nan")
+        out.append(agg)
+    return out
+
+
 def _fmt(v: float, nd: int = 6) -> str:
     return "" if (v is None or math.isnan(v)) else f"{v:.{nd}f}"
 
@@ -300,6 +358,69 @@ def write_by_step_csv(step_rows: List[Dict], out_path: Path) -> None:
             for c in COLS:
                 row += [_fmt(r[f"{c}_mean"], 4), _fmt(r[f"{c}_std"], 4)]
             w.writerow(row)
+
+
+def write_by_eff_res_csv(bucket_rows: List[Dict], out_path: Path) -> None:
+    fieldnames = ["eff_res_bucket", "n_sources", "eff_res_mm"]
+    for c in COLS:
+        fieldnames += [f"{c}_mean", f"{c}_std"]
+    with open(out_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(fieldnames)
+        for r in bucket_rows:
+            row = [r["eff_res_bucket"], r["n_sources"], _fmt(r["eff_res_mm"], 4)]
+            for c in COLS:
+                row += [_fmt(r[f"{c}_mean"], 4), _fmt(r[f"{c}_std"], 4)]
+            w.writerow(row)
+
+
+def plot_dice_vs_eff_res(
+    bucket_rows: List[Dict], method: str, out_path: Path,
+) -> None:
+    """Overall + per-class Dice vs effective resolution (matches CNISP's axis).
+
+    Only buckets with a finite mean eff_res are plotted (the 'unknown'
+    bucket -- step_01 with no manifest eff_res -- is dropped from the x-axis
+    but still appears in the by_eff_res CSV).
+    """
+    pts = [r for r in bucket_rows if not math.isnan(r["eff_res_mm"])]
+    pts.sort(key=lambda r: r["eff_res_mm"])
+    xs = [r["eff_res_mm"] for r in pts]
+
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(13, 5))
+
+    ys = [r["mean_mean"] for r in pts]
+    es = [r["mean_std"] for r in pts]
+    ax0.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color="#444")
+    for r in pts:
+        if not math.isnan(r["mean_mean"]):
+            ax0.annotate(f"{r['mean_mean']:.3f}\nn={r['n_sources']}",
+                         (r["eff_res_mm"], r["mean_mean"]),
+                         textcoords="offset points", xytext=(0, 10),
+                         ha="center", fontsize=8, color="#444")
+    ax0.set_xlabel("effective resolution (mm, through-plane)")
+    ax0.set_ylabel("mean Dice (4 foreground classes)")
+    ax0.set_title(f"{method}: overall native Dice vs eff_res")
+    ax0.set_ylim(0, 1)
+    ax0.grid(True, alpha=0.3)
+
+    for c in STRUCT_ORDER:
+        ys_c = [r[f"{c}_mean"] for r in pts]
+        es_c = [r[f"{c}_std"] for r in pts]
+        ax1.errorbar(xs, ys_c, yerr=es_c, fmt="o-", capsize=3,
+                     color=CLASS_COLORS[c], label=c)
+    ax1.set_xlabel("effective resolution (mm, through-plane)")
+    ax1.set_ylabel("Dice")
+    ax1.set_title(f"{method}: per-class native Dice vs eff_res")
+    ax1.set_ylim(0, 1)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="lower left", fontsize=8, ncol=2)
+
+    fig.suptitle(f"{method}: native-space Dice vs effective resolution",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_dice_vs_step(step_rows: List[Dict], method: str, out_path: Path) -> None:
@@ -372,19 +493,12 @@ def build_nnunet_native_summary(
     out_dir: Path,
     include_prefixes: List[str],
     exclude_prefixes: List[str],
-    deployment_chk_gt: bool,
 ) -> List[Path]:
     """Collect nnUNet native Dice and write the per-step bundle. Returns paths."""
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sources = _resolve_sources_for_summary(cfg, cnisp_paths)
-    # chk_* GT swap (only relevant if chk_* survive the source filter).
-    if deployment_chk_gt:
-        deployment_dirname = cfg.get(
-            "deployment_gt_dirname_for_chk", "prediction/native")
-        sources = _override_chk_gt_for_deployment(
-            sources, work_dir, deployment_dirname)
 
     # Source-prefix filter (default: drop chk_* like the other viz scripts).
     inc = tuple(p for p in include_prefixes if p)
@@ -413,15 +527,24 @@ def build_nnunet_native_summary(
             "No nnUNet native Dice rows produced -- check that "
             f"prediction/{experiment}/sparse_step_XX_native/ is populated.")
 
+    bucket_edges = list(cfg.get("summary_bucket_edges_mm",
+                                list(DEFAULT_BUCKET_EDGES_MM)))
     step_rows = aggregate_by_step(wide_rows)
+    bucket_rows = aggregate_by_eff_res(wide_rows, bucket_edges)
 
     per_source_csv = out_dir / f"nnunet_native_per_source__{experiment}.csv"
     by_step_csv = out_dir / f"nnunet_native_by_step__{experiment}.csv"
-    png = out_dir / f"nnunet_native_dice_vs_step__{experiment}.png"
+    by_eff_csv = out_dir / f"nnunet_native_by_eff_res__{experiment}.csv"
+    step_png = out_dir / f"nnunet_native_dice_vs_step__{experiment}.png"
+    eff_png = out_dir / f"nnunet_native_dice_vs_eff_res__{experiment}.png"
 
     write_per_source_csv(wide_rows, per_source_csv)
     write_by_step_csv(step_rows, by_step_csv)
-    plot_dice_vs_step(step_rows, NNUNET_METHOD_LABEL, png)
+    write_by_eff_res_csv(bucket_rows, by_eff_csv)
+    # step axis = the per-step view; eff_res axis = lines up with CNISP's
+    # build_method_summary / paired plots (same bucket edges).
+    plot_dice_vs_step(step_rows, NNUNET_METHOD_LABEL, step_png)
+    plot_dice_vs_eff_res(bucket_rows, NNUNET_METHOD_LABEL, eff_png)
 
     n_sources = len({r["source_id"] for r in wide_rows})
     print(f"[nnunet_native_summary] {NNUNET_METHOD_LABEL} (experiment="
@@ -431,9 +554,10 @@ def build_nnunet_native_summary(
           f"skipped_pred={stats['skipped_pred']} "
           f"atlas_grid_mismatch={stats['skipped_atlas_mismatch']} "
           f"chk_resampled={stats['resampled_chk']}")
-    for p in (per_source_csv, by_step_csv, png):
+    outs = [per_source_csv, by_step_csv, by_eff_csv, step_png, eff_png]
+    for p in outs:
         print(f"  {p}")
-    return [per_source_csv, by_step_csv, png]
+    return outs
 
 
 def main() -> int:
@@ -448,10 +572,6 @@ def main() -> int:
     ap.add_argument("--out-dir", default=None,
                     help="Output directory. Default: "
                          "${work_dir}/prediction/<experiment>/native_summary/.")
-    ap.add_argument("--deployment-chk-gt", action="store_true",
-                    help="Dice chk_* sources against Dataset835's dense pred "
-                         "(deployment GT) instead of the legacy chk_pseudo GT. "
-                         "No effect when chk_* are excluded (the default).")
     ap.add_argument("--include-source-prefixes", default=None,
                     help="Comma-separated source_id prefixes to keep. Default: "
                          "'viz_include_source_prefixes' from --config.")
@@ -479,7 +599,6 @@ def main() -> int:
         out_dir=out_dir,
         include_prefixes=include_prefixes,
         exclude_prefixes=exclude_prefixes,
-        deployment_chk_gt=args.deployment_chk_gt,
     )
     return 0
 

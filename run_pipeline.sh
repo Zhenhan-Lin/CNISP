@@ -256,7 +256,12 @@
 #                           nnunet_native_by_step__<exp>.csv
 #                             (aggregated by step: n_sources + mean/std
 #                              per structure)
+#                           nnunet_native_by_eff_res__<exp>.csv
+#                             (same rows aggregated into the eff_res
+#                              buckets used by build_method_summary, so it
+#                              lines up point-for-point with CNISP's plots)
 #                           nnunet_native_dice_vs_step__<exp>.png
+#                           nnunet_native_dice_vs_eff_res__<exp>.png
 #                         Depends only on `nnunet-predict-sweep` (+ the GT
 #                         metadata from canonical alignment). Standalone:
 #                           bash run_pipeline.sh nnunet-native-summary
@@ -1400,8 +1405,10 @@ echo "  nnUNet-sparse standalone bundle (run-tag-agnostic; per experiment):"
 echo "    $WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}/nnUNet-sparse_recon_summary.png"
 echo "  nnUNet native per-step summary (self-contained; under prediction tree):"
 echo "    $WORK_DIR/prediction/$EXP/native_summary/nnunet_native_by_step__${EXP}.csv"
+echo "    $WORK_DIR/prediction/$EXP/native_summary/nnunet_native_by_eff_res__${EXP}.csv"
 echo "    $WORK_DIR/prediction/$EXP/native_summary/nnunet_native_per_source__${EXP}.csv"
 echo "    $WORK_DIR/prediction/$EXP/native_summary/nnunet_native_dice_vs_step__${EXP}.png"
+echo "    $WORK_DIR/prediction/$EXP/native_summary/nnunet_native_dice_vs_eff_res__${EXP}.png"
 # real_pair line is opt-in; only point at it when its run dir exists.
 _rp_run_dir="$CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME/runs/real/real_pair"
 if [[ -d "$_rp_run_dir" ]]; then
