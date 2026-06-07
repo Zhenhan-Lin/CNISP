@@ -753,18 +753,6 @@ _write_provenance() {
     printf '%s' "$sig" > "$stamp"
 }
 
-_safe_rm_glob() {
-    # rm -rf for paths under a REQUIRED non-empty, existing base dir.
-    # Refuses to act if base is empty or '/' so a misresolved var cannot
-    # nuke the filesystem.
-    local base="$1"; shift
-    [[ -n "$base" && "$base" != "/" && -d "$base" ]] || return 0
-    local p
-    for p in "$@"; do
-        [[ -n "$p" && "$p" != "/" ]] && rm -rf "$p"
-    done
-}
-
 # ── Phase implementations ────────────────────────────────────
 
 phase_cnisp_train() {
@@ -804,10 +792,10 @@ phase_nnunet_predict() {
     if [[ -f "$stamp" ]] && ! _provenance_fresh "$stamp" "$sig"; then
         echo "  native predictions present but provenance CHANGED -> re-predicting:"
         _explain_drift "$stamp" "$sig"
-        # nnUNetv2_predict skips cases whose output already exists; wipe the
-        # stale masks so the new fold/model actually regenerates them.
-        _safe_rm_glob "$pred_dir" "$pred_dir"/*.nii.gz
     fi
+    # nnUNetv2_predict overwrites existing outputs in place (no --continue_prediction
+    # is passed), so a changed fold/model regenerates the masks without deleting
+    # anything first.
     CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_native.sh"
     _write_provenance "$stamp" "$sig"
 }
@@ -846,25 +834,24 @@ phase_nnunet_predict_sweep() {
         _explain_drift "$stamp" "$sig"
     fi
     echo "  experiment=$EXP degradation: mode=$SWEEP_DEGRADE_MODE modality=$SWEEP_MODALITY"
-    # Clear stale sparse inputs/preds for THIS experiment before rebuilding.
-    # sparsify_inputs.py has no per-file --force (skip is unconditional on
-    # dst.exists()), so a code change to the geometry would otherwise
-    # silently reuse the wrong sparse CTs. Wiping the exp subtree guarantees
-    # a clean rebuild without touching the other experiment's results.
-    echo "  clearing stale sparse inputs/preds under input/$EXP + prediction/$EXP"
-    _safe_rm_glob "${WORK_DIR}/input"      "${WORK_DIR}/input/${EXP}"
-    _safe_rm_glob "${WORK_DIR}/prediction" "${WORK_DIR}/prediction/${EXP}"
+    # Overwrite in place -- never delete. When the geometry code or upstream
+    # atlas sweep changed (provenance drift) we pass --force so sparsify_inputs
+    # and predict_sparse_iso overwrite the existing sparse CTs/masks rather than
+    # skip-if-exists. A first run (no manifest yet) writes fresh files without
+    # --force. Stale orphans from a shrunk (source, step) set are harmless:
+    # downstream reads the freshly written manifests, not a directory glob.
+    local force_args=()
+    [[ $FORCE -eq 1 || -f "$marker" ]] && force_args+=("--force")
     python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG" \
             --mode "$SWEEP_DEGRADE_MODE" --modality "$SWEEP_MODALITY" \
-            --experiment "$EXP"
+            --experiment "$EXP" "${force_args[@]}"
     # Single custom-predictor pass writes the sparse-grid mask
-    # (sparse_step_XX/), the genuine iso-0.5 plan-spacing prediction
-    # (sparse_step_XX_upsampled/), and that iso prediction resampled onto
-    # the native grid with nnUNet's own resampler (sparse_step_XX_native/,
-    # the Dice target). Replaces the old nnUNetv2_predict CLI sweep +
-    # NN slice-duplication upsample.
+    # (sparse_step_XX/) and that prediction resampled onto the native grid
+    # (sparse_step_XX_native/, the Dice target). --force overwrites existing
+    # masks in place on drift; without it predict_sparse_iso skips pairs whose
+    # outputs already exist (resume-friendly).
     python3 "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py" --config "$CONFIG" \
-            --experiment "$EXP"
+            --experiment "$EXP" "${force_args[@]}"
     _write_provenance "$stamp" "$sig"
 }
 

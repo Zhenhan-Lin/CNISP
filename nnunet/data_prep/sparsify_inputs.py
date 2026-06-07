@@ -272,6 +272,11 @@ def main() -> int:
                          "strategies coexist instead of overwriting each "
                          "other. The shared native/ dense inputs are NOT "
                          "exp-scoped (they are strategy-independent).")
+    ap.add_argument("--force", action="store_true",
+                    help="Overwrite existing sparse CTs in place instead of "
+                         "skipping when the destination file already exists. "
+                         "Use when the geometry/degradation changed so stale "
+                         "sparse inputs are refreshed without deleting first.")
     args = ap.parse_args()
 
     cfg = load_yaml(Path(args.config))
@@ -464,7 +469,7 @@ def main() -> int:
                 )
                 n_drift_warn += 1
 
-            if dst.exists():
+            if dst.exists() and not args.force:
                 n_skipped_existing += 1
             else:
                 sparse_arr, new_affine = _sparsify_one_ct(
