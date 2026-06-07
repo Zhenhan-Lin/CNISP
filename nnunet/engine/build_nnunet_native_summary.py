@@ -42,7 +42,10 @@ Outputs (under ``{work_dir}/prediction/{exp}/native_summary/``)
 * ``nnunet_native_dice_vs_step__{exp}.png`` -- overall mean Dice vs step
   (left) and the four per-class curves vs step (right).
 * ``nnunet_native_dice_vs_eff_res__{exp}.png`` -- the same, on the eff_res
-  axis (comparable to CNISP's per-method/paired summaries).
+  axis (comparable to CNISP's per-method/paired summaries). step_01 (the
+  dense baseline) is placed at its base through-plane spacing so the raw
+  point appears at the low-eff_res end like CNISP's, rather than being
+  dropped.
 
 Outputs land under the prediction tree (like CNISP keeps its summaries
 under its own run dir): ``{work_dir}/prediction/{exp}/native_summary/``.
@@ -117,8 +120,16 @@ def _eff_res_from_sparse_manifest(
     """(source_id, step) -> eff_res_mm read from the sparsify manifest.
 
     ``input/{exp}/sparse_manifest.json`` records ``by_step[XX][sid]`` with
-    an ``eff_res_mm`` field (CNISP's row value). step_01 is absent there
-    (it is the un-sparsified dense baseline), so its eff_res stays NaN.
+    an ``eff_res_mm`` field (CNISP's row value) and an ``actual_eff_res_mm``
+    (= raw base spacing * step).
+
+    step_01 is the un-sparsified dense baseline and is absent from the
+    manifest (``sparsify_inputs`` skips it). We still synthesise its eff_res
+    here as the source's base through-plane spacing so the dense/raw point
+    lands at its true (low) effective resolution -- matching CNISP's step=1
+    placement -- instead of falling into the NaN/'unknown' bucket and being
+    dropped from the eff_res figure. base = actual_eff_res_mm / step (exact,
+    since sparsify writes actual = base*step); falls back to eff_res_mm/step.
     """
     p = work_dir / "input" / experiment / "sparse_manifest.json"
     if not p.exists():
@@ -129,6 +140,7 @@ def _eff_res_from_sparse_manifest(
     except (OSError, json.JSONDecodeError):
         return {}
     out: Dict[Tuple[str, int], float] = {}
+    actual: Dict[Tuple[str, int], float] = {}
     for step_tag, sid_map in m.get("by_step", {}).items():
         try:
             step = int(step_tag)
@@ -138,6 +150,24 @@ def _eff_res_from_sparse_manifest(
             eff = info.get("eff_res_mm")
             if eff is not None:
                 out[(sid, step)] = float(eff)
+            a = info.get("actual_eff_res_mm")
+            if a is not None:
+                actual[(sid, step)] = float(a)
+
+    # Synthesise step=1 (dense baseline) eff_res = base through-plane spacing.
+    per_src_steps: Dict[str, List[int]] = defaultdict(list)
+    for (sid, step) in out:
+        if step > 1:
+            per_src_steps[sid].append(step)
+    for sid, steps in per_src_steps.items():
+        s = min(steps)
+        base = actual.get((sid, s))
+        if base is not None:
+            base = base / s
+        elif (sid, s) in out:
+            base = out[(sid, s)] / s
+        if base is not None:
+            out[(sid, 1)] = float(base)
     return out
 
 
@@ -291,9 +321,11 @@ def aggregate_by_eff_res(
     """Aggregate wide per-(source, step) rows into eff_res buckets.
 
     Same bucket edges as ``build_method_summary`` / the CNISP plots, so the
-    nnUNet eff_res figure lines up point-for-point with CNISP's. Rows whose
-    eff_res is NaN (e.g. step_01, which the sparsify manifest doesn't list)
-    fall into an explicit 'unknown' bucket at the right edge.
+    nnUNet eff_res figure lines up point-for-point with CNISP's. step_01's
+    eff_res is synthesised as the base spacing (see
+    ``_eff_res_from_sparse_manifest``) so the dense baseline lands in its low
+    bucket; any rows still lacking eff_res (NaN) fall into an explicit
+    'unknown' bucket that the plot drops but the CSV keeps.
     """
     by_bucket: Dict[str, List[Dict]] = defaultdict(list)
     bucket_eff: Dict[str, List[float]] = defaultdict(list)
