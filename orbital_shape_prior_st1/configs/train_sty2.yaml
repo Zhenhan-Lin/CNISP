@@ -1,7 +1,7 @@
 # --- Training configuration ---
 
 # Model identification (set to None for debug runs that don't save)
-model_name: orbital_ad_v5
+model_name: orbital_ad_v6
 
 # --- Architecture ---
 num_classes: 5            # BG + ON + Globe + Fat + Recti
@@ -14,20 +14,41 @@ labels_dirname: labels     # subdirectory name under aligned_dir
 train_casefile: train_cases.txt
 val_fraction: 0.15
 
-num_sparsify_offsets: 4
+num_sparsify_offsets: 4    # ignored under Strategy C; used only for VAL baseline
 val_casefile: val_cases.txt
 
 test_fraction: 0.2
 
 # --- Sparsification (synthetic anisotropy for training) ---
-# Keep every Nth slice along this axis to simulate thick-slice acquisition
+#
+# STRATEGY C (degradation bank — MIXED thin/thick, multi-step):
+#   When `degradation_bank` is present it OVERRIDES slice_step_size /
+#   use_thick_slices below. Each case generates items for many (mode, step)
+#   combinations (thin + thick + dense), each with its own latent code, so a
+#   single prior is matched to the variable-mode / variable-sparsity inputs we
+#   actually deploy on. This is what train_default.yaml (v1) uses.
+#
+degradation_bank:
+  modality: ct                      # orbital CT -> box kernel for thick averaging
+  modes: [thin, thick]              # both degradation modes in every training run
+  target_eff_res_increment_mm: 2.0  # ~half the test sweep density
+  max_eff_resolution_mm: 12.0       # cap effective resolution
+  offsets_per_setting: 1            # offsets per (mode, step); 1 = no offset augment
+  num_classes: 5                    # BG + ON + Globe + Fat + Recti
+  cache_dir: null                   # null -> auto: {labels_dir}/../degraded_bank/
+
+# Per-epoch sampling (Strategy C only)
+items_per_epoch: 100        # sample 100 items from the bank each epoch
+point_sample_fraction: 0.75 # sample 75% of dense voxels per item
+
+# Legacy knobs below are INERT for training while degradation_bank is set.
+# slice_step_size still seeds the single-view VAL dataset baseline.
 slice_step_size: 4
 # slice_step_axis: "auto" (DEFAULT) picks per-case argmax(patch_spacing);
 # each scan is sparsified along its own natural through-plane direction
 # after canonical alignment. Legacy mode is int 0/1/2 (uniform RAS axis).
-# See test_default.yaml for full notes (changing this requires retraining).
 slice_step_axis: auto
-use_thick_slices: false
+use_thick_slices: false     # ignored under Strategy C (bank controls thickness)
 
 # --- Sampling ---
 # Points per example per dim for training (64^3 = 262144 points total)

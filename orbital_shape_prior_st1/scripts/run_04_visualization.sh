@@ -28,7 +28,7 @@ export PYTHONPATH="$PROJECT_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
 TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
-MODEL_NAME="orbital_ad_v5"
+MODEL_NAME="orbital_ad_v6"
 # Optional 2nd arg: run_tag override (atlas_gt / nnunet_pred / ...).
 # Optional 3rd arg: experiment (thin / thick / real) directory layer.
 # When unset, the test yaml's run_tag / sweep_mode win (defaults atlas_gt/thin).
