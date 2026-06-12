@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # Phase 1: nnUNetv2_predict on the original (native-spacing) CT
-# inputs staged by nnunet/data_prep/prepare_inputs.py.
+# inputs staged by nnunet/prepare_inputs.py.
 #
 # Output is written at the input CT's native spacing -- nnUNetv2
 # resamples internally to the iso plan during forward pass and
@@ -72,7 +72,7 @@ IN_DIR="${IN_DIR:-${WORK_DIR}/input/native}"
 OUT_DIR="${OUT_DIR:-${WORK_DIR}/prediction/native}"
 
 if [[ ! -d "$IN_DIR" ]]; then
-    echo "[ERROR] input dir not found: $IN_DIR (did you run nnunet/data_prep/prepare_inputs.py?)" >&2
+    echo "[ERROR] input dir not found: $IN_DIR (did you run nnunet/prepare_inputs.py?)" >&2
     exit 2
 fi
 

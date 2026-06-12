@@ -60,7 +60,7 @@ The same model weights drive **two test-time inference runs** off the same 62-ey
 | run_tag       | `test_label_source` | latent-opt input                                                                                | dense Dice target                                                                                                                       | output dir                              |
 | ------------- | ------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
 | `atlas_gt`    | `atlas_gt`          | `sparsen_volume(canonical GT)` from `${aligned_dir}/labels/`                                    | same canonical GT — **ceiling curve**, isolates the shape prior                                                                          | `output_basedir/<model>/runs/atlas_gt/` |
-| `nnunet_pred` | `nnunet_pred`       | per-step Dataset835 sparse-CT pred canonical-aligned, from `${aligned_dir}/labels_dataset835_step_XX/` (built by `nnunet/engine/build_dataset835_sparse_patches.py`) | atlas cases: atlas manual GT (`${aligned_dir}/labels/atlas_*.nii.gz`). chk_* cases: Dataset835 dense pred canonical-aligned (`${aligned_dir}/labels_dataset835/chk_*.nii.gz`) — **deployment curve** | `output_basedir/<model>/runs/nnunet_pred/` |
+| `nnunet_pred` | `nnunet_pred`       | per-step Dataset835 sparse-CT pred canonical-aligned, from `${aligned_dir}/labels_dataset835_step_XX/` (built by `nnunet/build_dataset835_sparse_patches.py`) | atlas cases: atlas manual GT (`${aligned_dir}/labels/atlas_*.nii.gz`). chk_* cases: Dataset835 dense pred canonical-aligned (`${aligned_dir}/labels_dataset835/chk_*.nii.gz`) — **deployment curve** | `output_basedir/<model>/runs/nnunet_pred/` |
 
 The deployment curve includes nnUNet's prediction noise (centroid jitter, dropped globes at high sparsity, scheme mismatches) in the latent-opt input, while the ceiling curve receives a perfectly clean sparse observation. `nnunet/compare_native.py` reads both runs and labels the rows `CNISP-atlasGT` vs `CNISP-nnUNetPred` so they can be plotted side-by-side against `nnUNet-sparse`.
 
@@ -81,7 +81,7 @@ python scripts/03_infer.py -p configs/paths.yaml \
     -m <model_name>
 # 3b. Deployment curve (run_tag=nnunet_pred) -- requires the chk_* dense
 #     and per-step sparse Dataset835 canonical patches under aligned_dir/
-#     (produced by ../nnunet/engine/build_dataset835_canonical_patches.py
+#     (produced by ../nnunet/build_dataset835_canonical_patches.py
 #     and build_dataset835_sparse_patches.py; see ../nnunet/README.md and
 #     ../run_pipeline.sh's `cnisp-prep-dataset835-*` phases).
 python scripts/03_infer.py -p configs/paths.yaml \

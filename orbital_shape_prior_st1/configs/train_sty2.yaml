@@ -37,9 +37,47 @@ degradation_bank:
   num_classes: 5                    # BG + ON + Globe + Fat + Recti
   cache_dir: null                   # null -> auto: {labels_dir}/../degraded_bank/
 
+  # ── nnUNet-obs mixing (v6) ──────────────────────────────────────
+  # obs_sources controls which observation types populate the bank:
+  #   [gt]          : only degrade(GT_mask)  (original Strategy C).
+  #   [gt, nnunet]  : ALSO ingest nnUNet's sparse prediction on the
+  #                   degraded CT (4 input types: thin/thick × gt/nnunet).
+  # nnUNet items are added only where the on-disk obs patch exists, so this
+  # is a no-op until the train-split data-gen has been run (see
+  # run_pipeline.sh: nnunet-predict-sweep-train). Each nnUNet item is
+  # supervised by the dense GT co-framed into nnUNet's drifted obs window.
+  obs_sources: [gt, nnunet]
+  # Per-experiment obs patch dir template; {exp} -> thin|thick. Built by
+  # nnunet/build_dataset835_sparse_patches.py --split train.
+  nnunet_patch_prefix: labels_dataset835_{exp}_train_step_
+
+  # ── Pool shuffle + scan-disjoint train/valid split (v6) ─────────
+  # When present, TRAIN and VAL draw from ONE combined modeling pool
+  # (train_cases ∪ val_cases) and are split scan-disjoint here, replacing the
+  # fixed train/val casefile boundary so the constructed 4-type item pool is
+  # what gets split. Remove this block to keep the legacy casefile boundary.
+  split:
+    split_seed: 2          # deterministic scan shuffle
+    val_fraction: 0.15     # fraction of SCANS held out for validation
+    split_granularity: scan  # scan-disjoint (item-level falls back to scan)
+
 # Per-epoch sampling (Strategy C only)
 items_per_epoch: 100        # sample 100 items from the bank each epoch
 point_sample_fraction: 0.75 # sample 75% of dense voxels per item
+
+# --- Supervision target (tight-prior objective) ---
+# "observation": fit each item's latent to its own SPARSE observation
+#                (original Amiranashvili auto-decoder; the latent can encode
+#                degraded/partial shapes).
+# "dense"      : fit each item's latent to its own DENSE sub-patch GT while
+#                keeping the per-item sparse-centroid 64 mm frame (drift
+#                handling unchanged). The latent space then only contains
+#                TRUE shapes, so at inference a noisy nnUNet observation is
+#                pulled back toward a real shape instead of reproduced. The
+#                thin/thick degradation bank is still used — each (mode,
+#                step) supplies a different sparse-centroid framing of the
+#                same dense target (drift augmentation).
+train_supervision: dense
 
 # Legacy knobs below are INERT for training while degradation_bank is set.
 # slice_step_size still seeds the single-view VAL dataset baseline.

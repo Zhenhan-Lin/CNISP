@@ -2,7 +2,7 @@
 
 This folder collects everything that touches the new nnUNet (`Dataset835_PHOTON_CT_QAfiltered`, trained with `nnUNetPlans_iso05` via [run_nnUNet_iso05.sh](../run_nnUNet_iso05.sh)) to compare it against CNISP ([orbital_shape_prior_st1](../orbital_shape_prior_st1)) on the same 62-eye / 31-source test set.
 
-It does **not** re-run CNISP — it reuses CNISP's per-step predictions under `output_basedir/<model>/runs/<run_tag>/`. New CNISP runs already emit `native_space_step_XX/` and `native_sweep_manifest.json` themselves (see `orbital_shape_prior_st1/engine/infer.py`); `nnunet/engine/build_cnisp_native_sweep.py` only fires for inferences that finished before that change and is otherwise a no-op.
+It does **not** re-run CNISP — it reuses CNISP's per-step predictions under `output_basedir/<model>/runs/<run_tag>/`. New CNISP runs already emit `native_space_step_XX/` and `native_sweep_manifest.json` themselves (see `orbital_shape_prior_st1/engine/infer.py`); `nnunet/build_cnisp_native_sweep.py` only fires for inferences that finished before that change and is otherwise a no-op.
 
 ## Option C: two CNISP runs, one nnUNet sweep
 
@@ -53,8 +53,6 @@ nnunet/
 │   └── build_method_summary.py              #   per-method by-eff_res CSV + TXT + PNG
 │
 ├── run_predict_native.sh           # Phase 1:  nnUNetv2_predict on original CT (step=1 baseline)
-├── run_predict_sparse_sweep.sh     # Phase 1b: legacy CLI sweep (sparse-grid masks only;
-│                                   #   superseded by engine/predict_sparse_iso.py)
 ├── run_predict_smore.sh            # Phase 1c: nnUNetv2_predict on SMORE'd CTs
 ├── run_compare.sh                  # end-to-end Phase 1 driver
 └── README.md
@@ -67,9 +65,9 @@ nnunet/
 bash run_pipeline.sh
 
 # step-by-step (single run_tag at a time):
-python nnunet/data_prep/prepare_inputs.py        --config nnunet/configs.yaml
+python nnunet/prepare_inputs.py                  --config nnunet/configs.yaml
 bash   nnunet/run_predict_native.sh              # honours $CONFIG
-python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml --run-tag atlas_gt
+python nnunet/build_cnisp_native_sweep.py        --config nnunet/configs.yaml --run-tag atlas_gt
 python nnunet/compare_native.py                  --config nnunet/configs.yaml --cnisp-run-tag atlas_gt
 # Repeat the last two lines with --run-tag nnunet_pred / --cnisp-run-tag nnunet_pred
 # for the deployment-curve comparison (requires Option C prep below).
@@ -80,7 +78,7 @@ Inputs the scripts expect:
 - `configs.yaml::cnisp_paths_yaml` -> `orbital_shape_prior_st1/configs/paths.yaml` (`aligned_dir`, `casefiles_dir`, `output_basedir`).
 - CNISP must have already inferred the requested run: `output_basedir/<model_name>/runs/<run_tag>/sweep_results.pkl` and `runs/<run_tag>/step_XX/pred/*.nii.gz` exist.
   - Recent inferences also have `runs/<run_tag>/native_space_step_XX/` + `runs/<run_tag>/native_sweep_manifest.json`; `compare_native.py` consumes them directly.
-  - Legacy inferences only have `step_XX/`; `engine/build_cnisp_native_sweep.py --run-tag <T>` reconstructs `runs/<T>/native_space_step_XX/` from `sweep_results.pkl`.
+  - Legacy inferences only have `step_XX/`; `build_cnisp_native_sweep.py --run-tag <T>` reconstructs `runs/<T>/native_space_step_XX/` from `sweep_results.pkl`.
 - CT image discovery is driven by `atlas_image_dir` and `pivot_csv`; missing CTs fail loudly with a per-source list.
 
 Outputs (under `configs.yaml::work_dir`, one set per `cnisp_runs_to_compare` entry):
@@ -130,9 +128,9 @@ These two phases produce the canonical-aligned Dataset835 artifacts CNISP needs 
 
 ```bash
 # chk_* DENSE Dice target + sidecar metadata
-python nnunet/engine/build_dataset835_canonical_patches.py --config nnunet/configs.yaml
+python nnunet/build_dataset835_canonical_patches.py --config nnunet/configs.yaml
 # per-step SPARSE latent-opt input (step_01 falls back to the dense pred above)
-python nnunet/engine/build_dataset835_sparse_patches.py    --config nnunet/configs.yaml
+python nnunet/build_dataset835_sparse_patches.py    --config nnunet/configs.yaml
 ```
 
 Outputs (under `${cnisp_paths.aligned_dir}`):
@@ -147,14 +145,14 @@ When nnUNet at high sparsity drops a globe entirely the canonical-align step ref
 
 Mirrors CNISP's per-step inference on the nnUNet side: feed nnUNet a sparsified copy of each source CT (drop every Nth axial slice along the through-plane axis), then resample the prediction onto the original native grid for Dice. The `(source_id, step_size)` set is read directly from `${cnisp_output_basedir}/<model>/runs/atlas_gt/sweep_results.pkl` (override with `--cnisp-sweep-source <run_tag>` on `sparsify_inputs.py` if you'd rather track a different CNISP run's sweep). Both Option C stories then re-use the same nnUNet sparse-CT predictions, so the two methods cannot drift out of sync across runs.
 
-> **Why a custom predictor (`engine/predict_sparse_iso.py`) instead of the CLI + NN upsample.** `nnUNetv2_predict` only saves the prediction *after* nnUNet resamples it from the plan spacing (iso 0.5 mm, where the network actually runs) back down to the sparse input grid; the fine iso-resolution output is discarded at that step. The previous pipeline then NN-*duplicated* slices along the through-plane axis to reach the native grid, so the resulting mask carried only sparse-resolution content on a dense grid. The custom predictor intercepts the **plan-spacing logits** before that resample-down, and from one inference per input writes: the sparse-grid mask (`sparse_step_XX/`, kept for the deployment-curve consumer), the genuine iso-0.5 prediction (`sparse_step_XX_upsampled/`), and that iso prediction resampled onto the native grid with **nnUNet's own segmentation resampler** (`sparse_step_XX_native/`, what Dice uses). The native resample reuses nnUNet's export path with a synthesized `properties` dict describing the native grid (sparse crop geometry, through-plane axis scaled by `step`), guarded by a hard shape assertion against the native CT.
+> **Why a custom predictor (`predict_sparse_iso.py`) instead of the CLI + NN upsample.** `nnUNetv2_predict` only saves the prediction *after* nnUNet resamples it from the plan spacing (iso 0.5 mm, where the network actually runs) back down to the sparse input grid; the fine iso-resolution output is discarded at that step. The previous pipeline then NN-*duplicated* slices along the through-plane axis to reach the native grid, so the resulting mask carried only sparse-resolution content on a dense grid. The custom predictor intercepts the **plan-spacing logits** before that resample-down, and from one inference per input writes: the sparse-grid mask (`sparse_step_XX/`, kept for the deployment-curve consumer), the genuine iso-0.5 prediction (`sparse_step_XX_upsampled/`), and that iso prediction resampled onto the native grid with **nnUNet's own segmentation resampler** (`sparse_step_XX_native/`, what Dice uses). The native resample reuses nnUNet's export path with a synthesized `properties` dict describing the native grid (sparse crop geometry, through-plane axis scaled by `step`), guarded by a hard shape assertion against the native CT.
 
 > **What "sparsified" means here:** the CT is **subsampled along the through-plane axis** — every Nth slice is kept verbatim and the rest are dropped, then the NIfTI affine's through-plane column is multiplied by `step_size` so the header reports the new (coarser) spacing. **No interpolation, no super-resolution.** This is distinct from Phase 1c, which feeds nnUNet SMORE-super-resolved CTs (every voxel is a neural-network output). CNISP's sweep, in contrast, sparsifies the *GT label* (not the CT image), so on a given `(source, step)` row the two methods consume strictly aligned "information content" (same kept-slice indices, same eff_res) from two different modalities.
 
 ```bash
 # orchestrated by run_pipeline.sh's `nnunet-predict-sweep` phase, or:
-python nnunet/data_prep/sparsify_inputs.py    --config nnunet/configs.yaml
-python nnunet/engine/predict_sparse_iso.py    --config nnunet/configs.yaml
+python nnunet/sparsify_inputs.py              --config nnunet/configs.yaml
+python nnunet/predict_sparse_iso.py           --config nnunet/configs.yaml
 ```
 
 `predict_sparse_iso.py` needs the same environment that runs `nnUNetv2_predict` (notably the `nnUNet_results` env var pointing at the trained model).
@@ -165,7 +163,7 @@ Outputs (under `${work_dir}`):
 
 - `input/sparse_step_XX/<sid>_0000.nii.gz` — sparsified CT; the affine's through-plane column is scaled by step_size, the other two columns and the origin are untouched.
 - `input/sparse_manifest.json` — `{step_axis_per_source, by_step: {XX: {sid: {input, eff_res_mm, step_axis}}}}`.
-- `prediction/sparse_step_XX/<sid>.nii.gz` — nnUNet output at the sparse CT's spacing (consumed by `engine/build_dataset835_sparse_patches.py`).
+- `prediction/sparse_step_XX/<sid>.nii.gz` — nnUNet output at the sparse CT's spacing (consumed by `build_dataset835_sparse_patches.py`).
 - `prediction/sparse_step_XX_upsampled/<sid>.nii.gz` — the genuine **iso-0.5 plan-spacing** prediction (the network output before nnUNet maps it back to the input grid), on the nonzero-cropped iso FOV. step_01 is the iso prediction of the native CT.
 - `prediction/sparse_step_XX_native/<sid>.nii.gz` — the iso prediction resampled onto the dense native CT grid with **nnUNet's own segmentation resampler**; this is the mask `compare_native.py` Dices against the native GT. step_01 is a symlink to `prediction/native/<sid>.nii.gz`.
 - `prediction/sweep_manifest.json` — `{steps: {XX: {sid: basename}}}` anchored against `sparse_step_XX_native/`, consumed by `compare_native.py`.
@@ -173,10 +171,10 @@ Outputs (under `${work_dir}`):
 Caveats:
 
 - The nnUNet plan was trained at iso 0.5 mm, so large `step_size` rows (z-spacing up to ~11 mm) are intentionally out-of-distribution. That OOD curve is the whole point of this phase.
-- `data_prep/sparsify_inputs.py` picks the sparsification axis from the raw CT's affine (not from `argmax(zooms)`), so non-axial acquisitions are degraded along the same physical direction CNISP did. Two checks then gate every write:
+- `sparsify_inputs.py` picks the sparsification axis from the raw CT's affine (not from `argmax(zooms)`), so non-axial acquisitions are degraded along the same physical direction CNISP did. Two checks then gate every write:
   1. **Axis selection + obliqueness check** (per source): for each source, the script reads CNISP's per-row `step_axis` field from `sweep_results.pkl` to know which RAS direction CNISP sparsified that source along (a single int for legacy `slice_step_axis: <int>` runs, a per-source value for `slice_step_axis: auto` runs). It then picks the raw CT voxel axis whose physical direction best aligns with that RAS direction via `argmax(|affine[ras_axis, :3]|)`. For an axial CT under the default RAS axis 2 (S-I) this is the thick S-I axis; for a sagittal CT (under either `auto` mode or a legacy uniform S-I config) it's the thin in-plane axis pointing S-I (not the thick L-R one). If CNISP's sweep predates the per-row `step_axis` write-out, the fallback is the `cnisp_slice_step_axis` config knob (default 2). If the best alignment is below `sparse_axis_alignment_min` (default 0.95) the voxel grid is too oblique to RAS for any single-axis sparsification to be physically meaningful, and the source is dropped.
   2. **Magnitude check** (per source × step): the script compares `zooms[step_axis] * step` against CNISP's `effective_resolution_mm`. Differences within `sparse_eff_res_tolerance` (default 5 %) are silently OK; differences within `sparse_eff_res_max_drift` (default 30 %) are warned about but still written (these typically come from CNISP's canonical patch living on a different grid than the raw CT — e.g. `chk_*` QA-kept old-nnUNet preds on a ~1.25 mm iso grid); differences above the drift cap are dropped.
-- The resulting `input/sparse_manifest.json` lists only the surviving `(source, step)` pairs. Downstream phases (`run_predict_sparse_sweep.sh`, `upsample_sparse_preds.py`, `build_dataset835_sparse_patches.py`, `compare_native.py`) iterate over the manifest, so dropped sources/steps naturally yield fewer rows in the final paired CSVs without breaking anything else.
+- The resulting `input/sparse_manifest.json` lists only the surviving `(source, step)` pairs. Downstream phases (`predict_sparse_iso.py`, `build_dataset835_sparse_patches.py`, `compare_native.py`) iterate over the manifest, so dropped sources/steps naturally yield fewer rows in the final paired CSVs without breaking anything else.
 
 ## Phase 1c: nnUNet on SMORE'd CTs
 
@@ -184,7 +182,7 @@ Independent of Phase 1 and Phase 1b. Saves the prediction mask only; downstream 
 
 ```bash
 # orchestrated by run_pipeline.sh's `nnunet-predict-smore` phase, or:
-python nnunet/data_prep/prepare_smore_inputs.py --config nnunet/configs.yaml
+python nnunet/prepare_smore_inputs.py           --config nnunet/configs.yaml
 bash   nnunet/run_predict_smore.sh
 ```
 

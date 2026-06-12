@@ -2,20 +2,22 @@
 """Stage SMORE-super-resolved CTs for nnUNetv2_predict.
 
 For every source in ``${work_dir}/source_to_path.json`` (written by
-``data_prep/prepare_inputs.py``), look up the canonical SMORE output at
+``nnunet/prepare_inputs.py``), look up the canonical SMORE output at
 ``${smore_out_root}/<source_id>_smore.nii.gz`` (flat layout produced by
 the latest ``engine/build_smore_test_images.py``) and symlink it as
 ``${work_dir}/input/smore/<source_id>_0000.nii.gz`` for nnUNetv2.
 
 Sources missing the SMORE file get listed in a warning block at the end
-with a hint to run ``nnunet/engine/build_smore_test_images.py`` first.
+with a hint to run ``nnunet/build_smore_test_images.py`` first.
 The phase continues with whatever is available, but exits with code 2
 if zero sources are stageable so the pipeline visibly fails instead of
 silently producing an empty input dir.
 
+The symlink helper lives in ``nnunet.helpers.fs``.
+
 Usage
 -----
-    python nnunet/data_prep/prepare_smore_inputs.py --config nnunet/configs.yaml
+    python nnunet/prepare_smore_inputs.py --config nnunet/configs.yaml
 """
 
 from __future__ import annotations
@@ -26,29 +28,19 @@ import sys
 from pathlib import Path
 from typing import List
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/data_prep/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
+from nnunet.helpers.fs import safe_symlink as _safe_symlink  # noqa: E402
 
 
-# Mirrors ``--smore-suffix`` default in nnunet/engine/build_smore_test_images.py.
+# Mirrors ``--smore-suffix`` default in nnunet/build_smore_test_images.py.
 # If you change it there, change it here.
 _SMORE_SUFFIX = "_smore"
 
 
-def _safe_symlink(src: Path, dst: Path) -> None:
-    if dst.is_symlink() or dst.exists():
-        dst.unlink()
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.symlink_to(src)
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="nnunet/configs.yaml")
-    args = ap.parse_args()
-
+def run(args) -> int:
     cfg = load_yaml(Path(args.config))
 
     work_dir = Path(cfg["work_dir"])
@@ -58,7 +50,7 @@ def main() -> int:
     source_to_path = work_dir / "source_to_path.json"
     if not source_to_path.exists():
         print(f"[prepare_smore_inputs] {source_to_path} missing -- "
-              f"run nnunet/data_prep/prepare_inputs.py first.",
+              f"run nnunet/prepare_inputs.py first.",
               file=sys.stderr)
         return 2
     with open(source_to_path) as f:
@@ -88,7 +80,7 @@ def main() -> int:
               f"SMORE output:", file=sys.stderr)
         for line in missing:
             print(f"  - {line}", file=sys.stderr)
-        print(f"  Run nnunet/engine/build_smore_test_images.py to produce them.",
+        print(f"  Run nnunet/build_smore_test_images.py to produce them.",
               file=sys.stderr)
 
     print(f"\n[prepare_smore_inputs] staged {len(staged)} symlink(s); "
@@ -101,5 +93,11 @@ def main() -> int:
     return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", default="nnunet/configs.yaml")
+    return ap
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(build_parser().parse_args()))

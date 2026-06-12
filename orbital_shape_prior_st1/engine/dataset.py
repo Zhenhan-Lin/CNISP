@@ -52,6 +52,7 @@ from typing import Dict, List, Optional, Tuple
 import nibabel as nib
 import numpy as np
 import torch
+from nibabel.processing import resample_from_to
 from torch.utils import data
 
 # Ensure repo root is on sys.path so `simulation/` is importable.
@@ -318,6 +319,79 @@ def inner_crop_64mm(
     }
 
 
+def coframe_dense_gt_into_obs_window(
+    gt_patch_path: Path,
+    obs_patch_path: Path,
+    step: int,
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """Resample the dense GT disk patch into the nnUNet-obs patch's window.
+
+    The nnUNet observation patch (``obs_patch_path``) is a separate
+    canonical-align of the SAME original scan as the dense GT patch
+    (``gt_patch_path``), centred on nnUNet's (drifted) globe centroid and
+    carrying the sparse through-plane spacing (= ``step`` × dense). Both
+    affines live in the same canonical (RAS, OS→OD-flipped) world, so we can
+    build a DENSE-spacing grid that
+
+      * shares the obs patch's voxel-0 centre and orientation (so the obs
+        and the resampled dense target sit in one shared patch-local frame,
+        exactly like the GT-degraded items), and
+      * covers the obs 80 mm window,
+
+    then world-coordinate resample the dense GT onto it (``order=0``, nearest
+    for labels). Crucially we do NOT recentre/register: the dense GT lands at
+    its TRUE position within the obs-centred window, i.e. offset from the
+    window centre by nnUNet's localisation drift. That drifted dense target
+    is what v6 supervises against.
+
+    Returns ``(dense_volume, dense_spacing, step_axis)`` where
+    ``dense_volume`` is a float32 tensor on the dense grid and
+    ``dense_spacing`` its [3] column-norm spacing.
+
+    Caveat: the OS→OD flip in ``canonical_align`` mirrors array axis 0 with a
+    shape-dependent translation. For the standard axial acquisition the
+    through-plane axis is NOT axis 0, so obs and GT share an identical flip
+    and the affines co-register exactly. A sagittal acquisition whose
+    through-plane axis maps to axis 0 would break this assumption; such cases
+    are flagged by the near-empty-overlap guard in the bank ingest.
+    """
+    gt_img = nib.load(str(gt_patch_path))
+    obs_img = nib.load(str(obs_patch_path))
+    obs_aff = np.asarray(obs_img.affine, dtype=np.float64)
+    obs_shape = np.asarray(obs_img.shape[:3], dtype=np.int64)
+    obs_cols = obs_aff[:3, :3]
+    obs_spacing = np.sqrt((obs_cols ** 2).sum(axis=0))
+    step_axis = int(np.argmax(obs_spacing))
+
+    # Dense columns: undo the through-plane ×step stretch (others unchanged).
+    dense_cols = obs_cols.copy()
+    dense_cols[:, step_axis] = obs_cols[:, step_axis] / float(step)
+
+    target_shape = obs_shape.copy()
+    target_shape[step_axis] = max(1, int(round(obs_shape[step_axis] * step)))
+
+    target_aff = np.eye(4, dtype=np.float64)
+    target_aff[:3, :3] = dense_cols
+    # Voxel-0 centre coincides with the obs patch's voxel-0 centre so the obs
+    # grid and the dense grid express the same physical point with the same
+    # patch-local mm (matching the GT-degraded subsample convention, where
+    # sparse voxel 0 == dense voxel 0).
+    target_aff[:3, 3] = obs_aff[:3, 3]
+
+    out = resample_from_to(
+        gt_img,
+        (tuple(int(x) for x in target_shape), target_aff),
+        order=0, mode="constant", cval=0,
+    )
+    dense_arr = np.asarray(out.dataobj).astype(np.float32)
+    dense_spacing = np.sqrt((dense_cols ** 2).sum(axis=0)).astype(np.float32)
+    return (
+        torch.from_numpy(dense_arr),
+        torch.from_numpy(dense_spacing),
+        step_axis,
+    )
+
+
 class OrbitalImplicitDataset(data.Dataset):
     """
     Each __getitem__ returns:
@@ -346,7 +420,8 @@ class OrbitalImplicitDataset(data.Dataset):
                  verbose=True,
                  degradation_bank=None,
                  items_per_epoch=None,
-                 point_sample_fraction=None):
+                 point_sample_fraction=None,
+                 train_supervision="observation"):
         super().__init__()
         if verbose:
             print(f"Loading {len(casenames)} orbital patches "
@@ -356,6 +431,21 @@ class OrbitalImplicitDataset(data.Dataset):
         self.phase_type = phase_type
         self.items_per_epoch = items_per_epoch
         self.point_sample_fraction = point_sample_fraction
+        # ``train_supervision`` selects what the latent is fit against during
+        # TRAIN/VAL:
+        #   "observation" (default): the per-item SPARSE observation (the
+        #       original Amiranashvili auto-decoder objective — the latent
+        #       can encode degraded/partial shapes).
+        #   "dense": the per-item DENSE sub-patch GT (``labels_dense_sub``).
+        #       Each item keeps its own latent AND its own sparse-centroid
+        #       64 mm frame (so drift handling is unchanged), but the latent
+        #       is supervised to produce the TRUE dense shape under that
+        #       frame. This tightens the prior so the latent space only
+        #       contains plausible shapes — at inference a noisy nnUNet
+        #       observation then gets pulled back toward a real shape
+        #       instead of being reproduced faithfully.
+        # INF always fits the sparse observation regardless of this flag.
+        self.train_supervision = str(train_supervision)
         self._epoch_item_indices = None  # set per epoch if items_per_epoch
 
         # ── Load dense volumes (kept for diagnostics + INF) ───────
@@ -570,6 +660,15 @@ class OrbitalImplicitDataset(data.Dataset):
         self.scan_ids = []
         self.sparsify_offsets_used = []
         self.bank_modes = []  # "dense" | "thin" | "thick" per item
+        # ``obs_source`` per item: "gt" (degrade(GT_mask)) or "nnunet"
+        # (nnUNet sparse pred on the degraded CT). ``item_dense_override`` is
+        # None for gt items (the per-SCAN dense GT is used) and a per-item
+        # (volume, spacing, offset) for nnUNet items (the co-framed dense GT
+        # in that item's drifted obs window).
+        self.bank_obs_source: List[str] = []
+        self.item_dense_override: List[
+            Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+        ] = []
 
         self.labels_dense = labels_dense
         self.spacings_dense = spacings_dense
@@ -582,6 +681,32 @@ class OrbitalImplicitDataset(data.Dataset):
         offsets_per = bank_config.get("offsets_per_setting", 1)
         num_classes = bank_config.get("num_classes", 5)
         cache_dir = bank_config.get("cache_dir")
+
+        # ── nnUNet-obs mixing (v6) ────────────────────────────────
+        # obs_sources controls which observation types populate the bank.
+        # "gt": degrade the GT mask (default, original Strategy C). "nnunet":
+        # additionally ingest nnUNet's sparse prediction on the degraded CT,
+        # co-framed against the dense GT (drift preserved). nnUNet items are
+        # only added where the on-disk obs patch exists, so atlas cases (no
+        # train obs patches) silently fall back to gt-only.
+        obs_sources = bank_config.get("obs_sources", ["gt"])
+        use_nnunet_obs = "nnunet" in obs_sources
+        nnunet_prefix_tmpl = bank_config.get(
+            "nnunet_patch_prefix", "labels_dataset835_{exp}_train_step_"
+        )
+        aligned_dir = bank_config.get("_aligned_dir")
+        labels_dir = bank_config.get("_labels_dir")
+        nnunet_modes = [m for m in modes if m in ("thin", "thick")]
+        n_nnunet_added = 0
+        n_nnunet_missing = 0
+        n_nnunet_empty = 0
+        nnunet_issues: List[str] = []
+        if use_nnunet_obs and (aligned_dir is None or labels_dir is None):
+            raise ValueError(
+                "degradation_bank.obs_sources includes 'nnunet' but "
+                "_aligned_dir/_labels_dir were not injected; "
+                "create_data_loader must pass them."
+            )
 
         # Auto cache dir: default to {labels_dir}/../degraded_bank/
         if cache_dir is None and "thick" in modes:
@@ -614,6 +739,8 @@ class OrbitalImplicitDataset(data.Dataset):
                     self.scan_ids.append(scan_idx)
                     self.sparsify_offsets_used.append(0)
                     self.bank_modes.append("dense")
+                    self.bank_obs_source.append("gt")
+                    self.item_dense_override.append(None)
                     latent_idx += 1
                     continue
 
@@ -645,7 +772,97 @@ class OrbitalImplicitDataset(data.Dataset):
                         self.scan_ids.append(scan_idx)
                         self.sparsify_offsets_used.append(off)
                         self.bank_modes.append(mode)
+                        self.bank_obs_source.append("gt")
+                        self.item_dense_override.append(None)
                         latent_idx += 1
+
+                # ── nnUNet-obs items for this (scan, step) ─────────
+                # One item per (mode in {thin,thick}) where the on-disk obs
+                # patch exists. The observation is nnUNet's sparse pred on the
+                # degraded CT (loaded with the inference offset convention);
+                # the supervision target is the dense GT co-framed into that
+                # obs window (drift preserved).
+                if not use_nnunet_obs:
+                    continue
+                gt_patch_path = Path(labels_dir) / f"{casenames[scan_idx]}.nii.gz"
+                for mode in nnunet_modes:
+                    obs_dir = Path(aligned_dir) / (
+                        nnunet_prefix_tmpl.format(exp=mode) + f"{step:02d}"
+                    )
+                    obs_patch_path = obs_dir / f"{casenames[scan_idx]}.nii.gz"
+                    if not obs_patch_path.exists():
+                        n_nnunet_missing += 1
+                        continue
+                    if not gt_patch_path.exists():
+                        nnunet_issues.append(
+                            f"{casenames[scan_idx]} {mode} s{step}: GT patch "
+                            f"missing for co-framing ({gt_patch_path})"
+                        )
+                        continue
+                    try:
+                        obs_img = nib.load(str(obs_patch_path))
+                        obs_arr = np.asarray(obs_img.dataobj, dtype=np.float32)
+                        obs_aff = np.asarray(obs_img.affine, dtype=np.float64)
+                        obs_spacing = np.sqrt(
+                            (obs_aff[:3, :3] ** 2).sum(axis=0)
+                        ).astype(np.float32)
+                        labels_obs = torch.from_numpy(obs_arr)
+                        spacing_obs = torch.from_numpy(obs_spacing)
+                        # Inference offset convention: offset = spacing/2, then
+                        # through-plane offset /= step so sparse voxel 0 centre
+                        # coincides with dense voxel 0 centre (drift fix).
+                        offset_obs = spacing_obs / 2.0
+                        obs_axis = int(torch.argmax(spacing_obs))
+                        offset_obs[obs_axis] = spacing_obs[obs_axis] / (2.0 * step)
+
+                        dense_v, dense_s, _ = coframe_dense_gt_into_obs_window(
+                            gt_patch_path, obs_patch_path, step,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        nnunet_issues.append(
+                            f"{casenames[scan_idx]} {mode} s{step}: obs/coframe "
+                            f"failed ({type(e).__name__}: {e})"
+                        )
+                        continue
+
+                    if int((dense_v > 0).sum()) == 0:
+                        # Co-framed GT carries no foreground in the obs window:
+                        # a gross frame mismatch (e.g. sagittal OS-flip edge
+                        # case) or nnUNet dropped the globe far from GT. Skip.
+                        n_nnunet_empty += 1
+                        nnunet_issues.append(
+                            f"{casenames[scan_idx]} {mode} s{step}: co-framed "
+                            f"GT empty in obs window -- skipped"
+                        )
+                        continue
+
+                    dense_off = dense_s / 2.0
+                    self.labels_sparse.append(labels_obs)
+                    self.spacings_sparse.append(spacing_obs)
+                    self.offsets_sparse.append(offset_obs)
+                    self.casenames.append(
+                        f"{casenames[scan_idx]}_{mode}_s{step}_nnunet"
+                    )
+                    self.caseids.append(latent_idx)
+                    self.scan_ids.append(scan_idx)
+                    self.sparsify_offsets_used.append(0)
+                    self.bank_modes.append(mode)
+                    self.bank_obs_source.append("nnunet")
+                    self.item_dense_override.append(
+                        (dense_v, dense_s, dense_off)
+                    )
+                    latent_idx += 1
+                    n_nnunet_added += 1
+
+        if use_nnunet_obs:
+            print(f"  [bank] nnUNet-obs items added: {n_nnunet_added} "
+                  f"(missing obs patch: {n_nnunet_missing}, "
+                  f"empty co-frame: {n_nnunet_empty})")
+            if nnunet_issues:
+                for line in nnunet_issues[:15]:
+                    print(f"    - {line}")
+                if len(nnunet_issues) > 15:
+                    print(f"    ... and {len(nnunet_issues) - 15} more")
 
     @staticmethod
     def _get_thick_cached(
@@ -728,20 +945,31 @@ class OrbitalImplicitDataset(data.Dataset):
         self.visible_lcc_voxel_counts: List[int] = []
         self.visible_total_fg_counts: List[int] = []
 
+        # Per-item dense override (nnUNet obs items): the dense target is the
+        # GT co-framed into that item's drifted obs window, NOT the per-scan
+        # GT disk patch. None for gt items / legacy strategies.
+        dense_overrides = getattr(self, "item_dense_override", None)
         for item_idx in range(len(self.labels_sparse)):
             scan_id = self.scan_ids[item_idx]
+            override = dense_overrides[item_idx] if dense_overrides else None
+            if override is not None:
+                vol_d, sp_d, of_d = override
+            else:
+                vol_d = labels_dense[scan_id]
+                sp_d = spacings_dense[scan_id]
+                of_d = offsets_dense[scan_id]
             info = inner_crop_64mm(
                 volume_sparse=self.labels_sparse[item_idx],
                 spacing_sparse=self.spacings_sparse[item_idx],
                 offset_sparse=self.offsets_sparse[item_idx],
-                volume_dense=labels_dense[scan_id],
-                spacing_dense=spacings_dense[scan_id],
-                offset_dense=offsets_dense[scan_id],
+                volume_dense=vol_d,
+                spacing_dense=sp_d,
+                offset_dense=of_d,
             )
             self.labels_sparse[item_idx] = info["sub_sparse"]
             self.offsets_sparse[item_idx] = info["sub_offset_sparse_local"]
             self.labels_dense_sub.append(info["sub_dense"])
-            self.spacings_dense_sub.append(spacings_dense[scan_id])
+            self.spacings_dense_sub.append(sp_d)
             self.offsets_dense_sub.append(info["sub_offset_dense_local"])
             self.sub_crop_lo_vox_dense.append(info["sub_crop_lo_vox_dense"])
             self.sub_crop_shape_vox_dense.append(info["sub_crop_shape_vox_dense"])
@@ -795,7 +1023,25 @@ class OrbitalImplicitDataset(data.Dataset):
         pass
 
     def __getitem__(self, item):
-        label = self.labels_sparse[item]
+        # Supervision-target selection. INF always fits the sparse
+        # observation (the deployment input); TRAIN/VAL can instead fit the
+        # dense sub-patch GT when train_supervision == "dense" (tight-prior
+        # objective). The dense sub-patch shares the same 64 mm sub-patch
+        # origin as the sparse view (see inner_crop_64mm), so the latent
+        # frame is identical either way — only the labels/coords sampled
+        # differ.
+        use_dense_target = (
+            self.train_supervision == "dense"
+            and self.phase_type in (PhaseType.TRAIN, PhaseType.VAL)
+        )
+        if use_dense_target:
+            label = self.labels_dense_sub[item]
+            sample_spacing = self.spacings_dense_sub[item]
+            sample_offset = self.offsets_dense_sub[item]
+        else:
+            label = self.labels_sparse[item]
+            sample_spacing = self.spacings_sparse[item]
+            sample_offset = self.offsets_sparse[item]
 
         if self.num_points > 0:
             # Point count is FIXED across items to allow batch collation.
@@ -819,8 +1065,8 @@ class OrbitalImplicitDataset(data.Dataset):
             voxel_ids = torch.stack(meshed, dim=-1)
             label_values = label
 
-        spacing = self.spacings_sparse[item]
-        offset = self.offsets_sparse[item]
+        spacing = sample_spacing
+        offset = sample_offset
         coords = voxel_ids.float() * spacing + offset
 
         result = {
@@ -884,6 +1130,30 @@ class EpochSubsetSampler(data.Sampler):
 
 # ── DataLoader factory ────────────────────────────────────────────
 
+def _scan_disjoint_split(casenames, val_fraction, seed):
+    """Scan-disjoint train/valid split of a casename pool.
+
+    Groups casenames by ``source_id`` (= casename without the _OD/_OS
+    suffix), shuffles the scans with ``seed``, and holds out
+    ``round(val_fraction * n_scans)`` scans for validation. Every eye/variant
+    of a held-out scan goes to valid -> no shape leakage across the split.
+    Returns ``(train_casenames, val_casenames)`` (each sorted).
+    """
+    by_scan: Dict[str, List[str]] = {}
+    for cn in casenames:
+        sid = cn[:-3] if (cn.endswith("_OD") or cn.endswith("_OS")) else cn
+        by_scan.setdefault(sid, []).append(cn)
+    scans = sorted(by_scan)
+    gen = torch.Generator().manual_seed(int(seed))
+    perm = torch.randperm(len(scans), generator=gen).tolist()
+    n_val = max(1, round(len(scans) * float(val_fraction))) if scans else 0
+    val_scan_set = {scans[i] for i in perm[:n_val]}
+    train_names, val_names = [], []
+    for sid in scans:
+        (val_names if sid in val_scan_set else train_names).extend(by_scan[sid])
+    return sorted(train_names), sorted(val_names)
+
+
 def create_data_loader(params, phase_type, verbose=True):
     labels_dir = Path(params["aligned_dir"]) / params.get("labels_dirname", "labels")
     casefiles_dir = Path(params["casefiles_dir"])
@@ -893,9 +1163,42 @@ def create_data_loader(params, phase_type, verbose=True):
     val_casefile = params.get("val_casefile")  # None = Strategy A
     num_offsets = params.get("num_sparsify_offsets", 1)
 
+    bank_cfg_raw = params.get("degradation_bank")
+    # Strategy C v6: when the bank carries a ``split`` block, TRAIN and VAL
+    # draw from ONE combined modeling pool (train_cases ∪ val_cases) split
+    # scan-disjoint by ``split_seed`` -- replacing the fixed train/val casefile
+    # boundary so the constructed 4-type item pool is what gets shuffled+split.
+    bank_split = (bank_cfg_raw or {}).get("split") if bank_cfg_raw else None
+    use_pool_split = (
+        bank_split is not None and phase_type in (PhaseType.TRAIN, PhaseType.VAL)
+    )
+
     if phase_type == PhaseType.INF:
         casenames = load_casenames(casefiles_dir / params["test_casefile"])
         num_offsets_ds = 1  # inference: single view
+    elif use_pool_split:
+        # Combined modeling pool -> deterministic scan-disjoint split.
+        pool = load_casenames(casefiles_dir / params["train_casefile"])
+        if val_casefile:
+            pool = sorted(set(pool) | set(
+                load_casenames(casefiles_dir / val_casefile)
+            ))
+        granularity = bank_split.get("split_granularity", "scan")
+        if granularity != "scan":
+            print(f"  [bank] split_granularity={granularity!r} not supported "
+                  f"with the per-dataset latent table; falling back to "
+                  f"scan-disjoint split.")
+        train_names, val_names = _scan_disjoint_split(
+            pool,
+            bank_split.get("val_fraction", params.get("val_fraction", 0.15)),
+            bank_split.get("split_seed", SPLIT_SEED),
+        )
+        casenames = train_names if is_training else val_names
+        num_offsets_ds = 1
+        if verbose:
+            print(f"  [bank] pool split (seed={bank_split.get('split_seed', SPLIT_SEED)}): "
+                  f"{len(train_names)} train / {len(val_names)} valid casenames "
+                  f"(this phase: {len(casenames)})")
     elif phase_type == PhaseType.VAL and val_casefile:
         # Strategy B: separate val scans
         casenames = load_casenames(casefiles_dir / val_casefile)
@@ -908,9 +1211,11 @@ def create_data_loader(params, phase_type, verbose=True):
     # ── Create dataset ────────────────────────────────────────────
     bank_cfg = params.get("degradation_bank")
     if bank_cfg is not None:
-        # Inject labels_dir path for auto cache_dir resolution
+        # Inject labels_dir path for auto cache_dir resolution + the
+        # aligned_dir so the bank can locate nnUNet-obs patches.
         bank_cfg = dict(bank_cfg)  # copy to avoid mutating params
         bank_cfg.setdefault("_labels_dir", str(labels_dir))
+        bank_cfg.setdefault("_aligned_dir", str(Path(params["aligned_dir"])))
 
     # For INF/VAL under Strategy C, the dataset still needs a
     # slice_step_size for the legacy _init_multi_offset path (which
@@ -938,6 +1243,7 @@ def create_data_loader(params, phase_type, verbose=True):
         degradation_bank=bank_cfg if is_training else None,
         items_per_epoch=params.get("items_per_epoch") if is_training else None,
         point_sample_fraction=params.get("point_sample_fraction") if is_training else None,
+        train_supervision=params.get("train_supervision", "observation"),
     )
 
     # ── Sampler / shuffle ─────────────────────────────────────────

@@ -107,25 +107,59 @@ class MultiClassShapeLoss(nn.Module):
         ce_weight: float = 1.0,
         dice_weight: float = 1.0,
         dice_class_weights: Optional[List[float]] = None,
+        label_smoothing: float = 0.0,
     ):
         super().__init__()
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
+        # ``label_smoothing`` > 0 turns the hard one-hot CE target into a
+        # soft target (1-eps on the observed class, eps/C elsewhere). This
+        # is the "soft latent-fit" knob: at test time it stops the latent
+        # optimiser from being forced to reproduce every (possibly wrong)
+        # observed voxel exactly, which matters when the observation is a
+        # noisy nnUNet prediction on a degraded image. Default 0.0 keeps
+        # the original hard-label behaviour bit-for-bit.
+        self.label_smoothing = float(label_smoothing)
         self.ce_loss = nn.CrossEntropyLoss()
         self.dice_loss = MultiClassDiceLoss(dice_class_weights)
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        voxel_weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Args:
             logits:  [B, *, C] raw logits from AutoDecoder
             targets: [B, *]   integer class labels {0, 1, 2, 3, 4}
+            voxel_weights: [B, *] optional per-voxel reliability weights for
+                the CE term (e.g. nnUNet confidence). When provided, the CE
+                term becomes a weighted mean. ``None`` reproduces the plain
+                (unweighted) behaviour.
         """
         # CE expects [N, C] logits and [N] targets
         C = logits.shape[-1]
         logits_flat = logits.reshape(-1, C)
-        targets_flat = targets.reshape(-1)
+        targets_flat = targets.reshape(-1).long()
 
-        loss_ce = self.ce_loss(logits_flat, targets_flat.long())
+        if self.label_smoothing > 0.0 or voxel_weights is not None:
+            log_probs = F.log_softmax(logits_flat, dim=-1)
+            onehot = F.one_hot(targets_flat, C).float()
+            if self.label_smoothing > 0.0:
+                eps = self.label_smoothing
+                soft_target = onehot * (1.0 - eps) + eps / C
+            else:
+                soft_target = onehot
+            ce_per_voxel = -(soft_target * log_probs).sum(dim=-1)
+            if voxel_weights is not None:
+                w = voxel_weights.reshape(-1).to(ce_per_voxel.dtype)
+                loss_ce = (ce_per_voxel * w).sum() / (w.sum() + 1e-8)
+            else:
+                loss_ce = ce_per_voxel.mean()
+        else:
+            loss_ce = self.ce_loss(logits_flat, targets_flat)
+
         loss_dice = self.dice_loss(logits, targets)
 
         return self.ce_weight * loss_ce + self.dice_weight * loss_dice

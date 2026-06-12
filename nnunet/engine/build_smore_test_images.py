@@ -25,11 +25,11 @@ to the flat root and lifts ``weights/`` out of the inner subdir.
 Usage
 -----
     # local backend (host run-smore in PATH)
-    python nnunet/engine/build_smore_test_images.py --config nnunet/configs.yaml \
+    python nnunet/build_smore_test_images.py --config nnunet/configs.yaml \
         --smore-gpu-ids 0,1 --smore-per-gpu-concurrency 1
 
     # container backend
-    python nnunet/engine/build_smore_test_images.py --config nnunet/configs.yaml \
+    python nnunet/build_smore_test_images.py --config nnunet/configs.yaml \
         --smore-backend container \
         --smore-sif /path/to/smore.sif \
         --smore-gpu-ids 0
@@ -37,7 +37,6 @@ Usage
 
 from __future__ import annotations
 
-import argparse
 import csv
 import os
 import shutil
@@ -52,10 +51,14 @@ from threading import Lock
 from typing import Dict, List, Optional
 
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
+# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
+from nnunet.helpers.fs import (  # noqa: E402
+    safe_symlink as _safe_symlink,
+    top_level_root as _top_level_root,
+)
 from nnunet.helpers.smore import (  # noqa: E402
     _acquire_dir_lock,
     _is_smore_compatible_from_nifti_header,
@@ -63,68 +66,10 @@ from nnunet.helpers.smore import (  # noqa: E402
     _run_smore_local_run_smore,
     _run_smore_singularity_run_smore,
 )
-from nnunet.resolve_gt import fail_on_missing, resolve_sources  # noqa: E402
+from nnunet.data_prep.resolve_gt import fail_on_missing, resolve_sources  # noqa: E402
 
 
-def _safe_symlink(src: Path, dst: Path) -> None:
-    if dst.is_symlink() or dst.exists():
-        dst.unlink()
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.symlink_to(src)
-
-
-def _top_level_root(p: Path) -> Path:
-    """Mirrors the helper in nnunetv2_build_datasets2.main()."""
-    p = Path(p)
-    try:
-        parts = p.resolve().parts
-    except Exception:  # noqa: BLE001
-        parts = p.parts
-    if len(parts) >= 2:
-        return Path("/") / parts[1]
-    return Path("/")
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="nnunet/configs.yaml")
-    ap.add_argument("--smore-out-root", default=None,
-                    help="Override smore_out_root from config")
-    ap.add_argument("--cases", default=None,
-                    help="Optional path to a casename file (one casename "
-                         "or source_id per line). Default: CNISP's test_cases.txt.")
-
-    # SMORE backend / runtime knobs (mirror nnunetv2_build_datasets2.py)
-    ap.add_argument("--smore-backend", choices=["local", "container"],
-                    default="local")
-    ap.add_argument("--smore-sif", default="",
-                    help="Path to SMORE SIF (required when backend=container)")
-    ap.add_argument("--smore-bind-roots", default="",
-                    help="Extra comma-separated bind roots for the container "
-                         "backend (in addition to auto-detected ones).")
-    ap.add_argument("--smore-gpu-ids", default="",
-                    help="Comma-separated GPU ids (e.g. '0,1').")
-    ap.add_argument("--smore-gpu-id", type=int, default=0,
-                    help="Single-GPU fallback when --smore-gpu-ids is empty.")
-    ap.add_argument("--smore-per-gpu-concurrency", type=int, default=1)
-    ap.add_argument("--smore-patch-sampling", default="gradient")
-    ap.add_argument("--smore-slice-thickness", type=float, default=None)
-    ap.add_argument("--smore-blur-kernel-fpath", type=str, default=None)
-    ap.add_argument("--smore-suffix", default="_smore")
-    ap.add_argument("--smore-on-incompatible",
-                    choices=["original", "skip"], default="original",
-                    help="What to do if a case fails the SMORE compatibility "
-                         "check. 'original' copies the source CT through with "
-                         "the SMORE suffix so downstream code stays uniform.")
-    # Compat check thresholds (defaults match the existing script).
-    ap.add_argument("--smore-min-slice-separation", type=float, default=1.2)
-    ap.add_argument("--smore-inplane-atol", type=float, default=1e-2)
-    ap.add_argument("--smore-isotropic-eps", type=float, default=1e-3)
-    ap.add_argument("--smore-require-unique-worst-axis", action="store_true",
-                    default=True)
-
-    args = ap.parse_args()
-
+def run(args) -> int:
     cfg = load_yaml(Path(args.config))
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
@@ -419,7 +364,3 @@ def main() -> int:
     # Non-zero exit if any error occurred so a driver can detect it.
     err = sum(v for k, v in statuses.items() if k == "error")
     return 1 if err > 0 else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

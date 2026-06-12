@@ -90,7 +90,7 @@ def infer_patch_size_mm(
 
     Used by downstream scripts that need to canonical-align *new*
     NIfTIs into the same physical frame as the model's training data
-    (e.g. ``nnunet/engine/build_dataset835_*_patches.py``). Reading
+    (e.g. ``nnunet/build_dataset835_*_patches.py``). Reading
     the value from disk avoids the silent-drift class of bug where a
     new script ships a different ``--patch-size`` default than
     ``orbital_shape_prior_st1/scripts/run_01_prepare.sh`` used.

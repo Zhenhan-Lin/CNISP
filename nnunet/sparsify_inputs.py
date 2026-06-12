@@ -19,7 +19,7 @@ Inputs
   -- defaults to ``runs/atlas_gt/`` (the ceiling curve). Override with
   ``--cnisp-sweep-source`` if your nnUNet sweep should track a
   different CNISP run's (source, step) set.
-* ``${work_dir}/source_to_path.json`` (written by data_prep/prepare_inputs.py)
+* ``${work_dir}/source_to_path.json`` (written by nnunet/prepare_inputs.py)
 * Per-source CT NIfTIs referenced by source_to_path.json
 
 Outputs
@@ -68,9 +68,15 @@ Two independent checks gate every write:
      manifest but the *actual* sparsified spacing differs slightly.
    * Above ``sparse_eff_res_max_drift``: hard-skip the step.
 
+The thin/thick degradation primitives come from CNISP's ``sparsify`` and
+the ``simulation`` package; this script wires them into the per-(source,
+step) gating + write loop.
+
 Usage
 -----
-    python nnunet/data_prep/sparsify_inputs.py --config nnunet/configs.yaml
+    python nnunet/sparsify_inputs.py --config nnunet/configs.yaml \\
+        [--mode {thin,thick}] [--modality {ct,mri}] [--experiment ...] \\
+        [--split {test,train}] [--sweep-pkl PATH] [--force]
 """
 
 from __future__ import annotations
@@ -87,8 +93,8 @@ import nibabel as nib
 import numpy as np
 import torch
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/data_prep/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from orbital_shape_prior_st1.data_prep.sparsify import sparsen_volume  # noqa: E402
@@ -247,43 +253,14 @@ def _eff_res_from_affine(affine: np.ndarray, axis: int) -> float:
     return float(np.linalg.norm(affine[:3, axis]))
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="nnunet/configs.yaml")
-    ap.add_argument("--cnisp-sweep-source", default="atlas_gt",
-                    help="run_tag under output_basedir/<model>/runs/ "
-                         "whose sweep_results.pkl drives the (source, "
-                         "step) set. Default atlas_gt: the deployment "
-                         "curve always re-uses the ceiling curve's "
-                         "sweep so a single nnUNet sparse-CT sweep "
-                         "covers both stories.")
-    ap.add_argument("--mode", choices=["thin", "thick"], default="thin",
-                    help="Degradation mode: 'thin' (point-sample, default) "
-                         "or 'thick' (profile-conv via simulation module). "
-                         "For thick, a modality-appropriate kernel is applied "
-                         "before subsampling.")
-    ap.add_argument("--modality", choices=["ct", "mri"], default="ct",
-                    help="Imaging modality (determines kernel type for thick).")
-    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
-                    default=None,
-                    help="Experiment directory layer for the sparse inputs: "
-                         "input/<experiment>/sparse_step_XX/. Defaults to "
-                         "--mode (thin/thick) so different degradation "
-                         "strategies coexist instead of overwriting each "
-                         "other. The shared native/ dense inputs are NOT "
-                         "exp-scoped (they are strategy-independent).")
-    ap.add_argument("--force", action="store_true",
-                    help="Overwrite existing sparse CTs in place instead of "
-                         "skipping when the destination file already exists. "
-                         "Use when the geometry/degradation changed so stale "
-                         "sparse inputs are refreshed without deleting first.")
-    args = ap.parse_args()
-
+def run(args) -> int:
     cfg = load_yaml(Path(args.config))
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
     experiment = args.experiment or args.mode
     work_dir = Path(cfg["work_dir"])
+    if args.split == "train":
+        work_dir = work_dir / "train_split"
     input_root = work_dir / "input"
     input_root.mkdir(parents=True, exist_ok=True)
     # Sparse CTs (and their manifest) live under an experiment subdir so a
@@ -301,21 +278,26 @@ def main() -> int:
     #   1. runs/<experiment>/<run_tag>/   (current, experiment-scoped)
     #   2. runs/<run_tag>/                (pre-experiment-layer)
     #   3. <model>/                       (pre-Option-C flat)
-    sweep_candidates = [
-        cnisp_model_root / "runs" / experiment / args.cnisp_sweep_source
-        / "sweep_results.pkl",
-        cnisp_model_root / "runs" / args.cnisp_sweep_source
-        / "sweep_results.pkl",
-        cnisp_model_root / "sweep_results.pkl",
-    ]
-    sweep_pkl = sweep_candidates[0]
-    for cand in sweep_candidates:
-        if cand.exists():
-            if cand != sweep_candidates[0]:
-                print(f"[sparsify_inputs] {sweep_candidates[0]} not found; "
-                      f"falling back to {cand}")
-            sweep_pkl = cand
-            break
+    if args.sweep_pkl:
+        # Explicit pickle (train split: the synthesized grid). No CNISP-run
+        # discovery, no fallbacks -- fail loudly downstream if absent.
+        sweep_pkl = Path(args.sweep_pkl)
+    else:
+        sweep_candidates = [
+            cnisp_model_root / "runs" / experiment / args.cnisp_sweep_source
+            / "sweep_results.pkl",
+            cnisp_model_root / "runs" / args.cnisp_sweep_source
+            / "sweep_results.pkl",
+            cnisp_model_root / "sweep_results.pkl",
+        ]
+        sweep_pkl = sweep_candidates[0]
+        for cand in sweep_candidates:
+            if cand.exists():
+                if cand != sweep_candidates[0]:
+                    print(f"[sparsify_inputs] {sweep_candidates[0]} not found; "
+                          f"falling back to {cand}")
+                sweep_pkl = cand
+                break
     soft_tol = float(cfg.get("sparse_eff_res_tolerance", 0.05))
     drift_tol = float(cfg.get("sparse_eff_res_max_drift", 0.30))
     canonical_axis = int(cfg.get("cnisp_slice_step_axis", 2))
@@ -324,7 +306,7 @@ def main() -> int:
     source_to_path = work_dir / "source_to_path.json"
     if not source_to_path.exists():
         print(f"[sparsify_inputs] {source_to_path} missing -- "
-              f"run nnunet/data_prep/prepare_inputs.py first.",
+              f"run nnunet/prepare_inputs.py first.",
               file=sys.stderr)
         return 2
     with open(source_to_path) as f:
@@ -551,5 +533,48 @@ def main() -> int:
     return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", default="nnunet/configs.yaml")
+    ap.add_argument("--cnisp-sweep-source", default="atlas_gt",
+                    help="run_tag under output_basedir/<model>/runs/ "
+                         "whose sweep_results.pkl drives the (source, "
+                         "step) set. Default atlas_gt: the deployment "
+                         "curve always re-uses the ceiling curve's "
+                         "sweep so a single nnUNet sparse-CT sweep "
+                         "covers both stories.")
+    ap.add_argument("--mode", choices=["thin", "thick"], default="thin",
+                    help="Degradation mode: 'thin' (point-sample, default) "
+                         "or 'thick' (profile-conv via simulation module). "
+                         "For thick, a modality-appropriate kernel is applied "
+                         "before subsampling.")
+    ap.add_argument("--modality", choices=["ct", "mri"], default="ct",
+                    help="Imaging modality (determines kernel type for thick).")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default=None,
+                    help="Experiment directory layer for the sparse inputs: "
+                         "input/<experiment>/sparse_step_XX/. Defaults to "
+                         "--mode (thin/thick) so different degradation "
+                         "strategies coexist instead of overwriting each "
+                         "other. The shared native/ dense inputs are NOT "
+                         "exp-scoped (they are strategy-independent).")
+    ap.add_argument("--force", action="store_true",
+                    help="Overwrite existing sparse CTs in place instead of "
+                         "skipping when the destination file already exists. "
+                         "Use when the geometry/degradation changed so stale "
+                         "sparse inputs are refreshed without deleting first.")
+    ap.add_argument("--split", choices=["test", "train"], default="test",
+                    help="'test' (default) sparsifies the test deployment "
+                         "scans under work_dir/. 'train' sparsifies the "
+                         "modeling scans under work_dir/train_split/ for the "
+                         "v6 nnUNet-obs data-gen (pair with --sweep-pkl).")
+    ap.add_argument("--sweep-pkl", default=None,
+                    help="Explicit sweep_results.pkl path. Overrides the "
+                         "CNISP-run auto-discovery -- used for the train "
+                         "split, which is driven by the synthesized grid "
+                         "from synth_train_sweep.py instead of a CNISP run.")
+    return ap
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(build_parser().parse_args()))

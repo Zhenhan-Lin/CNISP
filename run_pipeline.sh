@@ -58,16 +58,16 @@
 #                         --modality. thin reproduces the legacy sweep
 #                         exactly; thick runs the physical-degradation
 #                         experiment (see simulation/).
-#                         (nnunet/data_prep/sparsify_inputs.py
-#                          + nnunet/engine/predict_sparse_iso.py)
+#                         (nnunet/sparsify_inputs.py
+#                          + nnunet/predict_sparse_iso.py)
 #
 #   nnunet-predict-smore  nnUNet on the SMORE-super-resolved CTs (produced
 #                         out-of-band by
-#                         nnunet/engine/build_smore_test_images.py; this
+#                         nnunet/build_smore_test_images.py; this
 #                         phase only consumes them). Output is
 #                         prediction/smore/<sid>.nii.gz on the SMORE
 #                         grid -- mask only, no downstream comparison yet.
-#                         (nnunet/data_prep/prepare_smore_inputs.py
+#                         (nnunet/prepare_smore_inputs.py
 #                          + nnunet/run_predict_smore.sh)
 #
 #   cnisp-prep-dataset835-gt
@@ -86,7 +86,7 @@
 #                         drift away from what the model was trained on.
 #                         Requires: nnunet-predict + cnisp-align (so the
 #                         training metadata exists).
-#                         (nnunet/engine/build_dataset835_canonical_patches.py)
+#                         (nnunet/build_dataset835_canonical_patches.py)
 #
 #   cnisp-prep-dataset835-sparse
 #                         Build per-step canonical-aligned Dataset835
@@ -102,7 +102,7 @@
 #                         ``patch_size_mm``).
 #                         Requires: nnunet-predict + nnunet-predict-sweep
 #                         + cnisp-align.
-#                         (nnunet/engine/build_dataset835_sparse_patches.py)
+#                         (nnunet/build_dataset835_sparse_patches.py)
 #
 #   cnisp-infer-nnunet-pred
 #                         CNISP test-time latent optimization for the
@@ -137,7 +137,7 @@
 #                         {lowres_pred, hires_gt}; lowres_pred is typically
 #                         ${work_dir}/prediction/native/<sid>.nii.gz once the
 #                         real low-res scan has been staged + predicted.
-#                         (nnunet/engine/build_realpair_patches.py)
+#                         (nnunet/build_realpair_patches.py)
 #
 #   cnisp-infer-realpair  (OPT-IN, not in the default phase list) CNISP eval
 #                         for the REAL paired-data line (run_tag=real_pair).
@@ -172,7 +172,7 @@
 #                         This phase is the explicit re-render entry point
 #                         shared by both ``cnisp-viz`` (which audits the
 #                         outputs) and ``compare`` (which Dice's against them).
-#                         (nnunet/engine/build_cnisp_native_sweep.py)
+#                         (nnunet/build_cnisp_native_sweep.py)
 #
 #   cnisp-viz             CNISP-only artifacts (the bits no method-agnostic
 #                         viewer can reproduce):
@@ -237,8 +237,8 @@
 #                         masks are missing, rather than silently emitting
 #                         a half-populated paired CSV.
 #                         (nnunet/compare_native.py
-#                          + nnunet/engine/build_method_summary.py
-#                          + nnunet/engine/build_paired_summary.py)
+#                          + nnunet/build_method_summary.py
+#                          + nnunet/build_paired_summary.py)
 #
 #   nnunet-native-summary SELF-CONTAINED nnUNet-only native-space Dice,
 #                         indexed by sparsification STEP. Reads the
@@ -265,7 +265,7 @@
 #                         Depends only on `nnunet-predict-sweep` (+ the GT
 #                         metadata from canonical alignment). Standalone:
 #                           bash run_pipeline.sh nnunet-native-summary
-#                         (nnunet/engine/build_nnunet_native_summary.py)
+#                         (nnunet/build_nnunet_native_summary.py)
 #
 # Dependency order (the order phases run when none are specified):
 #   cnisp-train
@@ -405,6 +405,7 @@ VALID_PHASES=(
     nnunet-predict
     cnisp-infer
     nnunet-predict-sweep
+    nnunet-predict-sweep-train
     nnunet-predict-smore
     cnisp-prep-dataset835-gt
     cnisp-prep-dataset835-sparse
@@ -726,7 +727,7 @@ phase_nnunet_predict_sweep() {
     # manifests, not a directory glob.
     local force_args=()
     [[ $FORCE -eq 1 ]] && force_args+=("--force")
-    python3 "$REPO_ROOT/nnunet/data_prep/sparsify_inputs.py"   --config "$CONFIG" \
+    python3 "$REPO_ROOT/nnunet/sparsify_inputs.py"   --config "$CONFIG" \
             --mode "$SWEEP_DEGRADE_MODE" --modality "$SWEEP_MODALITY" \
             --experiment "$EXP" "${force_args[@]}"
     # Single custom-predictor pass writes the sparse-grid mask
@@ -734,8 +735,53 @@ phase_nnunet_predict_sweep() {
     # (sparse_step_XX_native/, the Dice target). --force overwrites existing
     # masks in place; without it predict_sparse_iso skips pairs whose outputs
     # already exist (resume-friendly).
-    python3 "$REPO_ROOT/nnunet/engine/predict_sparse_iso.py" --config "$CONFIG" \
+    python3 "$REPO_ROOT/nnunet/predict_sparse_iso.py" --config "$CONFIG" \
             --experiment "$EXP" "${force_args[@]}"
+}
+
+phase_nnunet_predict_sweep_train() {
+    # v6 nnUNet-obs DATA-GEN over the MODELING split (train_cases ∪ val_cases,
+    # all chk_*). nnUNet predicts ONLY on the DEGRADED (sparse) CTs -- there is
+    # NO nnUNet dense prediction and NO step_01 prediction anywhere here. Runs
+    # BOTH thin & thick so the v6 bank gets all 4 input types
+    # (thin/thick × gt/nnunet). Everything is namespaced under
+    # ${WORK_DIR}/train_split/ and patches land in
+    # aligned_dir/labels_dataset835_{thin,thick}_train_step_XX/.
+    echo ""
+    echo "[phase] nnunet-predict-sweep-train --------------------"
+    local train_root="${WORK_DIR}/train_split"
+    local synth_pkl="${train_root}/synth_sweep_results.pkl"
+    local train_cfg="$REPO_ROOT/orbital_shape_prior_st1/configs/train_sty2.yaml"
+    local marker="${train_root}/prediction/thick/sweep_manifest.json"
+    if [[ $FORCE -eq 0 && -f "$marker" ]]; then
+        echo "  train sweep manifest present: $marker"
+        echo "  -> skipping (pass --force to rebuild)."
+        return 0
+    fi
+    local force_args=()
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
+
+    # 1) Stage modeling-split CTs (manifest only; NO nnUNet dense predict).
+    python3 "$REPO_ROOT/nnunet/prepare_inputs.py" --config "$CONFIG" \
+            --split train
+
+    # 2) Synthesize the bank-aligned step grid (steps >= 2 only).
+    python3 "$REPO_ROOT/nnunet/synth_train_sweep.py" --config "$CONFIG" \
+            --train-config "$train_cfg" --out "$synth_pkl"
+
+    # 3+4) thin & thick: degrade CT -> predict on DEGRADED only (skip step_01)
+    #      -> canonical-align the sparse-grid preds into train obs patches.
+    for exp in thin thick; do
+        echo "  ─── train data-gen: experiment=$exp ───"
+        python3 "$REPO_ROOT/nnunet/sparsify_inputs.py" --config "$CONFIG" \
+                --split train --mode "$exp" --modality "$SWEEP_MODALITY" \
+                --experiment "$exp" --sweep-pkl "$synth_pkl" "${force_args[@]}"
+        python3 "$REPO_ROOT/nnunet/predict_sparse_iso.py" --config "$CONFIG" \
+                --split train --experiment "$exp" --skip-step-01 "${force_args[@]}"
+        python3 "$REPO_ROOT/nnunet/build_dataset835_sparse_patches.py" \
+                --config "$CONFIG" --split train --experiment "$exp" \
+                --skip-step-01 "${force_args[@]}"
+    done
 }
 
 phase_nnunet_predict_smore() {
@@ -746,7 +792,7 @@ phase_nnunet_predict_smore() {
         echo "  -> skipping (pass --force to re-predict)."
         return 0
     fi
-    python3 "$REPO_ROOT/nnunet/data_prep/prepare_smore_inputs.py" --config "$CONFIG"
+    python3 "$REPO_ROOT/nnunet/prepare_smore_inputs.py" --config "$CONFIG"
     CONFIG="$CONFIG" bash "$REPO_ROOT/nnunet/run_predict_smore.sh"
 }
 
@@ -842,7 +888,7 @@ phase_cnisp_prep_dataset835_gt() {
     # skip" so stale patches get overwritten in place.
     local force_args=()
     [[ $FORCE -eq 1 ]] && force_args+=("--force")
-    python3 "$REPO_ROOT/nnunet/engine/build_dataset835_canonical_patches.py" \
+    python3 "$REPO_ROOT/nnunet/build_dataset835_canonical_patches.py" \
             --config "$CONFIG" \
             --patch-size "$CNISP_PATCH_SIZE_MM" \
             "${force_args[@]}"
@@ -866,7 +912,7 @@ phase_cnisp_prep_dataset835_sparse() {
     # "already on disk -> skip" so stale sparse patches get overwritten.
     local force_args=()
     [[ $FORCE -eq 1 ]] && force_args+=("--force")
-    python3 "$REPO_ROOT/nnunet/engine/build_dataset835_sparse_patches.py" \
+    python3 "$REPO_ROOT/nnunet/build_dataset835_sparse_patches.py" \
             --config "$CONFIG" \
             --patch-size "$CNISP_PATCH_SIZE_MM" \
             --experiment "$EXP" \
@@ -905,7 +951,7 @@ phase_cnisp_prep_realpair() {
     _require_training_patch_size "cnisp-prep-realpair"
     local force_args=()
     [[ $FORCE -eq 1 ]] && force_args+=("--force")
-    python3 "$REPO_ROOT/nnunet/engine/build_realpair_patches.py" \
+    python3 "$REPO_ROOT/nnunet/build_realpair_patches.py" \
             --config "$CONFIG" \
             --manifest "$REALPAIR_MANIFEST" \
             --patch-size "$CNISP_PATCH_SIZE_MM" \
@@ -950,7 +996,7 @@ phase_cnisp_native_remap() {
         local run_tag="${CNISP_RUN_TAGS[$i]}"
         echo "  ── native remap for experiment=$EXP run_tag=$run_tag ──"
         # shellcheck disable=SC2086  # force_flag is intentionally word-split
-        python3 "$REPO_ROOT/nnunet/engine/build_cnisp_native_sweep.py" \
+        python3 "$REPO_ROOT/nnunet/build_cnisp_native_sweep.py" \
                 --config "$CONFIG" --run-tag "$run_tag" \
                 --experiment "$EXP" $force_flag
     done
@@ -1033,7 +1079,7 @@ phase_compare() {
         local paired_viz_dir="$WORK_DIR/comparison/viz/paired__${run_tag}__${EXP}"
 
         # 2) CNISP-only by-eff_res bundle for THIS run.
-        python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
+        python3 "$REPO_ROOT/nnunet/build_method_summary.py" \
                 --config "$CONFIG" \
                 --method "$method" \
                 --paired-csv "$paired_csv" \
@@ -1043,7 +1089,7 @@ phase_compare() {
         #    the dir a reviewer should open to actually SEE the
         #    comparison; the per-method bundles are the raw single-method
         #    view.
-        python3 "$REPO_ROOT/nnunet/engine/build_paired_summary.py" \
+        python3 "$REPO_ROOT/nnunet/build_paired_summary.py" \
                 --config "$CONFIG" \
                 --cnisp-method "$method" \
                 --paired-csv "$paired_csv" \
@@ -1083,7 +1129,7 @@ phase_compare() {
         local nnunet_viz_dir="$WORK_DIR/comparison/viz/nnUNet-sparse__${EXP}"
 
         echo "  ─── nnUNet-sparse standalone (experiment=$EXP canonical CSV = ${canonical_tag}) ───"
-        python3 "$REPO_ROOT/nnunet/engine/build_method_summary.py" \
+        python3 "$REPO_ROOT/nnunet/build_method_summary.py" \
                 --config "$CONFIG" \
                 --method nnUNet-sparse \
                 --paired-csv "$canonical_csv" \
@@ -1096,7 +1142,7 @@ phase_compare() {
     # shows 1 experiment and grows as thick/real CSVs appear. Cheap, always
     # re-runs with the per-experiment compare above.
     echo "  ─── cross-experiment summary (scanning all __<exp> CSVs) ───"
-    python3 "$REPO_ROOT/nnunet/engine/build_experiment_summary.py" \
+    python3 "$REPO_ROOT/nnunet/build_experiment_summary.py" \
             --config "$CONFIG" \
             --comparison-dir "$WORK_DIR/comparison"
 }
@@ -1113,7 +1159,7 @@ phase_nnunet_native_summary() {
     # Depends only on `nnunet-predict-sweep` (+ the GT metadata that already
     # exists from canonical alignment).
     echo "  ─── nnUNet native per-step summary (experiment=$EXP) ───"
-    python3 "$REPO_ROOT/nnunet/engine/build_nnunet_native_summary.py" \
+    python3 "$REPO_ROOT/nnunet/build_nnunet_native_summary.py" \
             --config "$CONFIG" \
             --experiment "$EXP"
 }
@@ -1126,6 +1172,7 @@ for phase in "${PHASES[@]}"; do
         nnunet-predict)                phase_nnunet_predict ;;
         cnisp-infer)                   phase_cnisp_infer ;;
         nnunet-predict-sweep)          phase_nnunet_predict_sweep ;;
+        nnunet-predict-sweep-train)    phase_nnunet_predict_sweep_train ;;
         nnunet-predict-smore)          phase_nnunet_predict_smore ;;
         cnisp-prep-dataset835-gt)      phase_cnisp_prep_dataset835_gt ;;
         cnisp-prep-dataset835-sparse)  phase_cnisp_prep_dataset835_sparse ;;

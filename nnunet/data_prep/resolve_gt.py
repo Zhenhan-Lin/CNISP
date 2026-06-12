@@ -6,7 +6,7 @@ This module is the single source of truth for:
   * how to find each source's native-head GT label NIfTI,
   * which canonical label scheme each GT uses.
 
-Everything downstream (``data_prep/prepare_inputs.py``,
+Everything downstream (``nnunet/prepare_inputs.py``,
 ``engine/build_smore_test_images.py``, ``compare_native.py``) calls into
 this module so the resolution logic cannot drift.
 
@@ -86,6 +86,24 @@ def parse_test_cases(test_cases_path: Path) -> Dict[str, List[str]]:
     return sources
 
 
+def parse_casefiles(paths: List[Path]) -> Dict[str, List[str]]:
+    """Merge several casefiles into one ``{source_id: [casenames]}`` map.
+
+    Used to stage the modeling split (``train_cases.txt`` ∪
+    ``val_cases.txt``) through the same resolution machinery as the test
+    split. Duplicate casenames (a case listed in more than one file) are
+    de-duplicated; the splits are expected to be patient-disjoint anyway.
+    """
+    grouped: Dict[str, List[str]] = {}
+    for p in paths:
+        for sid, names in parse_test_cases(p).items():
+            bucket = grouped.setdefault(sid, [])
+            for n in names:
+                if n not in bucket:
+                    bucket.append(n)
+    return grouped
+
+
 # ── per-eye metadata ──────────────────────────────────────────────
 
 
@@ -123,7 +141,7 @@ def build_struct_to_value(scheme: str, offset: int) -> Dict[str, int]:
 
 
 def resolve_sources(
-    test_cases_path: Path,
+    test_cases_path,
     meta_dir: Path,
     atlas_image_dir: Optional[Path] = None,
     pivot_csv: Optional[Path] = None,
@@ -175,7 +193,12 @@ def resolve_sources(
         ``missing``: list of human-readable strings, one per source whose
         CT could not be located. Always empty when ``resolve_ct=False``.
     """
-    grouped = parse_test_cases(test_cases_path)
+    # ``test_cases_path`` may be a single casefile (test split) or a list of
+    # casefiles (the modeling split = train_cases.txt ∪ val_cases.txt).
+    if isinstance(test_cases_path, (list, tuple)):
+        grouped = parse_casefiles([Path(p) for p in test_cases_path])
+    else:
+        grouped = parse_test_cases(Path(test_cases_path))
 
     pivot_index: Dict[str, Dict[str, str]] = {}
     pivot_columns_available: List[str] = []

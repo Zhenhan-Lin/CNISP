@@ -10,7 +10,7 @@
 #   native_sweep_summary.json  audit of native_space_step_XX/ outputs
 #
 # Dice trend / per-class / per-case figures come from the `compare`
-# phase (nnunet/engine/build_method_summary.py), driven from the
+# phase (nnunet/build_method_summary.py), driven from the
 # paired_per_source__<run_tag>.csv compare_native produces. The CNISP
 # slice of that bundle lands at
 # output_basedir/<MODEL_NAME>/viz/<RUN_TAG>/<METHOD_LABEL>_*.

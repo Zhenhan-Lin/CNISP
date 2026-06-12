@@ -2,7 +2,7 @@
 CNISP-only result viewer for orbital shape prior inference.
 
 This module owns the artifacts that are **specific to CNISP** and that
-``nnunet/engine/build_method_summary.py`` cannot reproduce:
+``nnunet/build_method_summary.py`` cannot reproduce:
 
     recon_layout.txt            file-tree summary of the reconstruction dir
                                 (folder structure + file counts + sizes)
@@ -27,7 +27,7 @@ What this module deliberately does NOT do anymore
 -------------------------------------------------
 Per-step Dice trend lines, per-class Dice curves and per-case Dice
 boxplots used to be packed into a single ``recon_summary.png`` here.
-That bundle is now produced by ``nnunet/engine/build_method_summary.py``
+That bundle is now produced by ``nnunet/build_method_summary.py``
 (driven from ``paired_per_source.csv``) so that CNISP and nnUNet always
 share one source set + eff_res axis. The output for CNISP lands at
 ``${output_basedir}/<model_name>/viz/CNISP_recon_summary.png`` and
@@ -647,7 +647,7 @@ def visualize_results(params: dict) -> Dict:
               "directories found.")
 
     print("\nDice trend / per-class / per-case figures are produced by the\n"
-          "`compare` phase (nnunet/engine/build_method_summary.py); they\n"
+          "`compare` phase (nnunet/build_method_summary.py); they\n"
           "land at <output_basedir>/<model>/viz/<run_tag>/"
           "<method_label>_recon_summary.png and siblings.")
 

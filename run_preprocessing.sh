@@ -15,12 +15,12 @@
 #                  -> writes paths.yaml::aligned_dir
 #   nnunet-stage   configs.yaml::atlas_image_dir, configs.yaml::pivot_csv
 #                  -> writes configs.yaml::work_dir/input/native/
-#                  NOTE: data_prep/prepare_inputs.py *symlinks* the
+#                  NOTE: nnunet/prepare_inputs.py *symlinks* the
 #                  original CTs into input/native/. The GPU host must
 #                  still resolve those symlinks at predict time. Either
 #                  keep the source CTs on a shared filesystem, copy
 #                  them onto the GPU host first, or edit
-#                  data_prep/prepare_inputs.py to copy instead of
+#                  nnunet/prepare_inputs.py to copy instead of
 #                  symlink.
 #   smore          same source CTs as nnunet-stage; writes to the
 #                  shared filesystem configs.yaml::smore_out_root
@@ -34,10 +34,10 @@
 #                  pass --force-align to override.
 #   nnunet-stage   Resolve 31 source CTs and symlink them as nnUNet
 #                  channel-0 inputs + source_to_path.json manifest.
-#                  (nnunet/data_prep/prepare_inputs.py)
+#                  (nnunet/prepare_inputs.py)
 #   smore          (opt-in, NOT in default) Super-resolve the 31 CTs
 #                  with SMORE for the deferred iso-grid comparison.
-#                  (nnunet/engine/build_smore_test_images.py)
+#                  (nnunet/build_smore_test_images.py)
 #
 # Default (no phases given): cnisp-align nnunet-stage
 #   -- smore is opt-in because it can take many GPU-hours.
@@ -47,7 +47,7 @@
 # cnisp-infer-realpair) compares a CNISP reconstruction from a REAL low-res
 # scan against a SEPARATE high-resolution GT scan of the same subject. There
 # is no automatable preprocessing phase for it in THIS script because the
-# patch build (nnunet/engine/build_realpair_patches.py) needs the nnUNet
+# patch build (nnunet/build_realpair_patches.py) needs the nnUNet
 # prediction on the low-res scan, which is produced on the GPU host. What you
 # must prepare here / by hand before running the real_pair pipeline phases:
 #   1. Stage the REAL low-res CT scans so nnUNet can predict them. The
@@ -238,7 +238,7 @@ phase_cnisp_align() {
 phase_nnunet_stage() {
     echo ""
     echo "[phase] nnunet-stage ----------------------------------"
-    python3 "$REPO_ROOT/nnunet/data_prep/prepare_inputs.py" --config "$CONFIG"
+    python3 "$REPO_ROOT/nnunet/prepare_inputs.py" --config "$CONFIG"
     echo ""
     echo "  Staged inputs (symlinks pointing at the source CTs):"
     echo "    ${WORK_DIR%/}/input/native/"
@@ -255,7 +255,7 @@ phase_smore() {
     if [[ ${#SMORE_EXTRA_ARGS[@]} -gt 0 ]]; then
         echo "  smore extra args: ${SMORE_EXTRA_ARGS[*]}"
     fi
-    python3 "$REPO_ROOT/nnunet/engine/build_smore_test_images.py" \
+    python3 "$REPO_ROOT/nnunet/build_smore_test_images.py" \
         --config "$CONFIG" "${SMORE_EXTRA_ARGS[@]}"
 }
 

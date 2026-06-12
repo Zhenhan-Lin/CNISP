@@ -29,13 +29,13 @@ labels_dirname: labels
 #
 #   labels_dataset835_dirname        Dataset835 DENSE pred canonical-aligned
 #                                    (chk_* GT target for nnunet_pred mode)
-#                                    -> nnunet/engine/build_dataset835_canonical_patches.py
+#                                    -> nnunet/build_dataset835_canonical_patches.py
 #   metadata_dataset835_dirname      sidecar JSONs for the above (needed by
 #                                    native_mapping for chk_* deployment row)
 #   labels_dataset835_step_prefix    per-step Dataset835 SPARSE pred
 #                                    canonical-aligned. Subdir names are
 #                                    "{prefix}{XX}" e.g. labels_dataset835_step_03.
-#                                    -> nnunet/engine/build_dataset835_sparse_patches.py
+#                                    -> nnunet/build_dataset835_sparse_patches.py
 #                                    (latent-opt INPUT for nnunet_pred mode)
 #
 # These defaults are also the convention used by run_pipeline.sh's
@@ -49,7 +49,7 @@ labels_dataset835_step_prefix: labels_dataset835_step_
 # REAL paired acquisitions: a low-res scan + a separate hi-res GT scan.
 # Each is canonical-aligned independently (registration-free); the
 # reconstructed mask is rigidly registered to the GT mask at eval time.
-# Written by nnunet/engine/build_realpair_patches.py.
+# Written by nnunet/build_realpair_patches.py.
 #
 #   labels_realpair_input_dirname    nnUNet pred on the REAL low-res scan,
 #                                    aligned (latent-opt INPUT for real_pair)

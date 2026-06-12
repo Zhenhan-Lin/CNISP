@@ -37,9 +37,12 @@ Outputs (under ``aligned_dir``)
 Each scan is aligned with the SAME ``source_id`` so the per-eye casenames
 (``{source_id}_OD`` / ``{source_id}_OS``) match between input and GT.
 
+The output-directory layout lives in ``nnunet.lib.patches``; this script
+wires it into the per-side align/match/save loop.
+
 Usage
 -----
-    python nnunet/engine/build_realpair_patches.py \
+    python nnunet/build_realpair_patches.py \
         --config nnunet/configs.yaml \
         --manifest /abs/path/realpair_manifest.json
 """
@@ -51,19 +54,20 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 import nibabel as nib
 import numpy as np
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nnunet.helpers.config import (  # noqa: E402
     add_cnisp_src_to_syspath,
     load_yaml,
 )
 from nnunet.helpers.patch_size import resolve_patch_size_mm  # noqa: E402
+from nnunet.lib.patches import realpair_layout  # noqa: E402
 
 add_cnisp_src_to_syspath(__file__)
 
@@ -71,20 +75,6 @@ from data_prep.canonical_align import (  # noqa: E402
     align_single_case,
     infer_patch_size_mm,
 )
-
-
-def _layout(cnisp_paths: dict, aligned_dir: Path) -> Dict[str, Path]:
-    return {
-        "input_dir": aligned_dir / cnisp_paths.get(
-            "labels_realpair_input_dirname", "labels_realpair_input"
-        ),
-        "gt_dir": aligned_dir / cnisp_paths.get(
-            "labels_realpair_gt_dirname", "labels_realpair_gt"
-        ),
-        "gt_meta_dir": aligned_dir / cnisp_paths.get(
-            "metadata_realpair_gt_dirname", "metadata_realpair_gt"
-        ),
-    }
 
 
 def _align_side(seg_path: Path, sid: str, patch_size_mm: float,
@@ -106,18 +96,7 @@ def _align_side(seg_path: Path, sid: str, patch_size_mm: float,
         return []
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="nnunet/configs.yaml")
-    ap.add_argument("--manifest", required=True,
-                    help="JSON mapping source_id -> {lowres_pred, hires_gt}.")
-    ap.add_argument("--force", action="store_true",
-                    help="Re-write patches even if they already exist.")
-    ap.add_argument("--patch-size", type=float, default=None,
-                    help="Patch extent (mm). Defaults to the trained model's "
-                         "value recorded in aligned_dir/metadata/.")
-    args = ap.parse_args()
-
+def run(args) -> int:
     cfg = load_yaml(Path(args.config))
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
     aligned_dir = Path(cnisp_paths["aligned_dir"])
@@ -127,7 +106,7 @@ def main() -> int:
         log_prefix="realpair", infer_fn=infer_patch_size_mm,
     )
 
-    layout = _layout(cnisp_paths, aligned_dir)
+    layout = realpair_layout(cnisp_paths, aligned_dir)
     for d in layout.values():
         d.mkdir(parents=True, exist_ok=True)
 
@@ -202,5 +181,18 @@ def main() -> int:
     return 0 if n_failed == 0 else 3
 
 
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", default="nnunet/configs.yaml")
+    ap.add_argument("--manifest", required=True,
+                    help="JSON mapping source_id -> {lowres_pred, hires_gt}.")
+    ap.add_argument("--force", action="store_true",
+                    help="Re-write patches even if they already exist.")
+    ap.add_argument("--patch-size", type=float, default=None,
+                    help="Patch extent (mm). Defaults to the trained model's "
+                         "value recorded in aligned_dir/metadata/.")
+    return ap
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(build_parser().parse_args()))

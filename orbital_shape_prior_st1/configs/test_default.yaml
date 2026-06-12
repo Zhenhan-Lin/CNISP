@@ -21,14 +21,14 @@
 #     - Latent-opt input  : per-step canonical-aligned Dataset835 sparse-CT
 #                           prediction at
 #                           ${aligned_dir}/labels_dataset835_step_XX/<casename>.nii.gz.
-#                           (built by nnunet/engine/build_dataset835_sparse_patches.py
+#                           (built by nnunet/build_dataset835_sparse_patches.py
 #                           from ${work_dir}/prediction/sparse_step_XX/<sid>.nii.gz.)
 #     - Dense Dice target : for atlas cases, atlas manual GT
 #                           (${aligned_dir}/labels/atlas_*.nii.gz, unchanged).
 #                           For chk_* cases, canonical-aligned Dataset835
 #                           DENSE pred
 #                           (${aligned_dir}/labels_dataset835/chk_*.nii.gz,
-#                           built by nnunet/engine/build_dataset835_canonical_patches.py).
+#                           built by nnunet/build_dataset835_canonical_patches.py).
 #     - Outputs land at   : ${output_basedir}/<model>/runs/nnunet_pred/.
 #
 #   real_pair (Turella sim3, REAL paired acquisitions):
@@ -38,7 +38,7 @@
 #     - Dense Dice target : separate hi-res GT (manual or nnUNet-on-hires),
 #                           canonical-aligned, at
 #                           ${aligned_dir}/labels_realpair_gt/<casename>.nii.gz.
-#                           (both built by nnunet/engine/build_realpair_patches.py)
+#                           (both built by nnunet/build_realpair_patches.py)
 #     - The reconstructed mask is RIGIDLY registered to the GT mask
 #       (post-hoc) before Dice — the two scans are independent acquisitions
 #       in different frames, so registration absorbs repositioning.
@@ -123,6 +123,22 @@ latent_lr: 1.0e-2          # Adam learning rate for latent
 # Early stopping: stop if dice doesn't improve for N consecutive
 # 10-step evaluation blocks. Set to -1 to disable.
 max_num_const_train_dsc: 10
+
+# ── Soft latent-fit (observation handling) ────────────────────────
+# latent_fit_soft:
+#   false (DEFAULT): hard-label fit. CE forces the latent to reproduce
+#                    every observed voxel exactly (original behaviour,
+#                    unchanged bit-for-bit).
+#   true           : soft fit. The CE target is label-smoothed
+#                    (latent_fit_label_smoothing mass spread over the
+#                    off classes), so the latent is no longer forced to
+#                    match wrong observed voxels. Use this for the
+#                    deployment curve (test_label_source=nnunet_pred),
+#                    where the observation is a noisy nnUNet prediction
+#                    on a degraded image and hard-fitting overcommits to
+#                    its errors. Dice + latent L2 are unchanged.
+latent_fit_soft: false
+latent_fit_label_smoothing: 0.1
 
 # ── Output ────────────────────────────────────────────────────────
 export_predictions: true   # save *_pred.nii.gz per case

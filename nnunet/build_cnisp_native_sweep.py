@@ -28,9 +28,9 @@ Outputs (per step, only when missing or ``--force``):
 Usage
 -----
     # Ceiling-curve run (default)
-    python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml
+    python nnunet/build_cnisp_native_sweep.py --config nnunet/configs.yaml
     # Deployment-curve run
-    python nnunet/engine/build_cnisp_native_sweep.py --config nnunet/configs.yaml \\
+    python nnunet/build_cnisp_native_sweep.py --config nnunet/configs.yaml \\
         --run-tag nnunet_pred
 """
 
@@ -44,8 +44,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nnunet.helpers.config import (  # noqa: E402
     add_cnisp_src_to_syspath,
@@ -83,26 +83,7 @@ def _meta_path_for_casename_factory(
     return _resolve
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="nnunet/configs.yaml")
-    ap.add_argument("--model-name", default=None,
-                    help="Override cnisp_model_name from config")
-    ap.add_argument("--run-tag", default="atlas_gt",
-                    help="Which CNISP run to backfill, under "
-                         "output_basedir/<model>/runs/<experiment>/<run-tag>/.")
-    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
-                    default="thin",
-                    help="Experiment directory layer (thin|thick|real) under "
-                         "runs/. Must match the experiment infer.py wrote.")
-    ap.add_argument("--steps", default=None,
-                    help="Optional comma-separated step_size whitelist "
-                         "(default: every step present in sweep_results.pkl)")
-    ap.add_argument("--force", action="store_true",
-                    help="Re-map even if native_space_step_XX/manifest.json "
-                         "already exists (default: skip steps already done).")
-    args = ap.parse_args()
-
+def run(args) -> int:
     cfg = load_yaml(Path(args.config))
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
 
@@ -262,5 +243,26 @@ def main() -> int:
     return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", default="nnunet/configs.yaml")
+    ap.add_argument("--model-name", default=None,
+                    help="Override cnisp_model_name from config")
+    ap.add_argument("--run-tag", default="atlas_gt",
+                    help="Which CNISP run to backfill, under "
+                         "output_basedir/<model>/runs/<experiment>/<run-tag>/.")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default="thin",
+                    help="Experiment directory layer (thin|thick|real) under "
+                         "runs/. Must match the experiment infer.py wrote.")
+    ap.add_argument("--steps", default=None,
+                    help="Optional comma-separated step_size whitelist "
+                         "(default: every step present in sweep_results.pkl)")
+    ap.add_argument("--force", action="store_true",
+                    help="Re-map even if native_space_step_XX/manifest.json "
+                         "already exists (default: skip steps already done).")
+    return ap
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(build_parser().parse_args()))

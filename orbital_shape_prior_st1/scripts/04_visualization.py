@@ -11,7 +11,7 @@ Reads the reconstruction folder produced by `scripts/03_infer.py`
     native_sweep_summary.json   per-step native_space_step_XX/ audit
 
 Per-step Dice trend / per-class / per-case figures are now produced by
-the `compare` phase (nnunet/engine/build_method_summary.py) so that
+the `compare` phase (nnunet/build_method_summary.py) so that
 CNISP and nnUNet share the same source set + bucket edges. The CNISP
 slice lands at output_basedir/<model_name>/viz/CNISP_*.
 

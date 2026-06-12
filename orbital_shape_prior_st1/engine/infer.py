@@ -145,7 +145,7 @@ def load_model_checkpoint(model_dir: Path, which: str = "best", verbose: bool = 
 
 def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
                     lat_reg_lambda, num_iters, max_num_const_dsc,
-                    device, verbose=True):
+                    device, verbose=True, soft=False, label_smoothing=0.1):
     """
     Test-time latent optimization for one case.
 
@@ -155,12 +155,22 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
     80mm patch, bf16 on a 48 GB GPU comfortably handles up to ~15M voxels
     (single forward); beyond that the caller is responsible for downsampling
     or skipping the case.
+
+    Soft latent-fit (``soft=True``)
+    -------------------------------
+    Replaces the hard one-hot CE target with a label-smoothed soft target
+    (``label_smoothing`` mass spread over the off classes). The latent is
+    then no longer forced to reproduce every observed voxel exactly, which
+    reduces overcommitment to a noisy nnUNet observation on a degraded
+    image. Dice + latent L2 are unchanged. ``soft=False`` (default) keeps
+    the original hard-label optimisation bit-for-bit.
     """
     latent = torch.nn.Parameter(
         torch.normal(0.0, 1e-4, [1, latent_dim], device=device),
         requires_grad=True,
     )
-    criterion = MultiClassShapeLoss().to(device)
+    eps = float(label_smoothing) if soft else 0.0
+    criterion = MultiClassShapeLoss(label_smoothing=eps).to(device)
     metric = MultiClassDiceMetric(net.num_classes).to(device)
     optimizer = torch.optim.Adam([latent], lr=lr)
 
@@ -177,8 +187,9 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
         dt = ("bf16" if _AUTOCAST_DTYPE == torch.bfloat16
               else "fp16" if _AUTOCAST_DTYPE == torch.float16
               else "fp32")
+        fit_mode = (f"soft(ls={eps:.2f})" if soft else "hard")
         print(f"  optimize_latent: {n_vox} voxels, dtype={dt}, "
-              f"iters={num_iters}")
+              f"iters={num_iters}, fit={fit_mode}")
 
     prev_dsc, n_const = 0.0, 0
     t0 = time.time()
@@ -790,7 +801,7 @@ def infer_test_set(params):
         print(f"Native-space predictions: {native_dir} ({len(native_paths)} volumes)")
 
     # ── Map EVERY sweep step to native space ──────────────────────
-    # Mirrors what nnunet/engine/build_cnisp_native_sweep.py does as a backfill
+    # Mirrors what nnunet/build_cnisp_native_sweep.py does as a backfill
     # for already-run experiments; here it is folded into the inference
     # loop so a single run produces every artifact the cross-model
     # comparison (see nnunet/compare_native.py) consumes.

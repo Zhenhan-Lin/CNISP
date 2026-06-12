@@ -8,7 +8,7 @@ Inputs
   ``nnunet-predict`` pipeline phase). Same label scheme as the nnUNet
   training plan: {0:BG, 1:ON, 2:Recti, 3:Globe, 4:Fat}.
 * ``${work_dir}/source_to_path.json`` -- 31-source manifest produced by
-  ``nnunet/data_prep/prepare_inputs.py``.
+  ``nnunet/prepare_inputs.py``.
 
 Outputs
 -------
@@ -31,9 +31,14 @@ NIfTI and the metadata JSON are absent (or ``--force`` is passed). A
 final summary prints the counts so it's easy to confirm the
 ``cnisp-prep-dataset835-gt`` phase has covered every expected case.
 
+This script IS the orchestration layer: it pulls its reusable pieces from
+``nnunet.lib`` / ``nnunet.helpers`` (and CNISP's ``canonical_align``) and
+wires them into the per-(source, eye) align/save loop. There is no separate
+``engine/`` module.
+
 Usage
 -----
-    python nnunet/engine/build_dataset835_canonical_patches.py --config nnunet/configs.yaml
+    python nnunet/build_dataset835_canonical_patches.py --config nnunet/configs.yaml
 """
 
 from __future__ import annotations
@@ -43,19 +48,20 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 import nibabel as nib
 import numpy as np
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/engine/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nnunet.helpers.config import (  # noqa: E402
     add_cnisp_src_to_syspath,
     load_yaml,
 )
 from nnunet.helpers.patch_size import resolve_patch_size_mm  # noqa: E402
+from nnunet.lib.patches import dataset835_layout  # noqa: E402
 
 add_cnisp_src_to_syspath(__file__)
 
@@ -65,34 +71,7 @@ from data_prep.canonical_align import (  # noqa: E402
 )
 
 
-def _aligned_dir_layout(cnisp_paths: dict, aligned_dir: Path) -> Dict[str, Path]:
-    labels = cnisp_paths.get("labels_dataset835_dirname", "labels_dataset835")
-    meta = cnisp_paths.get("metadata_dataset835_dirname", "metadata_dataset835")
-    return {
-        "labels_dir": aligned_dir / labels,
-        "meta_dir":   aligned_dir / meta,
-    }
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default="nnunet/configs.yaml")
-    ap.add_argument("--force", action="store_true",
-                    help="Re-write patches even if both label + metadata "
-                         "already exist on disk.")
-    ap.add_argument(
-        "--patch-size",
-        type=float,
-        default=None,
-        help="Physical extent (mm) of the canonical-aligned cubic patch. "
-             "Defaults to the value recorded in the existing CNISP training "
-             "metadata under aligned_dir/metadata/ so this script can't drift "
-             "away from the value used by orbital_shape_prior_st1/scripts/"
-             "run_01_prepare.sh. Override only when you intentionally want a "
-             "different physical extent than the trained model expects.",
-    )
-    args = ap.parse_args()
-
+def run(args) -> int:
     cfg = load_yaml(Path(args.config))
     cnisp_paths = load_yaml(Path(cfg["cnisp_paths_yaml"]))
     work_dir = Path(cfg["work_dir"])
@@ -110,14 +89,14 @@ def main() -> int:
         infer_fn=infer_patch_size_mm,
     )
 
-    layout = _aligned_dir_layout(cnisp_paths, aligned_dir)
+    layout = dataset835_layout(cnisp_paths, aligned_dir)
     layout["labels_dir"].mkdir(parents=True, exist_ok=True)
     layout["meta_dir"].mkdir(parents=True, exist_ok=True)
 
     source_manifest = work_dir / "source_to_path.json"
     if not source_manifest.exists():
         print(f"[dataset835_canonical] {source_manifest} missing -- "
-              f"run nnunet/data_prep/prepare_inputs.py first.",
+              f"run nnunet/prepare_inputs.py first.",
               file=sys.stderr)
         return 2
     with open(source_manifest) as f:
@@ -211,5 +190,25 @@ def main() -> int:
     return 0 if n_failed == 0 else 3
 
 
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", default="nnunet/configs.yaml")
+    ap.add_argument("--force", action="store_true",
+                    help="Re-write patches even if both label + metadata "
+                         "already exist on disk.")
+    ap.add_argument(
+        "--patch-size",
+        type=float,
+        default=None,
+        help="Physical extent (mm) of the canonical-aligned cubic patch. "
+             "Defaults to the value recorded in the existing CNISP training "
+             "metadata under aligned_dir/metadata/ so this script can't drift "
+             "away from the value used by orbital_shape_prior_st1/scripts/"
+             "run_01_prepare.sh. Override only when you intentionally want a "
+             "different physical extent than the trained model expects.",
+    )
+    return ap
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(build_parser().parse_args()))

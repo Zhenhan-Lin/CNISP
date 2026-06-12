@@ -14,7 +14,7 @@
 #   4. paired native-space Dice         -> work_dir/comparison/paired_*__<tag>.csv|.txt
 #
 # Phase 1.5 (SMORE prep) is NOT invoked here; run
-#   python nnunet/engine/build_smore_test_images.py --config nnunet/configs.yaml
+#   python nnunet/build_smore_test_images.py --config nnunet/configs.yaml
 # separately, ideally in parallel with this driver.
 #
 # Usage:
@@ -31,14 +31,14 @@ RUN_TAG="${1:-atlas_gt}"
 cd "$REPO_ROOT"
 
 echo "[run_compare] CONFIG=$CONFIG  RUN_TAG=$RUN_TAG"
-echo "[run_compare] step 1/4: data_prep/prepare_inputs.py"
-python3 nnunet/data_prep/prepare_inputs.py --config "$CONFIG"
+echo "[run_compare] step 1/4: prepare_inputs.py"
+python3 nnunet/prepare_inputs.py --config "$CONFIG"
 
 echo "[run_compare] step 2/4: run_predict_native.sh"
 CONFIG="$CONFIG" bash nnunet/run_predict_native.sh
 
-echo "[run_compare] step 3/4: engine/build_cnisp_native_sweep.py (idempotent backfill)"
-python3 nnunet/engine/build_cnisp_native_sweep.py --config "$CONFIG" --run-tag "$RUN_TAG"
+echo "[run_compare] step 3/4: build_cnisp_native_sweep.py (idempotent backfill)"
+python3 nnunet/build_cnisp_native_sweep.py --config "$CONFIG" --run-tag "$RUN_TAG"
 
 echo "[run_compare] step 4/4: compare_native.py"
 python3 nnunet/compare_native.py --config "$CONFIG" --cnisp-run-tag "$RUN_TAG"

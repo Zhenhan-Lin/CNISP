@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # Phase 1c: nnUNetv2_predict on the SMORE-super-resolved CTs
-# staged by nnunet/data_prep/prepare_smore_inputs.py.
+# staged by nnunet/prepare_smore_inputs.py.
 #
 # Input  : ${WORK_DIR}/input/smore/<sid>_0000.nii.gz
 # Output : ${WORK_DIR}/prediction/smore/<sid>.nii.gz
@@ -73,7 +73,7 @@ OUT_DIR="${OUT_DIR:-${WORK_DIR}/prediction/smore}"
 
 if [[ ! -d "$IN_DIR" ]]; then
     echo "[ERROR] input dir not found: $IN_DIR" >&2
-    echo "        run nnunet/data_prep/prepare_smore_inputs.py first." >&2
+    echo "        run nnunet/prepare_smore_inputs.py first." >&2
     exit 2
 fi
 

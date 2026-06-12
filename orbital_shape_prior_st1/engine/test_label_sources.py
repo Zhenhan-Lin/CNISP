@@ -7,7 +7,7 @@ Centralises the path conventions shared by:
   target for each (case, step) under ``test_label_source=nnunet_pred``.
 * ``engine/visualize.py`` and ``scripts/04_visualization.py`` -- when
   resolving ``recon_dir`` for a given ``run_tag``.
-* ``nnunet/engine/build_cnisp_native_sweep.py`` and
+* ``nnunet/build_cnisp_native_sweep.py`` and
   ``nnunet/compare_native.py`` -- when finding per-step manifests for
   each CNISP run.
 
@@ -28,7 +28,7 @@ Two test_label_source modes
     - Latent-opt input   :
         ``aligned_dir/labels_dataset835_step_{XX}/<casename>.nii.gz``
         (Dataset835 sparse-CT pred per step, canonical-aligned by
-        ``nnunet/engine/build_dataset835_sparse_patches.py``).
+        ``nnunet/build_dataset835_sparse_patches.py``).
     - Native inversion   :
         atlas cases : ``aligned_dir/metadata/<casename>.json`` (existing)
         chk_*  cases : ``aligned_dir/metadata_dataset835/<casename>.json``

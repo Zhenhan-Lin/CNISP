@@ -247,6 +247,8 @@ def eval_case_at_resolution(
         num_iters=params.get("latent_num_iters", 1200),
         max_num_const_dsc=params.get("max_num_const_train_dsc", -1),
         device=device,
+        soft=bool(params.get("latent_fit_soft", False)),
+        label_smoothing=float(params.get("latent_fit_label_smoothing", 0.1)),
     )
 
     # ── Dense prediction with adaptive bounding box ─────────────
@@ -518,6 +520,8 @@ def eval_case_real_pair(
         num_iters=params.get("latent_num_iters", 1200),
         max_num_const_dsc=params.get("max_num_const_train_dsc", -1),
         device=device,
+        soft=bool(params.get("latent_fit_soft", False)),
+        label_smoothing=float(params.get("latent_fit_label_smoothing", 0.1)),
     )
 
     # 2. decode a dense reconstruction at GT spacing, in the INPUT frame.
@@ -991,7 +995,7 @@ def save_sweep_csvs(all_results: List[Dict],
     Write ``test_results.csv`` -- one row per (case, step), the raw
     observation. This is the only CSV the inference loop emits now;
     by-eff_res aggregates and all sweep figures are produced later by
-    ``nnunet/engine/build_method_summary.py`` against
+    ``nnunet/build_method_summary.py`` against
     ``paired_per_source.csv`` (so CNISP and nnUNet always share the
     same source set + bucket edges).
     """
