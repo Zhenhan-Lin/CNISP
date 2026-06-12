@@ -45,8 +45,14 @@ from typing import Dict, List
 import nibabel as nib
 import numpy as np
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Make ``nnunet.*`` importable when run as ``python nnunet/...``, and put
+# ``orbital_shape_prior_st1/`` ahead of the script dir (``nnunet/``) so the
+# bare ``data_prep``/``engine``/``models`` imports inside the CNISP modules
+# resolve to orbital_shape_prior_st1's packages instead of being shadowed by
+# ``nnunet/data_prep`` (which has no ``canonical_align``).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "orbital_shape_prior_st1"))
 
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from orbital_shape_prior_st1.engine.dataset import (  # noqa: E402
