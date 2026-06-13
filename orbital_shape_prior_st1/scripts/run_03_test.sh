@@ -29,7 +29,10 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 export PYTHONPATH="$PROJECT_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
-export CUDA_VISIBLE_DEVICES=1
+# Respect a GPU already chosen by a parent (e.g. run_pipeline.sh --gpu /
+# run_all_experiments.sh --parallel exports CUDA_VISIBLE_DEVICES per process).
+# Only fall back to GPU 1 when invoked standalone with nothing set.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
 # TRAIN_YAML="$PROJECT_ROOT/configs/train_default.yaml"

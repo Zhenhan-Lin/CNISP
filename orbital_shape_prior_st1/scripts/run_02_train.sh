@@ -33,8 +33,10 @@ PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
 # TRAIN_YAML="$PROJECT_ROOT/configs/train_default.yaml"
 TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
 
-# GPU selection (change as needed)
-export CUDA_VISIBLE_DEVICES=1
+# GPU selection. Respect a GPU already chosen by a parent (e.g.
+# run_pipeline.sh --gpu exports CUDA_VISIBLE_DEVICES); fall back to GPU 1
+# only when invoked standalone with nothing set.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
 # ── Run ───────────────────────────────────────────────────────
 echo "============================================================"
