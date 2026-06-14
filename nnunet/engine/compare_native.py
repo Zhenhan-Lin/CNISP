@@ -101,6 +101,7 @@ from nnunet.lib.metrics import (  # noqa: E402
     load_label_volume_with_affine,
     lookup_method_label,
     override_chk_gt_for_deployment,
+    resample_pred_onto_gt,
     resolve_test_sources,
 )
 
