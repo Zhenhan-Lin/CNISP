@@ -266,13 +266,29 @@ def generate(
         nn_m = json.load(f)
 
     interp_root = pred_root / "interpolation"
+    interp_root.mkdir(parents=True, exist_ok=True)
+    interp_manifest = interp_root / "interp_manifest.json"
     out_steps: Dict[str, Dict[str, str]] = {}
     n_done = 0
     n_skipped = 0
     issues: List[str] = []
 
+    def _flush_manifest() -> None:
+        # Written incrementally (after every step) so an interrupted run still
+        # leaves a valid manifest covering the masks already on disk; --mode
+        # summarize / compare_native can then consume the partial result, and a
+        # resumed --mode generate rebuilds it in full.
+        with open(interp_manifest, "w") as fh:
+            json.dump({
+                "experiment": experiment,
+                "smoothing_factor": smoothing_factor,
+                "method": NNUNET_INTERP_METHOD_LABEL,
+                "steps": out_steps,
+            }, fh, indent=2)
+
     print(f"[interpolate_native] experiment={experiment} "
           f"smoothing_factor={smoothing_factor} -> {interp_root}", flush=True)
+    _flush_manifest()  # seed an (empty) manifest up front
 
     for step_tag in sorted(nn_m.get("steps", {})):
         step, _start = _parse_step_tag(str(step_tag))
@@ -345,17 +361,9 @@ def generate(
 
         if step_map:
             out_steps[step_tag] = step_map
+            _flush_manifest()  # persist progress after each completed step
 
-    interp_root.mkdir(parents=True, exist_ok=True)
-    interp_manifest = interp_root / "interp_manifest.json"
-    with open(interp_manifest, "w") as f:
-        json.dump({
-            "experiment": experiment,
-            "smoothing_factor": smoothing_factor,
-            "method": NNUNET_INTERP_METHOD_LABEL,
-            "steps": out_steps,
-        }, f, indent=2)
-
+    _flush_manifest()
     if issues:
         print(f"\n[interpolate_native] {len(issues)} issue(s):", file=sys.stderr)
         for line in issues:

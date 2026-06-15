@@ -659,9 +659,20 @@ def infer_test_set(params):
     # strictly-batched behaviour.
     incremental_remap = bool(params.get("incremental_native_remap", True))
 
-    def _emit_case_native(casename: str, case_results: List[dict]) -> None:
-        if not export_preds:
-            return
+    # The incremental remap must fire once PER SOURCE (both eyes merged), not
+    # per eye: native masks are saved per source_id, so a per-eye emit makes
+    # the second eye's single-eye render overwrite the first (the OD/OS merge
+    # in map_results_to_native only sees the eyes passed in one call). We
+    # therefore buffer each source's eye results and only map once ALL of that
+    # source's expected eyes (from the swept casenames) have completed.
+    _expected_eyes: Dict[str, set] = defaultdict(set)
+    for _cn in casenames:
+        _expected_eyes[_cn[:-3]].add(_cn)
+    _pending_results: Dict[str, List[dict]] = defaultdict(list)
+    _seen_eyes: Dict[str, set] = defaultdict(set)
+
+    def _flush_source_native(source_id: str, case_results: List[dict]) -> None:
+        """Map+merge ONE source's accumulated (OD+OS) results to native space."""
         groups: Dict[Tuple[int, int], List[dict]] = defaultdict(list)
         for r in case_results:
             groups[(int(r["step_size"]),
@@ -678,8 +689,20 @@ def infer_test_set(params):
                 save_source_ids=save_id_set,
             )
             if paths:
-                print(f"    [native] {casename} step={step:02d}{_ostr}: "
+                print(f"    [native] {source_id} step={step:02d}{_ostr}: "
                       f"{len(paths)} mask(s) -> {step_native_dir.name}/")
+
+    def _emit_case_native(casename: str, case_results: List[dict]) -> None:
+        if not export_preds:
+            return
+        source_id = casename[:-3]
+        _pending_results[source_id].extend(case_results)
+        _seen_eyes[source_id].add(casename)
+        # Only map once every expected eye for this source has finished, so
+        # OD+OS land in the same native mask instead of overwriting.
+        if _seen_eyes[source_id] >= _expected_eyes.get(source_id, {casename}):
+            _flush_source_native(source_id, _pending_results.pop(source_id))
+            _seen_eyes.pop(source_id, None)
 
     # ── Run sweep ─────────────────────────────────────────────────
     all_results = run_sweep(
@@ -697,6 +720,21 @@ def infer_test_set(params):
         real_pair=(layout.test_label_source == "real_pair"),
         on_case_done=(_emit_case_native if incremental_remap else None),
     )
+
+    # Flush any source whose eye set never completed (e.g. an eye produced
+    # zero sweep rows, so on_case_done never fired for it). Emit with whatever
+    # eyes we have so their native masks still get written before the per-step
+    # manifests are (re)built below.
+    if incremental_remap and _pending_results:
+        for source_id, buffered in sorted(_pending_results.items()):
+            if not buffered:
+                continue
+            print(f"  [native] flushing incomplete source {source_id} "
+                  f"({len(_seen_eyes.get(source_id, set()))}/"
+                  f"{len(_expected_eyes.get(source_id, set()))} eye(s) seen)")
+            _flush_source_native(source_id, buffered)
+        _pending_results.clear()
+        _seen_eyes.clear()
 
     # ── Export predictions per step subdirectory ──────────────────
     if params.get("export_predictions", True):
