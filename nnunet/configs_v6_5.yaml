@@ -1,0 +1,175 @@
+# ── nnUNet vs CNISP comparison configuration ──────────────────────
+# Paths and inference knobs shared by every script under nnunet/.
+# Override any field on the CLI with --key=value or by passing a
+# different --config file.
+
+# ── nnUNet inference identity ─────────────────────────────────────
+# Matches the training run in run_nnUNet_iso05.sh
+dataset_id: 835
+dataset_name: PHOTON_CT_QAfiltered
+# plan: nnUNetPlans_iso05  # we use this plan but in result folder it has .json file without "iso_05"
+plan: nnUNetPlans
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+# Fold selection for inference (resolved inline by predict_sparse_iso.py
+# and the run_predict_*.sh `_resolve_folds` helpers):
+#   best -> single fold with highest validation Dice (val/summary.json)
+#   all  -> ensemble of every trained fold (nnUNet's recommended setup)
+#   [..] -> explicit list/int; untrained folds are rejected loudly
+# NOTE: run_nnUNet_iso05.sh trains folds 1-4 (fold 0 collapsed). `best`
+# auto-selection has been unreliable here (the stale fold_0 dir on disk +
+# missing/late validation summaries can make it fall onto the worst fold),
+# so we PIN the known-best fold explicitly. fold 2 is the highest-Dice
+# trained fold for Dataset835; change this list to re-pin or to ensemble.
+folds: [2]
+gpu_id: 0
+
+# ── CNISP-side artefacts to reuse (no re-inference) ───────────────
+cnisp_paths_yaml: /home-local/linz18/CNISP/orbital_shape_prior_st1/configs/paths.yaml
+cnisp_model_name: orbital_ad_v6_5
+cnisp_train_yaml: train_v6_5.yaml
+
+# ── Option C: which CNISP runs to compare against nnUNet ──────────
+# Each entry is a (run_tag, method_label) pair. CNISP infers per run_tag
+# under ${cnisp_output_basedir}/<model>/runs/<run_tag>/; compare_native.py
+# pulls per-step manifests from that subdir and labels Dice rows with
+# method_label. nnUNet sparse-CT predictions are shared across runs.
+#
+# Default: pair the legacy ceiling curve (atlas_gt) with the deployment
+# curve (nnunet_pred). Drop either entry if you only want one comparison.
+cnisp_runs_to_compare:
+  - run_tag: atlas_gt
+    method_label: CNISP-atlasGT
+  - run_tag: nnunet_pred
+    method_label: CNISP-nnUNetPred
+
+# When CNISP runs in test_label_source=nnunet_pred mode, the chk_* dense
+# Dice target switches from the legacy chk_pred (input_label_scheme on
+# disk) to Dataset835's dense pred on the same chk_* CT. compare_native.py
+# reads the swap target from ${work_dir}/prediction/native/<sid>.nii.gz
+# for chk_* rows belonging to a "deployment" run (run_tag != atlas_gt).
+# Atlas rows always Dice against the atlas manual GT regardless of run_tag.
+# Path is relative to ${work_dir} (slashes allowed for subdirs).
+deployment_gt_dirname_for_chk: prediction/native
+
+# ── Source CT discovery ───────────────────────────────────────────
+# atlas: sibling 'atlas_images' folder next to atlas_label_dir from
+# CNISP's paths.yaml. Override here if the real layout differs.
+atlas_image_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_images
+# chk_*: subjects are looked up in the PHOTON_CP_QA pivot table.
+pivot_csv: /fs5/p_masi/linz18/QA_record/table_collection/PHOTON_CP_QA_pivot_table.csv
+# Columns probed in order; first existing column whose value is a
+# readable file path wins.
+pivot_image_path_columns: [ct_image_path, image_path, image, ct, t1]
+# Subject column: real CSV column name. resolve_gt.py also auto-tries a
+# few common variants (subject, subject_label, subj, subj_id, subject_id)
+# if this exact name is absent.
+pivot_subject_column: subject_label
+
+# ── Working directories ───────────────────────────────────────────
+# Phase 1 staging + outputs (nnUNet input symlinks, predictions, CSVs).
+work_dir: /home-local/linz18/CNISP/nnunet
+
+# Phase 1.5 SMORE shared output (NOT under work_dir on purpose - it is
+# expensive to recompute and is shared across projects).
+smore_out_root: /fs5/p_masi/linz18/data/smore_resolved_images
+# Filename suffix used by engine/build_smore_test_images.py (flat layout):
+# ``${smore_out_root}/<source_id>${smore_suffix}.nii.gz``.
+smore_suffix: _smore
+
+# ── Sparse-CT sweep ───────────────────────────────────────────────
+# sparsify_inputs.py uses four knobs to gate every write.
+#
+# 1. cnisp_slice_step_axis (RAS world axis: 0=R-L, 1=A-P, 2=S-I):
+#    LEGACY fallback canonical direction. New CNISP runs (both
+#    ``slice_step_axis: auto`` and ``slice_step_axis: <int>``) write a
+#    per-(case, step) ``step_axis`` field into sweep_results.pkl, and
+#    sparsify_inputs.py reads it directly per source. This knob is
+#    consulted only when the sweep predates that field (pre-axial-fix
+#    runs). For ``slice_step_axis: auto`` cohorts the right per-case
+#    axes vary, so a single integer here would be wrong for some
+#    sources -- always re-run cnisp-infer + nnunet-predict-sweep
+#    after touching slice_step_axis instead of relying on this
+#    fallback. Default 2 matches CNISP's legacy axial convention.
+# 2. sparse_axis_alignment_min (relative; 0..1):
+#    Minimum |affine[canonical_axis, :]| / col_norm projection required
+#    for the chosen voxel axis. Below this, the raw CT's grid is too
+#    oblique to RAS for any single-axis sparsification to be physically
+#    meaningful, and the source is dropped. Default 0.95.
+# 3. sparse_eff_res_tolerance (relative):
+#    Soft threshold. zooms[step_axis] * step within this fraction of
+#    CNISP's effective_resolution_mm is silently OK.
+# 4. sparse_eff_res_max_drift (relative):
+#    Hard upper bound. Drift in (tolerance, max_drift] is recorded as a
+#    warning but the (source, step) is still written -- this handles
+#    cases where CNISP's canonical patch was derived from a resampled
+#    label (e.g. chk_* QA-kept old-nnUNet preds on a ~1.25 mm iso grid)
+#    while the raw CT is at a different iso. Above max_drift, the
+#    (source, step) is dropped.
+cnisp_slice_step_axis: 2
+sparse_axis_alignment_min: 0.95
+sparse_eff_res_tolerance: 0.05
+sparse_eff_res_max_drift: 0.30
+
+# ── High-eff_res start-offset fan-out (must match test_default.yaml) ──
+start_offset_eff_res_min_mm: 3.5
+start_offsets: [0, 1, 2]
+
+# ── Degradation type for the nnUNet sparse sweep ──────────────────
+# Controls how sparsify_inputs.py degrades each CT before nnUNet predicts.
+#   sweep_degrade_mode:
+#     thin  (DEFAULT) idealised point-sampling: keep every Nth slice
+#           unchanged (legacy behaviour, exact reproduction).
+#     thick physical partial-volume degradation: convolve a centered
+#           slice-sensitivity profile along the through-plane axis before
+#           subsampling (see simulation/). Use for the realistic
+#           thick-slice acquisition experiment.
+#   sweep_modality (only matters for thick):
+#     ct  (DEFAULT) box SSP (rectangular slice profile).
+#     mri Gaussian SSP (FWHM ~ slice separation).
+# These map to sparsify_inputs.py --mode / --modality. For a matched
+# experiment, also set the CNISP-side toggle test yaml::sweep_mode: thick.
+sweep_degrade_mode: thin
+sweep_modality: ct
+
+# ── Real paired-data line (Turella sim3) manifest ─────────────────
+# Used only by the opt-in run_pipeline.sh phases cnisp-prep-realpair /
+# cnisp-infer-realpair. JSON mapping each source_id to its two REAL
+# acquisitions:
+#   { "<source_id>": { "lowres_pred": "/abs/lowres_nnunet_pred.nii.gz",
+#                      "hires_gt":    "/abs/hires_gt.nii.gz" } }
+# Default location if unset: ${work_dir}/realpair_manifest.json.
+# realpair_manifest: /home-local/linz18/CNISP/nnunet/realpair_manifest.json
+
+# ── Aggregation ───────────────────────────────────────────────────
+# Inherit from test_default.yaml so the report buckets line up with
+# CNISP's existing test_results.csv (eff_res_bucket column).
+summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+
+# ── Viz source filter ─────────────────────────────────────────────
+# build_paired_summary.py and build_method_summary.py drop rows whose
+# source_id starts with any prefix in viz_exclude_source_prefixes
+# (after applying viz_include_source_prefixes, if it's non-empty).
+# These don't affect compare_native.py: the per-source CSVs still
+# contain every source, so the underlying data is preserved -- only
+# the plotted means/curves are filtered.
+#
+# Default excludes 'chk_' because chk_* deployment-mode runs (run_tag=
+# nnunet_pred) have chk_* GT swapped to the Dataset835 dense pred. At
+# step=1, nnUNet-sparse is just that same dense pred (no sparsification
+# happens), so the row trivially scores Dice=1.0 -- a structural
+# identity, not a measurement. Dropping the whole chk_ family is the
+# simplest way to keep the paired plots focused on human-labelled
+# atlas_* cases. Pass --exclude-source-prefixes "" on the CLI to
+# disable this and see every source.
+viz_include_source_prefixes: []
+viz_exclude_source_prefixes: ["chk_"]
+
+# ── nnUNet label-scheme assertion ─────────────────────────────────
+# Expected dataset.json["labels"] for Dataset835. Asserted at compare time.
+expected_nnunet_labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4
