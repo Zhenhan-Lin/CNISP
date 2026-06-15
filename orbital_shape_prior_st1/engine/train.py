@@ -97,7 +97,10 @@ def train_one_epoch(
 
     avg_loss = loss_running / max(n_losses, 1)
     avg_dice = dice_running / max(n_examples, 1)
-    lat_norm2 = lat_reg.item()
+    # lat_reg is only bound when the loop ran at least once; guard against an
+    # empty loader (which train_model already rejects up front, but keep this
+    # defensive so the metric never raises UnboundLocalError).
+    lat_norm2 = lat_reg.item() if n_losses else 0.0
     ep = epoch + 1
 
     if log_this_epoch:
@@ -189,6 +192,32 @@ def train_model(params: dict):
     # Data
     dl_train = create_data_loader(params, PhaseType.TRAIN)
     dl_val = create_data_loader(params, PhaseType.VAL)
+
+    # Fail fast on an empty training set. The usual cause is a degradation
+    # bank that produced zero items -- e.g. obs_sources=[nnunet] (v6-5) while
+    # the nnUNet train-obs patches (labels_dataset835_{thin,thick}_train_step_XX/)
+    # are missing under aligned_dir, so every (case, step) was skipped. Without
+    # this guard the empty loader surfaces much later as a cryptic
+    # UnboundLocalError in train_one_epoch.
+    n_train_items = len(dl_train.dataset)
+    if n_train_items == 0:
+        obs_sources = (params.get("degradation_bank", {}) or {}).get(
+            "obs_sources", ["gt"]
+        )
+        raise RuntimeError(
+            "Training dataset is EMPTY (0 items in the degradation bank).\n"
+            f"  obs_sources = {obs_sources}\n"
+            "  If obs_sources is [nnunet] (v6-5), the nnUNet train-obs patches\n"
+            "  must already exist under aligned_dir as\n"
+            "    labels_dataset835_thin_train_step_XX/  and\n"
+            "    labels_dataset835_thick_train_step_XX/\n"
+            "  Generate them with the data-gen phase, e.g.:\n"
+            "    bash run_pipeline.sh --config nnunet/configs.yaml "
+            "nnunet-predict-sweep-train\n"
+            "  (or copy that folder over from a server where it already exists).\n"
+            "  See the '[bank] nnUNet-obs items added: 0 ...' line above for the\n"
+            "  per-(case, step) skip reasons."
+        )
     image_size = dl_train.dataset.image_size
 
     # Model
