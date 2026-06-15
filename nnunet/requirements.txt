@@ -1,0 +1,11 @@
+# Runtime deps for the nnUNet vs CNISP comparison + post-processing tooling
+# under nnunet/ (mask generation, Dice, summaries). CPU-only; these do NOT
+# cover nnUNet *inference* itself (predict_sparse_iso.py additionally needs
+# nnunetv2 + torch, installed separately on the GPU box).
+
+numpy
+nibabel
+scipy            # distance_transform_edt for the Taubin SDF argmax merge
+vtk              # windowed-sinc (Taubin) surface smoothing in interpolate_native
+matplotlib       # summary/comparison plots (lib/viz.py)
+PyYAML           # config loading (helpers/config.py)
