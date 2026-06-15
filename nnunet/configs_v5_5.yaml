@@ -25,7 +25,8 @@ folds: [2]
 gpu_id: 0
 
 # ── CNISP-side artefacts to reuse (no re-inference) ───────────────
-cnisp_paths_yaml: /home-local/linz18/CNISP/orbital_shape_prior_st1/configs/paths.yaml
+# cnisp_paths_yaml: /home-local/linz18/CNISP/orbital_shape_prior_st1/configs/paths.yaml
+cnisp_paths_yaml: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st1/configs/paths.yaml
 cnisp_model_name: orbital_ad_v5_5
 cnisp_train_yaml: train_v5_5.yaml
 
@@ -68,7 +69,8 @@ pivot_subject_column: subject_label
 
 # ── Working directories ───────────────────────────────────────────
 # Phase 1 staging + outputs (nnUNet input symlinks, predictions, CSVs).
-work_dir: /home-local/linz18/CNISP/nnunet
+# work_dir: /home-local/linz18/CNISP/nnunet
+work_dir: /fs5/p_masi/linz18/local_projects/CNISP/nnunet
 
 # Phase 1.5 SMORE shared output (NOT under work_dir on purpose - it is
 # expensive to recompute and is shared across projects).

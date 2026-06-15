@@ -9,16 +9,20 @@ checklist_csv: /fs5/p_masi/linz18/EyeSegmentation/nnUNet_results/Dataset805_PHOT
 atlas_label_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_labels
 
 # Output directory for canonical-aligned patches
-aligned_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/aligned_patches
+# aligned_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/aligned_patches
+aligned_dir: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st1/aligned_patches
 
 # Model storage
-model_basedir: /home-local/linz18/CNISP/orbital_shape_prior_st1/models
+# model_basedir: /home-local/linz18/CNISP/orbital_shape_prior_st1/models
+model_basedir: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st1/models
 
 # Reconstruction output
-output_basedir: /home-local/linz18/CNISP/orbital_shape_prior_st1/reconstructions
+# output_basedir: /home-local/linz18/CNISP/orbital_shape_prior_st1/reconstructions
+output_basedir: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st1/reconstructions
 
 # Casename files (train_cases.txt, test_cases.txt)
-casefiles_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/casename_files
+# casefiles_dir: /home-local/linz18/CNISP/orbital_shape_prior_st1/casename_files
+casefiles_dir: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st1/casename_files
 
 # Subdirectory name for labels inside aligned_dir
 labels_dirname: labels
