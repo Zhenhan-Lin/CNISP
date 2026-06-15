@@ -786,6 +786,7 @@ def run_sweep(
                  Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]
     ] = None,
     real_pair: bool = False,
+    on_case_done: Optional[Callable[[str, List[Dict]], None]] = None,
 ) -> List[Dict]:
     """
     Per-case adaptive resolution sweep.
@@ -814,6 +815,13 @@ def run_sweep(
         through this hook. Returning ``None`` for a (case, step) causes
         the sweep to skip that row entirely -- the deployment curve uses
         this when nnUNet failed to localise a globe at high sparsity.
+
+    on_case_done
+        Optional ``(casename, case_results) -> None`` callback fired the
+        moment a case finishes ALL its (step, start) rows, with just that
+        case's result dicts. Lets the caller stream per-case artifacts
+        (e.g. native-grid remapping) instead of waiting for the whole
+        sweep. ``None`` (default) preserves the strictly-batched behaviour.
     """
     cfg = sweep_cfg or {}
     target_inc = float(cfg.get("target_eff_res_increment_mm", 1.0))
@@ -843,6 +851,7 @@ def run_sweep(
     for ci, casename in enumerate(casenames):
         case_axis = step_axes[ci]
         spacing_axis = float(spacings_dense[ci][case_axis])
+        case_start = len(all_results)
 
         # ── real_pair: single observation per case, no resolution sweep ──
         if real_pair:
@@ -869,6 +878,8 @@ def run_sweep(
             )
             result["casename"] = casename
             all_results.append(result)
+            if on_case_done is not None:
+                on_case_done(casename, all_results[case_start:])
             continue
 
         steps = adaptive_steps_for_case(
@@ -954,6 +965,11 @@ def run_sweep(
                       f"bbox={bbox_pct:.0f}%, {result['time_s']:.1f}s)")
 
                 all_results.append(result)
+
+        if on_case_done is not None:
+            case_results = all_results[case_start:]
+            if case_results:
+                on_case_done(casename, case_results)
     return all_results
 
 

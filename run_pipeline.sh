@@ -61,6 +61,20 @@
 #                         (nnunet/sparsify_inputs.py
 #                          + nnunet/predict_sparse_iso.py)
 #
+#   nnunet-interp         nnUNet-only Taubin (windowed-sinc) post-processing
+#                         control. Per (source, step): smooth the degraded-grid
+#                         nnUNet pred (sparse_step_XX/) on its own grid via a
+#                         surface-mesh round-trip, then resample (order=0) onto
+#                         the native grid. Writes
+#                           prediction/<exp>/interpolation/sparse_step_XX/
+#                           prediction/<exp>/interpolation/interp_manifest.json
+#                           prediction/<exp>/interpolation/summary/ (standalone
+#                             Dice CSVs + PNGs)
+#                         compare auto-detects the manifest and adds an
+#                         `nnUNet-interp` column. Requires: nnunet-predict-sweep.
+#                         CPU-only; needs `vtk` + `scipy` in the env.
+#                         (nnunet/interpolate_native.py)
+#
 #   nnunet-predict-smore  nnUNet on the SMORE-super-resolved CTs (produced
 #                         out-of-band by
 #                         nnunet/build_smore_test_images.py; this
@@ -352,6 +366,7 @@ PHASES_DEFAULT=(
     nnunet-predict
     cnisp-infer
     nnunet-predict-sweep
+    nnunet-interp
     nnunet-predict-smore
     cnisp-prep-dataset835-gt
     cnisp-prep-dataset835-sparse
@@ -406,6 +421,7 @@ VALID_PHASES=(
     cnisp-infer
     nnunet-predict-sweep
     nnunet-predict-sweep-train
+    nnunet-interp
     nnunet-predict-smore
     cnisp-prep-dataset835-gt
     cnisp-prep-dataset835-sparse
@@ -1165,6 +1181,30 @@ phase_compare() {
             --comparison-dir "$WORK_DIR/comparison"
 }
 
+phase_nnunet_interp() {
+    echo ""
+    echo "[phase] nnunet-interp ---------------------------------------"
+    # nnUNet-only Taubin post-processing control. Smooths the degraded-grid
+    # nnUNet prediction on its own grid, resamples (order=0) onto the native
+    # grid, and writes prediction/<exp>/interpolation/sparse_step_XX/ plus a
+    # standalone Dice summary. compare_native then auto-detects the interp
+    # manifest and adds an `nnUNet-interp` column. Depends on
+    # `nnunet-predict-sweep` (needs sparse_step_XX/ + sparse_step_XX_native/).
+    # CPU-only; requires the `vtk` + `scipy` packages in the runtime env.
+    local marker="${WORK_DIR}/prediction/${EXP}/interpolation/interp_manifest.json"
+    if [[ $FORCE -eq 0 && -f "$marker" ]]; then
+        echo "  interp manifest present: $marker"
+        echo "  -> regenerating summary only (pass --force to rebuild masks)."
+        python3 "$REPO_ROOT/nnunet/interpolate_native.py" \
+                --config "$CONFIG" --experiment "$EXP" --mode summarize
+        return 0
+    fi
+    local force_args=()
+    [[ $FORCE -eq 1 ]] && force_args+=("--force")
+    python3 "$REPO_ROOT/nnunet/interpolate_native.py" \
+            --config "$CONFIG" --experiment "$EXP" --mode all "${force_args[@]}"
+}
+
 phase_nnunet_native_summary() {
     echo ""
     echo "[phase] nnunet-native-summary -------------------------------"
@@ -1191,6 +1231,7 @@ for phase in "${PHASES[@]}"; do
         cnisp-infer)                   phase_cnisp_infer ;;
         nnunet-predict-sweep)          phase_nnunet_predict_sweep ;;
         nnunet-predict-sweep-train)    phase_nnunet_predict_sweep_train ;;
+        nnunet-interp)                 phase_nnunet_interp ;;
         nnunet-predict-smore)          phase_nnunet_predict_smore ;;
         cnisp-prep-dataset835-gt)      phase_cnisp_prep_dataset835_gt ;;
         cnisp-prep-dataset835-sparse)  phase_cnisp_prep_dataset835_sparse ;;

@@ -89,6 +89,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.buckets import (  # noqa: E402
+    NNUNET_INTERP_METHOD_LABEL,
     NNUNET_METHOD_LABEL,
     STRUCT_ORDER,
     assign_bucket,
@@ -310,6 +311,35 @@ def run(args) -> int:
     print(f"[compare_native] nnUNet (step,start) combos available: "
           f"{sorted(nnunet_step_paths)}")
 
+    # ── nnUNet Taubin post-processing control (optional) ──────────
+    # The `nnunet-interp` phase writes Taubin-smoothed nnUNet preds onto the
+    # native grid under prediction/<exp>/interpolation/sparse_step_XX/ and an
+    # interp_manifest.json. When present, we add an `nnUNet-interp` column to
+    # the paired table; when absent, the comparison runs exactly as before.
+    interp_manifest_path = (
+        nn_pred_root / "interpolation" / "interp_manifest.json"
+    )
+    interp_step_paths: Dict[Tuple[int, int], Dict[str, Path]] = {}
+    if interp_manifest_path.exists():
+        with open(interp_manifest_path) as f:
+            interp_m = json.load(f)
+        for step_tag, sid_map in interp_m.get("steps", {}).items():
+            step, start = _parse_step_tag(str(step_tag))
+            if step is None:
+                continue
+            sd = f"sparse_step_{step:02d}" + (f"_o{start}" if start else "")
+            interp_dir = nn_pred_root / "interpolation" / sd
+            interp_step_paths[(step, start)] = {
+                sid: interp_dir / Path(raw).name
+                for sid, raw in sid_map.items()
+            }
+        print(f"[compare_native] nnUNet-interp (step,start) combos available: "
+              f"{sorted(interp_step_paths)}")
+    else:
+        print(f"[compare_native] no interp manifest at {interp_manifest_path}; "
+              f"skipping the {NNUNET_INTERP_METHOD_LABEL} column (run the "
+              f"`nnunet-interp` phase to add it).")
+
     # ── eff_res lookup ────────────────────────────────────────────
     eff_res_idx = build_eff_res_index(output_base / "sweep_results.pkl")
 
@@ -319,6 +349,8 @@ def run(args) -> int:
     n_skipped_gt = 0
     n_skipped_nnunet = 0
     n_nnunet_resampled = 0
+    n_skipped_interp = 0
+    n_interp_resampled = 0
 
     for src in sources:
         sid = src.source_id
@@ -418,6 +450,76 @@ def run(args) -> int:
                     "dice": f"{dices[name]:.6f}",
                 })
 
+        # ── nnUNet-interp (Taubin control) per step ───────────────
+        # Same native grid as the nnUNet preds above (the smoothed degraded
+        # pred was resampled onto sparse_step_XX_native's grid), so the same
+        # atlas/chk_ grid handling applies. nnUNet-only control; absent when
+        # the `nnunet-interp` phase has not been run.
+        for (step, start) in sorted(interp_step_paths):
+            otag = f" o{start}" if start else ""
+            path_map = interp_step_paths[(step, start)]
+            if sid not in path_map:
+                continue
+            interp_pred_path = path_map[sid]
+            if not interp_pred_path.exists():
+                n_skipped_interp += 1
+                print(f"  [skip interp step{step:02d}{otag}] {sid}: no pred at "
+                      f"{interp_pred_path}", file=sys.stderr)
+                continue
+            try:
+                in_pred, in_aff = load_label_volume_with_affine(interp_pred_path)
+            except Exception as e:  # noqa: BLE001
+                n_skipped_interp += 1
+                print(f"  [skip interp step{step:02d}{otag}] {sid}: load failed "
+                      f"({e})", file=sys.stderr)
+                continue
+            grid_mismatch = (
+                in_pred.shape != gt.shape
+                or not affines_consistent(in_aff, gt_affine)
+            )
+            if grid_mismatch:
+                is_chk = src.gt_source.startswith("chk_")
+                msg = (f"{sid} interp step{step:02d}{otag}: pred grid "
+                       f"{in_pred.shape}/{nib.aff2axcodes(in_aff)} != GT grid "
+                       f"{gt.shape}/{nib.aff2axcodes(gt_affine)}")
+                if args.strict_shape:
+                    print(f"  [error] {msg}", file=sys.stderr)
+                    return 3
+                if not is_chk:
+                    print(f"  [skip interp step{step:02d}{otag}] {msg} (atlas "
+                          f"pred should already be on the GT grid -- NOT "
+                          f"comparing).", file=sys.stderr)
+                    n_skipped_interp += 1
+                    continue
+                in_pred = resample_pred_onto_gt(
+                    in_pred, in_aff, gt.shape, gt_affine)
+                in_aff = gt_affine
+                n_interp_resampled += 1
+                if n_interp_resampled <= 3:
+                    print(f"  [info interp step{step:02d}{otag}] {sid}: pred "
+                          f"resampled onto chk_* GT grid {gt.shape} "
+                          f"(world-aware, order=0).", file=sys.stderr)
+            # Taubin masks keep the bare nnUNet scheme {ON:1, Recti:2, Globe:3,
+            # Fat:4}, same as the nnUNet preds.
+            interp_pred_struct_map = build_struct_to_value("nnunet", 0)
+            dices = dice_for_source(
+                in_pred, gt,
+                pred_scheme_map=interp_pred_struct_map,
+                gt_scheme_map=src.gt_struct_to_value,
+            )
+            eff_res = eff_res_idx.get((sid, step))
+            for name in STRUCT_ORDER + ["mean"]:
+                per_source_rows.append({
+                    "source_id": sid,
+                    "gt_source": src.gt_source,
+                    "method": NNUNET_INTERP_METHOD_LABEL,
+                    "step_size": str(step),
+                    "slice_start_id": str(start),
+                    "eff_res_mm": (f"{eff_res:.4f}" if eff_res is not None else ""),
+                    "structure": name,
+                    "dice": f"{dices[name]:.6f}",
+                })
+
         # ── CNISP per (step, start) ───────────────────────────────
         # CNISP Dice comes from the canonical-space sweep pkl (read once
         # above into ``cnisp_dice``), averaged over the two eyes. No
@@ -448,10 +550,15 @@ def run(args) -> int:
         n_done += 1
 
     print(f"\n[compare_native] processed {n_done} source(s); "
-          f"skipped: gt={n_skipped_gt} nnUNet={n_skipped_nnunet}")
+          f"skipped: gt={n_skipped_gt} nnUNet={n_skipped_nnunet}"
+          + (f" interp={n_skipped_interp}" if interp_step_paths else ""))
     if n_nnunet_resampled:
         print(f"[compare_native] nnUNet pred resampled onto chk_* GT grid for "
               f"{n_nnunet_resampled} (source, step) row(s) (world-aware, "
+              f"order=0; GT never resampled).")
+    if n_interp_resampled:
+        print(f"[compare_native] interp pred resampled onto chk_* GT grid for "
+              f"{n_interp_resampled} (source, step) row(s) (world-aware, "
               f"order=0; GT never resampled).")
 
     # ── Write per-source CSV ──────────────────────────────────────
@@ -516,7 +623,13 @@ def run(args) -> int:
             bucket_order.append(label)
 
     bucket_order.sort(key=bucket_sort_key)
-    methods_in_order = [NNUNET_METHOD_LABEL, cnisp_method_label]
+    # Insert the Taubin control between nnUNet and CNISP, only when it was
+    # actually scored (interp masks present), so absent runs keep the
+    # original two-column layout.
+    methods_in_order = [NNUNET_METHOD_LABEL]
+    if interp_step_paths:
+        methods_in_order.append(NNUNET_INTERP_METHOD_LABEL)
+    methods_in_order.append(cnisp_method_label)
     all_cols: List[str] = []
     for label in bucket_order:
         for m in methods_in_order:

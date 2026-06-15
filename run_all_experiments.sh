@@ -87,6 +87,7 @@ SHARED_PHASES=(cnisp-train nnunet-predict cnisp-prep-dataset835-gt)
 PEREXP_PHASES=(
     cnisp-infer
     nnunet-predict-sweep
+    nnunet-interp
     cnisp-prep-dataset835-sparse
     cnisp-infer-nnunet-pred
     cnisp-native-remap

@@ -417,30 +417,45 @@ def compute_nnunet_native_rows(
     experiment: str,
     sources: List,
     eff_res_idx: Dict[Tuple[str, int], float],
+    *,
+    manifest_name: str = "sweep_manifest.json",
+    pred_subdir_fmt: str = "sparse_step_{:02d}_native",
 ) -> Tuple[List[Dict], Dict[str, int]]:
     """Dice every nnUNet native-grid pred against its GT, one row per (src, step).
 
     Returns ``(wide_rows, stats)`` where each wide row has ``source_id``,
     ``gt_source``, ``step_size``, ``eff_res_mm`` and one float per
     :data:`COLS`. ``stats`` carries skip/resample counters for logging.
+
+    Parameters
+    ----------
+    manifest_name : path (relative to ``prediction/<experiment>/``) of the
+        per-(step, source) manifest. Defaults to the nnUNet sweep manifest;
+        the Taubin post-processing control passes
+        ``"interpolation/interp_manifest.json"`` to reuse this exact Dice
+        path on its own masks.
+    pred_subdir_fmt : ``str.format``-able subdir (under
+        ``prediction/<experiment>/``) holding the native-grid masks, taking
+        the integer step. Defaults to ``"sparse_step_{:02d}_native"``; the
+        control passes ``"interpolation/sparse_step_{:02d}"``.
     """
-    sweep_manifest = work_dir / "prediction" / experiment / "sweep_manifest.json"
+    nn_pred_root = work_dir / "prediction" / experiment
+    sweep_manifest = nn_pred_root / manifest_name
     if not sweep_manifest.exists():
         raise SystemExit(
-            f"nnUNet sweep manifest not found: {sweep_manifest}\n"
-            f"  Run the `nnunet-predict-sweep` phase (experiment={experiment}) first."
+            f"manifest not found: {sweep_manifest}\n"
+            f"  Run the producing phase (experiment={experiment}) first."
         )
     with open(sweep_manifest) as f:
         nn_m = json.load(f)
 
-    nn_pred_root = work_dir / "prediction" / experiment
     step_paths: Dict[int, Dict[str, Path]] = {}
     for step_tag, sid_map in nn_m.get("steps", {}).items():
         try:
             step = int(step_tag)
         except ValueError:
             continue
-        native_dir = nn_pred_root / f"sparse_step_{step:02d}_native"
+        native_dir = nn_pred_root / pred_subdir_fmt.format(step)
         step_paths[step] = {
             sid: native_dir / Path(raw).name for sid, raw in sid_map.items()
         }

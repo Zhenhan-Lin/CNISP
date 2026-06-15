@@ -181,6 +181,14 @@ save_mask_source_ids:
   - chk_24344
   - chk_14455
 
+# ── Per-case incremental native remap ─────────────────────────────
+# true (default): write each case's native-grid masks
+# (native_space_step_XX[_oN]/) the moment that case finishes its sweep,
+# instead of only after every case is done. The end-of-run step still
+# (re)builds the per-step manifest.json + native_sweep_manifest.json.
+# Set false to restore the strictly-batched end-of-run mapping.
+incremental_native_remap: true
+
 # Resume-from-latent
 # ------------------
 # The CNISP "model" at test time is (frozen prior MLP, per-(case, step)

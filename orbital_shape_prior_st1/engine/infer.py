@@ -624,6 +624,63 @@ def infer_test_set(params):
         output_dir / "average_shape_z0.nii.gz", device,
     )
 
+    # ── Mask-saving whitelist ─────────────────────────────────────
+    # save_mask_source_ids restricts which sources get full .nii.gz masks
+    # written (per-step pred/obs_vs_recon/iso AND native-space). Empty/None
+    # -> save all (back-compat). Latents, *_sub_crop.json, metadata.json,
+    # sweep_results.pkl and test_results.csv are written for ALL sources so
+    # the eff_res aggregate (which reads canonical Dice from the pkl/csv) and
+    # cache bookkeeping stay complete regardless of which masks are on disk.
+    # Computed BEFORE the sweep so the per-case incremental native remap
+    # (below) can reuse the same whitelist + metadata resolver.
+    _save_ids_cfg = params.get("save_mask_source_ids") or None
+    save_id_set = set(_save_ids_cfg) if _save_ids_cfg else None
+
+    def _keep_mask(casename: str) -> bool:
+        if save_id_set is None:
+            return True
+        # casename ends with _OD / _OS (3 chars) -> source_id.
+        return casename[:-3] in save_id_set
+
+    if save_id_set is not None:
+        print(f"  [mask-whitelist] saving native/per-step masks for "
+              f"{len(save_id_set)} source(s) only; latents/json/pkl/csv "
+              f"kept for all.")
+
+    meta_path_for = _meta_path_for_case(layout)
+    export_preds = params.get("export_predictions", True)
+
+    # ── Optional per-case incremental native remap ────────────────
+    # When incremental_native_remap is on (default), each case's native-grid
+    # masks (native_space_step_XX[_oN]/) are written the moment that case
+    # finishes its sweep -- via the run_sweep on_case_done hook -- instead of
+    # only after EVERY case completes. The end-of-run loop then just (re)builds
+    # the per-step manifests without re-mapping. Set it false to restore the
+    # strictly-batched behaviour.
+    incremental_remap = bool(params.get("incremental_native_remap", True))
+
+    def _emit_case_native(casename: str, case_results: List[dict]) -> None:
+        if not export_preds:
+            return
+        groups: Dict[Tuple[int, int], List[dict]] = defaultdict(list)
+        for r in case_results:
+            groups[(int(r["step_size"]),
+                    int(r.get("slice_start_id", 0)))].append(r)
+        for (step, start) in sorted(groups):
+            _ostr = "" if start == 0 else f"_o{start}"
+            step_native_dir = (
+                output_dir / f"native_space_{step_dir_name(step, start)}"
+            )
+            paths = map_results_to_native(
+                groups[(step, start)], layout.metadata_dir, step_native_dir,
+                suffix=f"_cnisp_step{step:02d}{_ostr}",
+                meta_path_for_casename=meta_path_for,
+                save_source_ids=save_id_set,
+            )
+            if paths:
+                print(f"    [native] {casename} step={step:02d}{_ostr}: "
+                      f"{len(paths)} mask(s) -> {step_native_dir.name}/")
+
     # ── Run sweep ─────────────────────────────────────────────────
     all_results = run_sweep(
         net=net,
@@ -638,28 +695,8 @@ def infer_test_set(params):
         output_dir=output_dir,
         label_obs_override_loader=label_obs_loader,
         real_pair=(layout.test_label_source == "real_pair"),
+        on_case_done=(_emit_case_native if incremental_remap else None),
     )
-
-    # ── Mask-saving whitelist ─────────────────────────────────────
-    # save_mask_source_ids restricts which sources get full .nii.gz masks
-    # written (per-step pred/obs_vs_recon/iso AND native-space). Empty/None
-    # -> save all (back-compat). Latents, *_sub_crop.json, metadata.json,
-    # sweep_results.pkl and test_results.csv are written for ALL sources so
-    # the eff_res aggregate (which reads canonical Dice from the pkl/csv) and
-    # cache bookkeeping stay complete regardless of which masks are on disk.
-    _save_ids_cfg = params.get("save_mask_source_ids") or None
-    save_id_set = set(_save_ids_cfg) if _save_ids_cfg else None
-
-    def _keep_mask(casename: str) -> bool:
-        if save_id_set is None:
-            return True
-        # casename ends with _OD / _OS (3 chars) -> source_id.
-        return casename[:-3] in save_id_set
-
-    if save_id_set is not None:
-        print(f"  [mask-whitelist] saving native/per-step masks for "
-              f"{len(save_id_set)} source(s) only; latents/json/pkl/csv "
-              f"kept for all.")
 
     # ── Export predictions per step subdirectory ──────────────────
     if params.get("export_predictions", True):
@@ -823,8 +860,8 @@ def infer_test_set(params):
                     bucket_edges=bucket_edges)
 
     # ── Map primary-eff_res predictions to native space ───────────
+    # (meta_path_for was resolved before the sweep for the incremental hook.)
     primary_results = _pick_primary_per_case(all_results, primary_eff_res)
-    meta_path_for = _meta_path_for_case(layout)
     if primary_results and params.get("export_predictions", True):
         native_dir = output_dir / "native_space"
         chosen = [(r["casename"], r["step_size"],
@@ -862,12 +899,17 @@ def infer_test_set(params):
             step_native_dir = output_dir / f"native_space_{_sd}"
             _ostr = "" if start == 0 else f"_o{start}"
             suffix = f"_cnisp_step{step:02d}{_ostr}"
-            step_paths = map_results_to_native(
-                by_step[(step, start)], layout.metadata_dir, step_native_dir,
-                suffix=suffix,
-                meta_path_for_casename=meta_path_for,
-                save_source_ids=save_id_set,
-            )
+            if incremental_remap:
+                # Masks were already written per-case by _emit_case_native;
+                # this loop only (re)builds the manifest below.
+                step_paths: List[Path] = []
+            else:
+                step_paths = map_results_to_native(
+                    by_step[(step, start)], layout.metadata_dir, step_native_dir,
+                    suffix=suffix,
+                    meta_path_for_casename=meta_path_for,
+                    save_source_ids=save_id_set,
+                )
 
             # ``by_source_id`` stores **basename only** -- consumers
             # (compare_native.py, visualize.py audit) anchor it against
@@ -909,8 +951,10 @@ def infer_test_set(params):
             # Manifest key: bare step for start=0 (back-compat), step_oN else.
             _mkey = str(step) if start == 0 else f"{step}_o{start}"
             sweep_manifest[_mkey] = per_step_manifest
-            print(f"  {_sd}: {step_native_dir} "
-                  f"({len(step_paths)} sources)")
+            _n_masks = (len(per_step_manifest) if incremental_remap
+                        else len(step_paths))
+            print(f"  {_sd}: {step_native_dir} ({_n_masks} sources"
+                  f"{' [written per-case]' if incremental_remap else ''})")
 
         with open(output_dir / "native_sweep_manifest.json", "w") as f:
             json.dump({

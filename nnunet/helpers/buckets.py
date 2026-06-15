@@ -34,6 +34,17 @@ The CNISP rows are written as ``CNISP-atlasGT`` / ``CNISP-nnUNetPred``
 """
 
 
+NNUNET_INTERP_METHOD_LABEL: str = "nnUNet-interp"
+"""Method label for the nnUNet Taubin post-processing control.
+
+The control Taubin-smooths the degraded-grid nnUNet prediction on its own
+grid, resamples it (order=0) onto the native CT grid, and Dices it against
+the native GT. It is reported both as a standalone summary
+(``interpolate_native.summarize``) and as an extra column in
+``compare_native``. Like ``NNUNET_METHOD_LABEL`` it is nnUNet-only.
+"""
+
+
 DEFAULT_BUCKET_EDGES_MM: Tuple[float, ...] = (
     1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0,
 )
@@ -85,6 +96,7 @@ def bucket_sort_key(label: str) -> float:
 __all__ = [
     "STRUCT_ORDER",
     "NNUNET_METHOD_LABEL",
+    "NNUNET_INTERP_METHOD_LABEL",
     "DEFAULT_BUCKET_EDGES_MM",
     "assign_bucket",
     "bucket_sort_key",
