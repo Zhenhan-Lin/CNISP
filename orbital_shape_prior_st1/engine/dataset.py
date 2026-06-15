@@ -323,6 +323,7 @@ def coframe_dense_gt_into_obs_window(
     gt_patch_path: Path,
     obs_patch_path: Path,
     step: int,
+    recenter: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, int]:
     """Resample the dense GT disk patch into the nnUNet-obs patch's window.
 
@@ -354,6 +355,19 @@ def coframe_dense_gt_into_obs_window(
     and the affines co-register exactly. A sagittal acquisition whose
     through-plane axis maps to axis 0 would break this assumption; such cases
     are flagged by the near-empty-overlap guard in the bank ingest.
+
+    ``recenter``: when the GT patch's world frame is offset from the obs
+    patch's frame by a pure translation -- which happens for chk_* sources
+    whose pseudo-GT label file lives on a different-origin grid than the raw
+    CT the obs was predicted on -- the straight world-coordinate resample
+    lands the GT entirely outside the obs window (empty co-frame). With
+    ``recenter=True`` the GT is shifted so its foreground centroid coincides
+    with the obs foreground centroid in world space before resampling, which
+    cancels that spurious origin offset. NOTE: this also removes nnUNet's
+    (small) true localization drift, so it should only be used as a fallback
+    for cases where the naive co-frame is empty (the bank ingest does exactly
+    that). The relationship has been verified to be a pure translation, so a
+    centroid shift -- with no rotation -- fully recovers the overlap.
     """
     gt_img = nib.load(str(gt_patch_path))
     obs_img = nib.load(str(obs_patch_path))
@@ -378,8 +392,22 @@ def coframe_dense_gt_into_obs_window(
     # sparse voxel 0 == dense voxel 0).
     target_aff[:3, 3] = obs_aff[:3, 3]
 
+    gt_for_resample = gt_img
+    if recenter:
+        gt_arr = np.asarray(gt_img.dataobj)
+        obs_arr = np.asarray(obs_img.dataobj)
+        gt_fg = np.argwhere(gt_arr > 0)
+        obs_fg = np.argwhere(obs_arr > 0)
+        if len(gt_fg) and len(obs_fg):
+            gt_aff = np.asarray(gt_img.affine, dtype=np.float64)
+            gt_cen_w = gt_aff[:3, :3] @ gt_fg.mean(axis=0) + gt_aff[:3, 3]
+            obs_cen_w = obs_aff[:3, :3] @ obs_fg.mean(axis=0) + obs_aff[:3, 3]
+            shifted_aff = gt_aff.copy()
+            shifted_aff[:3, 3] += (obs_cen_w - gt_cen_w)
+            gt_for_resample = nib.Nifti1Image(gt_img.dataobj, shifted_aff)
+
     out = resample_from_to(
-        gt_img,
+        gt_for_resample,
         (tuple(int(x) for x in target_shape), target_aff),
         order=0, mode="constant", cval=0,
     )
@@ -700,12 +728,22 @@ class OrbitalImplicitDataset(data.Dataset):
         nnunet_prefix_tmpl = bank_config.get(
             "nnunet_patch_prefix", "labels_dataset835_{exp}_train_step_"
         )
+        # When the naive world-coordinate co-frame yields an empty window
+        # (the chk_* pseudo-GT label and the raw-CT obs sit on different-origin
+        # grids, related by a pure translation), retry with a centroid recenter
+        # so the dense GT shape overlays the obs. Default on; set
+        # coframe_recenter_fallback: false to keep the strict same-frame
+        # behaviour (which drops every chk_* nnUNet-obs item).
+        coframe_recenter = bool(
+            bank_config.get("coframe_recenter_fallback", True)
+        )
         aligned_dir = bank_config.get("_aligned_dir")
         labels_dir = bank_config.get("_labels_dir")
         nnunet_modes = [m for m in modes if m in ("thin", "thick")]
         n_nnunet_added = 0
         n_nnunet_missing = 0
         n_nnunet_empty = 0
+        n_nnunet_recentered = 0
         nnunet_issues: List[str] = []
         if use_nnunet_obs and (aligned_dir is None or labels_dir is None):
             raise ValueError(
@@ -827,6 +865,18 @@ class OrbitalImplicitDataset(data.Dataset):
                         dense_v, dense_s, _ = coframe_dense_gt_into_obs_window(
                             gt_patch_path, obs_patch_path, step,
                         )
+                        if int((dense_v > 0).sum()) == 0 and coframe_recenter:
+                            # Likely a pure world-frame offset between the
+                            # pseudo-GT and raw-CT obs grids (chk_* sources):
+                            # retry with a centroid recenter.
+                            dense_v, dense_s, _ = (
+                                coframe_dense_gt_into_obs_window(
+                                    gt_patch_path, obs_patch_path, step,
+                                    recenter=True,
+                                )
+                            )
+                            if int((dense_v > 0).sum()) > 0:
+                                n_nnunet_recentered += 1
                     except Exception as e:  # noqa: BLE001
                         nnunet_issues.append(
                             f"{casenames[scan_idx]} {mode} s{step}: obs/coframe "
@@ -835,9 +885,10 @@ class OrbitalImplicitDataset(data.Dataset):
                         continue
 
                     if int((dense_v > 0).sum()) == 0:
-                        # Co-framed GT carries no foreground in the obs window:
-                        # a gross frame mismatch (e.g. sagittal OS-flip edge
-                        # case) or nnUNet dropped the globe far from GT. Skip.
+                        # Co-framed GT carries no foreground in the obs window
+                        # even after the recenter fallback: a gross frame
+                        # mismatch (e.g. sagittal OS-flip edge case) or nnUNet
+                        # dropped the globe far from GT. Skip.
                         n_nnunet_empty += 1
                         nnunet_issues.append(
                             f"{casenames[scan_idx]} {mode} s{step}: co-framed "
@@ -866,7 +917,8 @@ class OrbitalImplicitDataset(data.Dataset):
         if use_nnunet_obs:
             print(f"  [bank] nnUNet-obs items added: {n_nnunet_added} "
                   f"(missing obs patch: {n_nnunet_missing}, "
-                  f"empty co-frame: {n_nnunet_empty})")
+                  f"empty co-frame: {n_nnunet_empty}, "
+                  f"recentered: {n_nnunet_recentered})")
             if nnunet_issues:
                 for line in nnunet_issues[:15]:
                     print(f"    - {line}")

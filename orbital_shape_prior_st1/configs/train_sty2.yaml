@@ -50,6 +50,12 @@ degradation_bank:
   # Per-experiment obs patch dir template; {exp} -> thin|thick. Built by
   # nnunet/build_dataset835_sparse_patches.py --split train.
   nnunet_patch_prefix: labels_dataset835_{exp}_train_step_
+  # chk_* pseudo-GT labels sit on a different-origin world grid than the
+  # raw-CT obs (pure translation). When the naive world-coord co-frame is
+  # empty, recenter the dense GT onto the obs foreground centroid so it
+  # overlays the observation. Without this every chk_ nnUNet-obs item is
+  # dropped (silently, since the [gt] items still fill the bank).
+  coframe_recenter_fallback: true
 
   # ── Pool shuffle + scan-disjoint train/valid split (v6) ─────────
   # When present, TRAIN and VAL draw from ONE combined modeling pool

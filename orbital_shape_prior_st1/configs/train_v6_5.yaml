@@ -45,6 +45,12 @@ degradation_bank:
   #            item. GT is still the dense supervision target (co-framed).
   obs_sources: [nnunet]
   nnunet_patch_prefix: labels_dataset835_{exp}_train_step_
+  # chk_* pseudo-GT labels sit on a different-origin world grid than the
+  # raw-CT obs (pure translation). When the naive world-coord co-frame is
+  # empty, recenter the dense GT onto the obs foreground centroid so it
+  # overlays the observation. Required for v6-5 (chk_-only train pool);
+  # set false to keep strict same-frame behaviour (drops all chk_ items).
+  coframe_recenter_fallback: true
 
   # ── Pool shuffle + scan-disjoint train/valid split ──────────────
   split:
