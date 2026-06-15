@@ -27,6 +27,10 @@ gpu_id: 0
 # ── CNISP-side artefacts to reuse (no re-inference) ───────────────
 cnisp_paths_yaml: /home-local/linz18/CNISP/orbital_shape_prior_st1/configs/paths.yaml
 cnisp_model_name: orbital_ad_v6
+# CNISP train yaml (under the CNISP project's configs/) that defines this
+# model's architecture + model_name for the inference/viz steps. Must match
+# cnisp_model_name. run_pipeline.sh exports it as CNISP_TRAIN_YAML.
+cnisp_train_yaml: train_sty2.yaml
 
 # ── Option C: which CNISP runs to compare against nnUNet ──────────
 # Each entry is a (run_tag, method_label) pair. CNISP infers per run_tag
@@ -109,6 +113,15 @@ cnisp_slice_step_axis: 2
 sparse_axis_alignment_min: 0.95
 sparse_eff_res_tolerance: 0.05
 sparse_eff_res_max_drift: 0.30
+
+# ── High-eff_res start-offset fan-out (nnunet_pred data-gen) ───────
+# MUST match the CNISP test yaml's adaptive_step_sweep so the nnunet_pred
+# read path finds an _oN input patch for every start the CNISP sweep
+# evaluates. For each (source, step) with eff_res > start_offset_eff_res_min_mm
+# the sparse-CT sweep is repeated for each start in start_offsets (only those
+# < step), written to sparse_step_XX_oN/. Set start_offsets: [0] to disable.
+start_offset_eff_res_min_mm: 3.5
+start_offsets: [0, 1, 2]
 
 # ── Degradation type for the nnUNet sparse sweep ──────────────────
 # Controls how sparsify_inputs.py degrades each CT before nnUNet predicts.

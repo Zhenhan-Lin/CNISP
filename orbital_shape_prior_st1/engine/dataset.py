@@ -691,6 +691,12 @@ class OrbitalImplicitDataset(data.Dataset):
         # train obs patches) silently fall back to gt-only.
         obs_sources = bank_config.get("obs_sources", ["gt"])
         use_nnunet_obs = "nnunet" in obs_sources
+        # When "gt" is absent from obs_sources (e.g. v6-5: obs_sources=[nnunet]),
+        # GT is NOT used as an input observation at all -- no degraded-GT items
+        # and no dense (step==1) GT item are added to the bank. GT still serves
+        # as the dense LOSS target for nnUNet items (via the co-frame path
+        # below). Existing configs all contain "gt", so this is a no-op for them.
+        use_gt_obs = "gt" in obs_sources
         nnunet_prefix_tmpl = bank_config.get(
             "nnunet_patch_prefix", "labels_dataset835_{exp}_train_step_"
         )
@@ -730,51 +736,54 @@ class OrbitalImplicitDataset(data.Dataset):
 
             for step in steps:
                 if step == 1:
-                    # Dense item (no degradation)
-                    self.labels_sparse.append(v)
-                    self.spacings_sparse.append(s.clone())
-                    self.offsets_sparse.append(o.clone())
-                    self.casenames.append(f"{casenames[scan_idx]}_dense")
-                    self.caseids.append(latent_idx)
-                    self.scan_ids.append(scan_idx)
-                    self.sparsify_offsets_used.append(0)
-                    self.bank_modes.append("dense")
-                    self.bank_obs_source.append("gt")
-                    self.item_dense_override.append(None)
-                    latent_idx += 1
-                    continue
-
-                for mode in modes:
-                    for off in range(offsets_per):
-                        if mode == "thin":
-                            sv, ss, so = degrade_thin(
-                                v, s, o, ax, step, start=off
-                            )
-                        elif mode == "thick":
-                            sv, ss, so = self._get_thick_cached(
-                                v, s, o, ax, step, off,
-                                modality, num_classes, cache_dir,
-                                casenames[scan_idx],
-                            )
-                        else:
-                            raise ValueError(f"Unknown mode: {mode}")
-
-                        suffix = f"_{mode}_s{step}"
-                        if offsets_per > 1:
-                            suffix += f"_o{off}"
-                        self.labels_sparse.append(sv)
-                        self.spacings_sparse.append(ss)
-                        self.offsets_sparse.append(so)
-                        self.casenames.append(
-                            f"{casenames[scan_idx]}{suffix}"
-                        )
+                    # Dense item (no degradation) -- a GT-input item, so only
+                    # when "gt" is in obs_sources.
+                    if use_gt_obs:
+                        self.labels_sparse.append(v)
+                        self.spacings_sparse.append(s.clone())
+                        self.offsets_sparse.append(o.clone())
+                        self.casenames.append(f"{casenames[scan_idx]}_dense")
                         self.caseids.append(latent_idx)
                         self.scan_ids.append(scan_idx)
-                        self.sparsify_offsets_used.append(off)
-                        self.bank_modes.append(mode)
+                        self.sparsify_offsets_used.append(0)
+                        self.bank_modes.append("dense")
                         self.bank_obs_source.append("gt")
                         self.item_dense_override.append(None)
                         latent_idx += 1
+                    continue
+
+                if use_gt_obs:
+                    for mode in modes:
+                        for off in range(offsets_per):
+                            if mode == "thin":
+                                sv, ss, so = degrade_thin(
+                                    v, s, o, ax, step, start=off
+                                )
+                            elif mode == "thick":
+                                sv, ss, so = self._get_thick_cached(
+                                    v, s, o, ax, step, off,
+                                    modality, num_classes, cache_dir,
+                                    casenames[scan_idx],
+                                )
+                            else:
+                                raise ValueError(f"Unknown mode: {mode}")
+
+                            suffix = f"_{mode}_s{step}"
+                            if offsets_per > 1:
+                                suffix += f"_o{off}"
+                            self.labels_sparse.append(sv)
+                            self.spacings_sparse.append(ss)
+                            self.offsets_sparse.append(so)
+                            self.casenames.append(
+                                f"{casenames[scan_idx]}{suffix}"
+                            )
+                            self.caseids.append(latent_idx)
+                            self.scan_ids.append(scan_idx)
+                            self.sparsify_offsets_used.append(off)
+                            self.bank_modes.append(mode)
+                            self.bank_obs_source.append("gt")
+                            self.item_dense_override.append(None)
+                            latent_idx += 1
 
                 # ── nnUNet-obs items for this (scan, step) ─────────
                 # One item per (mode in {thin,thick}) where the on-disk obs

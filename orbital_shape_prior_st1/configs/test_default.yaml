@@ -85,6 +85,18 @@ adaptive_step_sweep:
   # Effective-resolution upper bounds (mm) used to group results into
   # buckets in the cross-case summary tables.
   summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+  # ── High-eff_res start-offset fan-out ───────────────────────────
+  # At coarse acquisitions the reconstruction depends on WHICH slices were
+  # observed. For any (case, step) whose eff_res = step * spacing exceeds
+  # start_offset_eff_res_min_mm, the sweep is repeated for each start in
+  # start_offsets (same step/offset, shifted starting slice), giving more
+  # samples per eff_res bucket. start=0 keeps the legacy paths/filenames;
+  # start s>0 writes parallel artifacts suffixed `_o{s}` (step_03_o1/ ...).
+  # Results aggregate by eff_res, so the extra starts simply add points to
+  # the same bucket. Set start_offsets: [0] (or raise the threshold above the
+  # max eff_res) to disable. Applies to BOTH atlas_gt and nnunet_pred paths.
+  start_offset_eff_res_min_mm: 3.5
+  start_offsets: [0, 1, 2]
 
 # slice_step_axis:
 #   "auto"     : (DEFAULT) per-case axis = argmax(patch_spacing) for
@@ -143,6 +155,31 @@ latent_fit_label_smoothing: 0.1
 # ── Output ────────────────────────────────────────────────────────
 export_predictions: true   # save *_pred.nii.gz per case
 evaluate_predictions: true
+
+# ── Reconstruction-mask saving whitelist ──────────────────────────
+# save_mask_source_ids restricts which sources get full .nii.gz masks
+# written to disk (per-step pred/obs_vs_recon/iso AND native-space) to
+# save memory. null or [] -> save ALL sources (back-compat).
+#
+# Everything the eff_res aggregate needs (canonical-space Dice in
+# sweep_results.pkl / test_results.csv) plus latents/*.npy, *_sub_crop.json
+# and metadata.json are still written for EVERY source, so dropping a
+# source's mask only saves disk -- all sources still appear in the
+# aggregate figures. The 12 listed here cover atlas01-06,17,19,28,33 and
+# chk_24344 / chk_14455 for qualitative inspection.
+save_mask_source_ids:
+  - atlas_orbit0001_ubMask_al2_fill
+  - atlas_orbit0002_ubMask_al2_fill
+  - atlas_orbit0003_ubMask_al2_fill
+  - atlas_orbit0004_ubMask_al2_fill
+  - atlas_orbit0005_ubMask_al2_fill
+  - atlas_orbit0006_ubMask_al2_fill
+  - atlas_orbit0017_ubMask_al2_fill
+  - atlas_orbit0019_ubMask_al2_fill
+  - atlas_orbit0028_ubMask_al2_fill
+  - atlas_orbit0033_ubMask_al2_fill
+  - chk_24344
+  - chk_14455
 
 # Resume-from-latent
 # ------------------

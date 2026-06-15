@@ -123,7 +123,14 @@ from nnunet.lib.predictor import (  # noqa: E402
     predict_logits,
     segmentation_from_logits,
 )
-from simulation.affine_ops import assert_start_zero as _assert_start_zero  # noqa: E402
+
+
+def _parse_step_tag(tag: str) -> Tuple[int, int]:
+    """``"03"`` -> (3, 0); ``"03_o1"`` -> (3, 1) for the start-offset fan-out."""
+    if "_o" in tag:
+        s, o = tag.split("_o", 1)
+        return int(s), int(o)
+    return int(tag), 0
 
 
 def run(args) -> int:
@@ -220,7 +227,7 @@ def run(args) -> int:
 
     # ── steps >= 2: sparse-CT sweep ─────────────────────────────
     for step_tag in sorted(sparse_m.get("by_step", {}).keys()):
-        step = int(step_tag)
+        step, _start_tag = _parse_step_tag(step_tag)
         sparse_dir = sparse_pred_root / f"sparse_step_{step_tag}"
         native_dir = sparse_pred_root / f"sparse_step_{step_tag}_native"
         step_map: Dict[str, str] = {}
@@ -293,9 +300,14 @@ def run(args) -> int:
                 assert info.get("mode", "thin") in ("thin", "thick"), (
                     f"step_{step_tag} {sid}: unexpected mode={info.get('mode')}"
                 )
-                # Legacy manifests pre-date the "start" field; default to 0
-                # (which was the only value ever produced).
-                _assert_start_zero(int(info.get("start", 0)))
+                # start>=1 (start-offset fan-out) is position-exact because the
+                # world-aware native resample reads the sparse CT's shifted
+                # affine directly. Only require it be a distinct phase < step.
+                _start = int(info.get("start", 0))
+                assert 0 <= _start < step, (
+                    f"step_{step_tag} {sid}: start={_start} out of range for "
+                    f"step={step} (require 0 <= start < step)."
+                )
                 sparse_affine = np.asarray(
                     nib.load(str(sparse_input)).affine, dtype=np.float64
                 )

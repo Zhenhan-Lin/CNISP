@@ -332,6 +332,7 @@ def map_results_to_native(
     output_dir: Path,
     suffix: str = "_cnisp",
     meta_path_for_casename: Optional[Callable[[str], Path]] = None,
+    save_source_ids: Optional[set] = None,
 ) -> List[Path]:
     """
     Map inference results back to native space.
@@ -351,6 +352,13 @@ def map_results_to_native(
             share a Dice frame with different canonical crops). When
             None we fall back to ``meta_dir`` for every case so the
             legacy single-tree call sites keep working.
+        save_source_ids: optional whitelist of ``source_id``s to actually
+            write native masks for. ``None`` (default) writes all sources
+            (back-compat). When provided, sources not in the set are
+            skipped here -- their canonical-space Dice still lives in
+            ``sweep_results.pkl`` / ``test_results.csv`` (the aggregate
+            reads from there), so dropping the full-head mask only saves
+            disk, not information.
 
     Returns:
         list of output file paths
@@ -378,6 +386,8 @@ def map_results_to_native(
 
     output_paths = []
     for source_id, items in sorted(source_groups.items()):
+        if save_source_ids is not None and source_id not in save_source_ids:
+            continue
         ref_meta = items[0][1]
 
         eye_volumes: List[np.ndarray] = []

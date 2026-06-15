@@ -30,6 +30,9 @@
 #   bash run_all_experiments.sh --parallel              # thin->GPU0, thick->GPU1
 #   bash run_all_experiments.sh --parallel \
 #        --gpu-thin 0 --gpu-thick 1
+#   bash run_all_experiments.sh --config nnunet/configs_v5_5.yaml --parallel
+#        # run a specific model version (its thick config is auto-derived as
+#        # nnunet/configs_v5_5_thick.yaml)
 #   bash run_all_experiments.sh --with-real             # also run real-pair line
 #   bash run_all_experiments.sh --parallel --with-real --gpu-real 0
 #
@@ -52,7 +55,7 @@ cd "$REPO_ROOT"
 
 # ── Defaults ─────────────────────────────────────────────────
 BASE_CONFIG="$REPO_ROOT/nnunet/configs.yaml"     # thin (sweep_degrade_mode: thin)
-THICK_CONFIG="$REPO_ROOT/nnunet/configs_thick.yaml"
+THICK_CONFIG=""                                   # derived from BASE_CONFIG below
 PARALLEL=0
 WITH_REAL=0
 GPU=0            # sequential GPU
@@ -63,6 +66,8 @@ GPU_REAL=""      # defaults to GPU (seq) or GPU_THIN (parallel)
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --parallel)     PARALLEL=1; shift ;;
+        --config)       BASE_CONFIG="$2"; shift 2 ;;
+        --config=*)     BASE_CONFIG="${1#*=}"; shift ;;
         --with-real)    WITH_REAL=1; shift ;;
         --gpu)          GPU="$2"; shift 2 ;;
         --gpu=*)        GPU="${1#*=}"; shift ;;
@@ -91,6 +96,9 @@ PEREXP_PHASES=(
 run_pipe() { bash "$REPO_ROOT/run_pipeline.sh" "$@"; }
 
 # ── Generate the thick config from the (thin) base ───────────
+# Derive the thick config name from the chosen base so per-version configs
+# (configs_v5_5.yaml -> configs_v5_5_thick.yaml) never collide.
+THICK_CONFIG="${BASE_CONFIG%.yaml}_thick.yaml"
 if ! grep -q '^sweep_degrade_mode:' "$BASE_CONFIG"; then
     echo "[run_all] ERROR: $BASE_CONFIG has no sweep_degrade_mode key" >&2
     exit 2

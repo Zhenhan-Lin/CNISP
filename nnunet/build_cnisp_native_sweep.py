@@ -101,12 +101,15 @@ def run(args) -> int:
     # Option C.
     top_manifest_path = output_base / "native_sweep_manifest.json"
     test_label_source = "atlas_gt"
+    save_id_set = None  # None = save all (back-compat / legacy runs)
     if top_manifest_path.exists():
         try:
             with open(top_manifest_path) as f:
-                test_label_source = json.load(f).get(
-                    "test_label_source", "atlas_gt"
-                )
+                _top = json.load(f)
+            test_label_source = _top.get("test_label_source", "atlas_gt")
+            _ids = _top.get("save_mask_source_ids")
+            if _ids:
+                save_id_set = set(_ids)
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -130,35 +133,42 @@ def run(args) -> int:
     print(f"[build_cnisp_native_sweep] {len(all_results)} (case, step) rows; "
           f"run_tag={args.run_tag} test_label_source={test_label_source}")
 
-    # ── Group by step_size ────────────────────────────────────────
-    by_step: Dict[int, List[dict]] = defaultdict(list)
+    # ── Group by (step_size, slice_start_id) ──────────────────────
+    # The high-eff_res start-offset fan-out adds start>0 rows; start=0 keeps
+    # the legacy native_space_step_XX/ name + bare-int manifest key.
+    by_step: Dict[tuple, List[dict]] = defaultdict(list)
     for r in all_results:
         if "step_size" not in r or "pred_class_map" not in r:
             continue
-        by_step[int(r["step_size"])].append(r)
+        by_step[(int(r["step_size"]),
+                 int(r.get("slice_start_id", 0)))].append(r)
 
     step_whitelist = None
     if args.steps:
         step_whitelist = {int(s) for s in args.steps.split(",") if s.strip()}
 
-    steps_to_map = sorted(by_step)
+    keys_to_map = sorted(by_step)
     if step_whitelist is not None:
-        steps_to_map = [s for s in steps_to_map if s in step_whitelist]
-        missing = sorted(step_whitelist - set(by_step))
+        keys_to_map = [(s, o) for (s, o) in keys_to_map if s in step_whitelist]
+        missing = sorted(step_whitelist - {s for (s, _o) in by_step})
         if missing:
             print(f"  [warn] requested steps not in sweep: {missing}")
-    print(f"[build_cnisp_native_sweep] steps to map: {steps_to_map}")
+    print(f"[build_cnisp_native_sweep] (step,start) to map: {keys_to_map}")
 
-    overall_manifest: Dict[int, Dict[str, str]] = {}
+    overall_manifest: Dict[str, Dict[str, str]] = {}
 
-    for step in steps_to_map:
-        step_results = by_step[step]
-        step_dir = output_base / f"native_space_step_{step:02d}"
-        suffix = f"_cnisp_step{step:02d}"
+    for (step, start) in keys_to_map:
+        step_results = by_step[(step, start)]
+        _sd = f"step_{step:02d}" if start == 0 else f"step_{step:02d}_o{start}"
+        _ostr = "" if start == 0 else f"_o{start}"
+        step_dir = output_base / f"native_space_{_sd}"
+        suffix = f"_cnisp_step{step:02d}{_ostr}"
         manifest_path = step_dir / "manifest.json"
 
+        _mkey = str(step) if start == 0 else f"{step}_o{start}"
+
         # Skip if infer.py (or a previous backfill run) already produced
-        # this step. ``--force`` overrides.
+        # this (step, start). ``--force`` overrides.
         if manifest_path.exists() and not args.force:
             try:
                 with open(manifest_path) as f:
@@ -167,18 +177,19 @@ def run(args) -> int:
             except (OSError, json.JSONDecodeError):
                 existing_map = {}
             if existing_map:
-                print(f"\n  step {step:02d}: already mapped "
+                print(f"\n  {_sd}: already mapped "
                       f"({len(existing_map)} sources, manifest={manifest_path})"
                       f" -- skip (--force to override).")
-                overall_manifest[step] = existing_map
+                overall_manifest[_mkey] = existing_map
                 continue
 
-        print(f"\n  step {step:02d}: {len(step_results)} cases -> {step_dir}")
+        print(f"\n  {_sd}: {len(step_results)} cases -> {step_dir}")
 
         step_dir.mkdir(parents=True, exist_ok=True)
         native_paths = map_results_to_native(
             step_results, aligned_dir, step_dir, suffix=suffix,
             meta_path_for_casename=meta_path_for,
+            save_source_ids=save_id_set,
         )
 
         # ── source_id <-> output path manifest ────────────────────
@@ -204,6 +215,9 @@ def run(args) -> int:
             source_id = str(meta["source_id"])
             if source_id in seen_sources:
                 continue
+            # Only list sources whose native mask was actually written.
+            if save_id_set is not None and source_id not in save_id_set:
+                continue
             seen_sources.add(source_id)
             stem = stem_of(meta["original_nifti_path"])
             # ``map_results_to_native`` writes "{stem}{suffix}.nii.gz"
@@ -221,6 +235,7 @@ def run(args) -> int:
         with open(manifest_path, "w") as f:
             json.dump({
                 "step_size": step,
+                "slice_start_id": start,
                 "model_name": model_name,
                 "run_tag": args.run_tag,
                 "test_label_source": test_label_source,
@@ -229,7 +244,7 @@ def run(args) -> int:
                 "by_source_id": step_manifest,
             }, f, indent=2)
         print(f"    manifest: {manifest_path} ({len(step_manifest)} sources)")
-        overall_manifest[step] = step_manifest
+        overall_manifest[_mkey] = step_manifest
 
     summary_path = output_base / "native_sweep_manifest.json"
     with open(summary_path, "w") as f:

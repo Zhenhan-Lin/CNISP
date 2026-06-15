@@ -19,11 +19,15 @@ Inputs
   itself lives in ``sparse_step_{XX}_upsampled/``). step_01 is a symlink
   to the dense baseline ``prediction/native/``. Indexed via
   ``{work_dir}/prediction/sweep_manifest.json``.
-* ``output_basedir/{model}/runs/{run_tag}/native_space_step_{XX}/...``
-  -- CNISP per-step predictions for this run, produced by
-  ``orbital_shape_prior_st1/engine/infer.py`` (or backfilled by
-  ``nnunet/build_cnisp_native_sweep.py``).
-* ``output_basedir/{model}/runs/{run_tag}/sweep_results.pkl`` -- eff_res lookup.
+* ``output_basedir/{model}/runs/{run_tag}/sweep_results.pkl`` -- the
+  source of BOTH the eff_res lookup AND the CNISP Dice. CNISP Dice is the
+  canonical-space per-eye Dice recorded here (averaged over the two eyes
+  to a per-source value), NOT the native-space reconstructed mask. This
+  keeps every test source in the eff_res aggregate even when its native
+  ``.nii.gz`` was skipped by the ``save_mask_source_ids`` whitelist.
+  (The native ``native_space_step_{XX}/`` masks are still written for the
+  whitelisted sources for inspection, but compare_native no longer reads
+  them.)
 * ``output_basedir/{model}/runs/{run_tag}/native_sweep_manifest.json`` --
   records the ``test_label_source`` used for this run, which decides
   whether chk_* sources are Diced against the legacy chk_pseudo GT
@@ -34,11 +38,14 @@ Inputs
 Comparison
 ----------
 * Both methods contribute one row per (source_id, step_size,
-  structure). All Dice computed on the ORIGINAL CT's voxel grid -- GT
-  is never resampled. nnUNet's sparse-CT predictions are produced at the
-  plan (iso 0.5) spacing and resampled onto the native CT grid with
-  nnUNet's own segmentation resampler by ``nnunet/predict_sparse_iso.py``
-  before this step.
+  slice_start_id, structure). For coarse eff_res the sweep fans out over
+  start offsets {0,1,2}; those rows share an eff_res bucket and just add
+  samples to it. nnUNet Dice is computed on the ORIGINAL CT's voxel grid
+  (GT never resampled) from the plan (iso 0.5) spacing predictions
+  resampled onto the native CT grid by ``nnunet/predict_sparse_iso.py``.
+  CNISP Dice is the canonical-space per-eye Dice from sweep_results.pkl
+  (averaged over eyes); the two methods therefore live in different
+  spaces but share the same eff_res bucketing for the figure.
 * When the CNISP run uses ``test_label_source=nnunet_pred`` we ALSO
   switch nnUNet-sparse's chk_* GT to Dataset835's dense pred so both
   methods Dice against the same target in this bucket. Atlas rows are
@@ -96,7 +103,7 @@ from nnunet.data_prep.resolve_gt import build_struct_to_value  # noqa: E402
 from nnunet.lib.metrics import (  # noqa: E402
     affines_consistent,
     build_eff_res_index,
-    detect_pred_offset,
+    cnisp_canonical_dice_from_pkl,
     dice_for_source,
     load_label_volume_with_affine,
     lookup_method_label,
@@ -104,6 +111,24 @@ from nnunet.lib.metrics import (  # noqa: E402
     resample_pred_onto_gt,
     resolve_test_sources,
 )
+
+
+def _parse_step_tag(step_tag: str) -> Tuple[int, int]:
+    """Parse a sweep step tag into ``(step, start)``.
+
+    ``"03"`` -> ``(3, 0)``; ``"03_o2"`` -> ``(3, 2)``. Returns
+    ``(None, 0)`` for an unparseable tag so callers can skip it.
+    """
+    base, _, off = step_tag.partition("_o")
+    try:
+        step = int(base)
+    except ValueError:
+        return None, 0
+    try:
+        start = int(off) if off else 0
+    except ValueError:
+        start = 0
+    return step, start
 
 
 def run(args) -> int:
@@ -226,37 +251,29 @@ def run(args) -> int:
         print(f"[compare_native] documented nnUNet labels (sanity): "
               f"{expected_labels}")
 
-    # ── CNISP per-step manifest loader ────────────────────────────
-    # ``by_source_id`` is read as basename + anchored at the manifest's
-    # own directory: the manifest lives next to its NIfTI siblings, so
-    # whatever subtree it sits in IS the current file tree for that
-    # step. ``Path(raw).name`` makes this work for both fresh manifests
-    # (basename only) and legacy manifests (full absolute path baked in
-    # at write time) without any branching.
-    step_dirs = sorted(output_base.glob("native_space_step_*"))
-    cnisp_step_paths: Dict[int, Dict[str, Path]] = {}
-    for d in step_dirs:
-        try:
-            step = int(d.name.replace("native_space_step_", ""))
-        except ValueError:
-            continue
-        manifest = d / "manifest.json"
-        if not manifest.exists():
-            print(f"  [warn] no manifest in {d}; skipping", file=sys.stderr)
-            continue
-        with open(manifest) as f:
-            m = json.load(f)
-        cnisp_step_paths[step] = {
-            sid: d / Path(raw).name
-            for sid, raw in m.get("by_source_id", {}).items()
-        }
-    if not cnisp_step_paths:
-        print(f"[compare_native] no CNISP step manifests under {output_base}.",
-              file=sys.stderr)
-        print(f"  Did you run nnunet/build_cnisp_native_sweep.py?",
+    # ── CNISP per-(source, step, start) Dice loader ───────────────
+    # CNISP Dice is read from the run's canonical-space sweep_results.pkl
+    # (per eye, averaged to per source) -- NOT from the native-space
+    # reconstructed masks. This decouples the eff_res aggregate from the
+    # save_mask_source_ids whitelist: most sources never write a native
+    # .nii.gz, but every source still has its canonical Dice in the pkl,
+    # so the cross-method figure keeps all test sources. (Trade-off: the
+    # CNISP curve is now canonical-space Dice, matching test_results.csv,
+    # rather than native-space merged-mask Dice.)
+    cnisp_dice = cnisp_canonical_dice_from_pkl(output_base / "sweep_results.pkl")
+    if not cnisp_dice:
+        print(f"[compare_native] no CNISP Dice in "
+              f"{output_base / 'sweep_results.pkl'}.", file=sys.stderr)
+        print(f"  Did the CNISP infer/sweep run for this experiment?",
               file=sys.stderr)
         return 2
-    print(f"[compare_native] CNISP steps available: {sorted(cnisp_step_paths)}")
+    cnisp_keys_by_sid: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+    for (sid_k, step_k, start_k) in cnisp_dice:
+        cnisp_keys_by_sid[sid_k].append((step_k, start_k))
+    for sid_k in cnisp_keys_by_sid:
+        cnisp_keys_by_sid[sid_k].sort()
+    print(f"[compare_native] CNISP (step,start) combos available: "
+          f"{sorted({k[1:] for k in cnisp_dice})}")
 
     # ── nnUNet per-step manifest loader ───────────────────────────
     # Same idea as the CNISP loader: basenames anchored against the
@@ -271,14 +288,18 @@ def run(args) -> int:
     nn_pred_root = work_dir / "prediction" / experiment
     with open(nnunet_sweep_manifest) as f:
         nn_m = json.load(f)
-    nnunet_step_paths: Dict[int, Dict[str, Path]] = {}
+    # nnUNet steps are keyed by (step, start). For coarse eff_res the
+    # sweep fans out over start offsets {0,1,2}; the manifest key is "03"
+    # for start=0 and "03_o1" for start=1, with native masks under
+    # sparse_step_03_native/ and sparse_step_03_o1_native/ respectively.
+    nnunet_step_paths: Dict[Tuple[int, int], Dict[str, Path]] = {}
     for step_tag, sid_map in nn_m.get("steps", {}).items():
-        try:
-            step = int(step_tag)
-        except ValueError:
+        step, start = _parse_step_tag(str(step_tag))
+        if step is None:
             continue
-        canonical_dir = nn_pred_root / f"sparse_step_{step:02d}_native"
-        nnunet_step_paths[step] = {
+        sd = f"sparse_step_{step:02d}" + (f"_o{start}" if start else "")
+        canonical_dir = nn_pred_root / f"{sd}_native"
+        nnunet_step_paths[(step, start)] = {
             sid: canonical_dir / Path(raw).name
             for sid, raw in sid_map.items()
         }
@@ -286,7 +307,8 @@ def run(args) -> int:
         print(f"[compare_native] nnUNet sweep manifest has no usable steps: "
               f"{nnunet_sweep_manifest}", file=sys.stderr)
         return 2
-    print(f"[compare_native] nnUNet steps available: {sorted(nnunet_step_paths)}")
+    print(f"[compare_native] nnUNet (step,start) combos available: "
+          f"{sorted(nnunet_step_paths)}")
 
     # ── eff_res lookup ────────────────────────────────────────────
     eff_res_idx = build_eff_res_index(output_base / "sweep_results.pkl")
@@ -297,7 +319,6 @@ def run(args) -> int:
     n_skipped_gt = 0
     n_skipped_nnunet = 0
     n_nnunet_resampled = 0
-    n_pred_offset_fixed = 0
 
     for src in sources:
         sid = src.source_id
@@ -321,21 +342,22 @@ def run(args) -> int:
         # voxel-for-voxel. For chk_* sources the pseudo-GT was saved on a
         # different (resampled) grid, so the pred is resampled onto the GT grid
         # below (GT itself is never resampled).
-        for step in sorted(nnunet_step_paths):
-            path_map = nnunet_step_paths[step]
+        for (step, start) in sorted(nnunet_step_paths):
+            otag = f" o{start}" if start else ""
+            path_map = nnunet_step_paths[(step, start)]
             if sid not in path_map:
                 continue
             nnunet_pred_path = path_map[sid]
             if not nnunet_pred_path.exists():
                 n_skipped_nnunet += 1
-                print(f"  [skip nnUNet step{step:02d}] {sid}: no pred at "
+                print(f"  [skip nnUNet step{step:02d}{otag}] {sid}: no pred at "
                       f"{nnunet_pred_path}", file=sys.stderr)
                 continue
             try:
                 nn_pred, nn_aff = load_label_volume_with_affine(nnunet_pred_path)
             except Exception as e:  # noqa: BLE001
                 n_skipped_nnunet += 1
-                print(f"  [skip nnUNet step{step:02d}] {sid}: load failed "
+                print(f"  [skip nnUNet step{step:02d}{otag}] {sid}: load failed "
                       f"({e})", file=sys.stderr)
                 continue
             grid_mismatch = (
@@ -344,7 +366,7 @@ def run(args) -> int:
             )
             if grid_mismatch:
                 is_chk = src.gt_source.startswith("chk_")
-                msg = (f"{sid} nnUNet step{step:02d}: pred grid "
+                msg = (f"{sid} nnUNet step{step:02d}{otag}: pred grid "
                        f"{nn_pred.shape}/{nib.aff2axcodes(nn_aff)} != GT grid "
                        f"{gt.shape}/{nib.aff2axcodes(gt_affine)}")
                 if args.strict_shape:
@@ -354,9 +376,9 @@ def run(args) -> int:
                     # atlas sources MUST already sit on the GT (= raw CT) grid;
                     # a mismatch there is a real remap/orientation bug, so keep
                     # the loud skip rather than silently resampling.
-                    print(f"  [skip nnUNet step{step:02d}] {msg} (atlas pred "
-                          f"should already be on the GT grid -- NOT comparing).",
-                          file=sys.stderr)
+                    print(f"  [skip nnUNet step{step:02d}{otag}] {msg} (atlas "
+                          f"pred should already be on the GT grid -- NOT "
+                          f"comparing).", file=sys.stderr)
                     n_skipped_nnunet += 1
                     continue
                 # chk_* pseudo-GT lives on a different (resampled) grid than the
@@ -368,9 +390,9 @@ def run(args) -> int:
                 nn_aff = gt_affine
                 n_nnunet_resampled += 1
                 if n_nnunet_resampled <= 3:
-                    print(f"  [info nnUNet step{step:02d}] {sid}: pred resampled "
-                          f"onto chk_* GT grid {gt.shape} (world-aware, order=0).",
-                          file=sys.stderr)
+                    print(f"  [info nnUNet step{step:02d}{otag}] {sid}: pred "
+                          f"resampled onto chk_* GT grid {gt.shape} "
+                          f"(world-aware, order=0).", file=sys.stderr)
             # nnUNet predictions are always written in the bare nnunet
             # scheme {ON:1, Recti:2, Globe:3, Fat:4} with no offset, so
             # the pred scheme map is fixed regardless of source / GT
@@ -382,6 +404,7 @@ def run(args) -> int:
                 pred_scheme_map=nnunet_pred_struct_map,
                 gt_scheme_map=src.gt_struct_to_value,
             )
+            # eff_res is start-independent (= step * base spacing).
             eff_res = eff_res_idx.get((sid, step))
             for name in STRUCT_ORDER + ["mean"]:
                 per_source_rows.append({
@@ -389,93 +412,37 @@ def run(args) -> int:
                     "gt_source": src.gt_source,
                     "method": NNUNET_METHOD_LABEL,
                     "step_size": str(step),
+                    "slice_start_id": str(start),
                     "eff_res_mm": (f"{eff_res:.4f}" if eff_res is not None else ""),
                     "structure": name,
                     "dice": f"{dices[name]:.6f}",
                 })
 
-        # ── CNISP per step ────────────────────────────────────────
-        # CNISP's native_mapping.remap_canonical_to_original emits labels
-        # in the SAME scheme as the source GT, but the additive offset
-        # (e.g. atlas's -1000) is detected at *inference time* by peeking
-        # at ``meta["original_nifti_path"]``. If that path was stale on
-        # the inference host (data move, missing softlink, ...) the
-        # saved pred ends up in the bare scheme (e.g. {1,3,5,7}) even
-        # though the GT keeps the offset (e.g. {-999,-997,-995,-993}).
-        # We recover the prediction's actual offset per-file below so
-        # the Dice match is correct regardless of inference-time path
-        # availability. The bare scheme always works when offset == 0,
-        # so this also covers chk_* sources and deployment-mode runs.
-        for step in sorted(cnisp_step_paths):
-            path_map = cnisp_step_paths[step]
-            if sid not in path_map:
+        # ── CNISP per (step, start) ───────────────────────────────
+        # CNISP Dice comes from the canonical-space sweep pkl (read once
+        # above into ``cnisp_dice``), averaged over the two eyes. No
+        # native mask is read here, so sources outside the
+        # save_mask_source_ids whitelist still contribute their Dice to
+        # the eff_res aggregate. The eff_res value is taken from the pkl
+        # row when present, falling back to the shared eff_res index.
+        for (step, start) in cnisp_keys_by_sid.get(sid, []):
+            rec = cnisp_dice.get((sid, step, start))
+            if rec is None:
                 continue
-            cnisp_path = path_map[sid]
-            if not cnisp_path.exists():
-                print(f"  [skip CNISP step{step:02d}] {sid}: file missing "
-                      f"{cnisp_path}", file=sys.stderr)
-                continue
-            try:
-                cn_pred, cn_aff = load_label_volume_with_affine(cnisp_path)
-            except Exception as e:  # noqa: BLE001
-                print(f"  [skip CNISP step{step:02d}] {sid}: load failed ({e})",
-                      file=sys.stderr)
-                continue
-            if cn_pred.shape != gt.shape:
-                msg = (f"{sid} CNISP step{step:02d}: shape "
-                       f"{cn_pred.shape} != GT {gt.shape}")
-                if args.strict_shape:
-                    print(f"  [error] {msg}", file=sys.stderr)
-                    return 3
-                print(f"  [skip CNISP step{step:02d}] {msg}", file=sys.stderr)
-                continue
-            if not affines_consistent(cn_aff, gt_affine):
-                msg = (f"{sid} CNISP step{step:02d}: pred/GT affine mismatch "
-                       f"(orientation not restored on remap). "
-                       f"pred axcodes={nib.aff2axcodes(cn_aff)} "
-                       f"GT axcodes={nib.aff2axcodes(gt_affine)}. Element-wise "
-                       f"Dice would be on misaligned voxels -- NOT comparing.")
-                if args.strict_shape:
-                    print(f"  [error] {msg}", file=sys.stderr)
-                    return 3
-                print(f"  [skip CNISP step{step:02d}] {msg}", file=sys.stderr)
-                continue
-
-            pred_offset = detect_pred_offset(cn_pred, src.gt_scheme)
-            if pred_offset != src.gt_label_offset:
-                # Inference-time offset detection disagreed with GT-time
-                # detection; rebuild the pred scheme map from what the
-                # file actually contains so Dice doesn't silently zero
-                # out. Logged once per (source, step) so a healthy run
-                # stays quiet but a broken pipeline is immediately
-                # visible.
-                n_pred_offset_fixed += 1
-                if n_pred_offset_fixed <= 3:
-                    print(
-                        f"  [info CNISP step{step:02d}] {sid}: pred offset "
-                        f"{pred_offset} != GT offset {src.gt_label_offset}; "
-                        f"using pred-detected offset for Dice.",
-                        file=sys.stderr,
-                    )
-            cnisp_pred_struct_map = build_struct_to_value(
-                src.gt_scheme, pred_offset,
-            )
-
-            dices = dice_for_source(
-                cn_pred, gt,
-                pred_scheme_map=cnisp_pred_struct_map,
-                gt_scheme_map=src.gt_struct_to_value,
-            )
-            eff_res = eff_res_idx.get((sid, step))
+            dices = rec["dice"]
+            eff_res = rec.get("effective_resolution_mm")
+            if eff_res is None:
+                eff_res = eff_res_idx.get((sid, step))
             for name in STRUCT_ORDER + ["mean"]:
                 per_source_rows.append({
                     "source_id": sid,
                     "gt_source": src.gt_source,
                     "method": cnisp_method_label,
                     "step_size": str(step),
+                    "slice_start_id": str(start),
                     "eff_res_mm": (f"{eff_res:.4f}" if eff_res is not None else ""),
                     "structure": name,
-                    "dice": f"{dices[name]:.6f}",
+                    "dice": f"{dices.get(name, float('nan')):.6f}",
                 })
 
         n_done += 1
@@ -486,11 +453,6 @@ def run(args) -> int:
         print(f"[compare_native] nnUNet pred resampled onto chk_* GT grid for "
               f"{n_nnunet_resampled} (source, step) row(s) (world-aware, "
               f"order=0; GT never resampled).")
-    if n_pred_offset_fixed:
-        print(f"[compare_native] CNISP pred offset auto-corrected for "
-              f"{n_pred_offset_fixed} (source, step) row(s) -- pred file's "
-              f"label range disagreed with GT's; re-run CNISP infer.py "
-              f"after fixing paths.yaml to silence this.")
 
     # ── Write per-source CSV ──────────────────────────────────────
     out_dir = work_dir / "comparison"
@@ -498,7 +460,7 @@ def run(args) -> int:
     per_source_csv = out_dir / f"paired_per_source{out_suffix}.csv"
     with open(per_source_csv, "w", newline="") as f:
         fieldnames = ["source_id", "gt_source", "method", "step_size",
-                      "eff_res_mm", "structure", "dice"]
+                      "slice_start_id", "eff_res_mm", "structure", "dice"]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in per_source_rows:

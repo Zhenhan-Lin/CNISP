@@ -227,17 +227,22 @@ def build_run_layout(params: dict) -> RunLayout:
     )
 
 
-def step_input_patch_path(layout: RunLayout, casename: str, step: int) -> Path:
-    """Where to read the latent-opt input patch for a given (case, step).
+def step_input_patch_path(
+    layout: RunLayout, casename: str, step: int, start: int = 0,
+) -> Path:
+    """Where to read the latent-opt input patch for a given (case, step, start).
 
-    ``nnunet_pred`` : per-step Dataset835 sparse-CT patch.
+    ``nnunet_pred`` : per-step Dataset835 sparse-CT patch. ``start``>0 selects
+                      the start-offset fan-out dir (``..._step_03_o1/``); the
+                      canonical ``start==0`` keeps the legacy ``..._step_03/``.
     ``real_pair``   : single real low-res nnUNet-pred patch (step is
                       informational; the real anisotropy is fixed per case).
     """
     if layout.test_label_source == "real_pair":
         return layout.labels_realpair_input_dir / f"{casename}.nii.gz"
+    ostr = "" if int(start) == 0 else f"_o{int(start)}"
     step_dir = Path(
-        f"{layout.labels_dataset835_step_prefix.as_posix()}{step:02d}"
+        f"{layout.labels_dataset835_step_prefix.as_posix()}{step:02d}{ostr}"
     )
     return step_dir / f"{casename}.nii.gz"
 

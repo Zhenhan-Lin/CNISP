@@ -481,6 +481,19 @@ else
 fi
 
 CNISP_MODEL_NAME="$(read_yaml_field "$CONFIG" "cnisp_model_name")"
+# Train yaml that defines the CNISP model architecture/name for the inference +
+# viz steps. Optional config field cnisp_train_yaml selects the per-version
+# config (train_v5_5.yaml / train_v6_5.yaml); defaults to the v6 train_sty2.yaml.
+# Exported (with CNISP_MODEL_NAME) so run_03_test.sh / run_04_visualization.sh
+# pick the matching model. Resolved relative to the CNISP project's configs/.
+CNISP_TRAIN_YAML_REL="$(read_yaml_field "$CONFIG" "cnisp_train_yaml")"
+CNISP_TRAIN_YAML_REL="${CNISP_TRAIN_YAML_REL:-train_sty2.yaml}"
+if [[ "$CNISP_TRAIN_YAML_REL" = /* ]]; then
+    CNISP_TRAIN_YAML="$CNISP_TRAIN_YAML_REL"
+else
+    CNISP_TRAIN_YAML="$(dirname "$CNISP_PATHS_YAML")/$CNISP_TRAIN_YAML_REL"
+fi
+export CNISP_MODEL_NAME CNISP_TRAIN_YAML
 CNISP_MODEL_BASEDIR="$(read_yaml_field "$CNISP_PATHS_YAML" "model_basedir")"
 CNISP_OUTPUT_BASEDIR="$(read_yaml_field "$CNISP_PATHS_YAML" "output_basedir")"
 CNISP_ALIGNED_DIR="$(read_yaml_field "$CNISP_PATHS_YAML" "aligned_dir")"
@@ -588,6 +601,7 @@ echo "  repo_root:           $REPO_ROOT"
 echo "  config:              $CONFIG"
 echo "  cnisp_paths_yaml:    $CNISP_PATHS_YAML"
 echo "  cnisp_model_name:    $CNISP_MODEL_NAME"
+echo "  cnisp_train_yaml:    $CNISP_TRAIN_YAML"
 echo "  cnisp_model_dir:     $CNISP_MODEL_BASEDIR/$CNISP_MODEL_NAME"
 echo "  cnisp_output_dir:    $CNISP_OUTPUT_BASEDIR/$CNISP_MODEL_NAME"
 echo "  cnisp_aligned_dir:   $CNISP_ALIGNED_DIR"
@@ -692,7 +706,11 @@ phase_cnisp_train() {
         echo "  -> skipping training (pass --force-train or --force to override)."
         return 0
     fi
-    bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_02_train.sh"
+    # Pass the per-version train yaml (resolved from configs.yaml::cnisp_train_yaml)
+    # so cnisp-train builds the model named in THIS config (orbital_ad_v5_5 /
+    # orbital_ad_v6_5 / ...), not the run_02_train.sh default (train_sty2.yaml/v6).
+    bash "$REPO_ROOT/orbital_shape_prior_st1/scripts/run_02_train.sh" \
+        "$CNISP_TRAIN_YAML"
 }
 
 phase_nnunet_predict() {

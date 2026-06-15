@@ -209,6 +209,67 @@ def build_eff_res_index(sweep_pkl: Path) -> Dict[Tuple[str, int], float]:
     return {k: float(np.mean(v)) for k, v in accum.items()}
 
 
+def cnisp_canonical_dice_from_pkl(
+    sweep_pkl: Path,
+) -> Dict[Tuple[str, int, int], Dict]:
+    """Per-(source_id, step, start) canonical-space Dice from sweep_results.pkl.
+
+    Reads the CNISP sweep pickle (one row per (case=eye, step, start)) and
+    averages the two eyes' per-structure ``dice`` into a per-source value.
+    This is what the eff_res aggregate consumes so the cross-method figure
+    stays complete even when most native masks are NOT written to disk
+    (save_mask_source_ids whitelist) -- the Dice here is canonical-space and
+    matches ``test_results.csv``, NOT the native-space merged-mask Dice the
+    legacy mask-reading path produced.
+
+    Each row's ``dice['per_class']`` is in canonical class order
+    {1:ON, 2:Globe, 3:Fat, 4:Recti}, which is exactly ``STRUCT_ORDER``.
+
+    Returns ``{(source_id, step, start): {"effective_resolution_mm": float,
+    "dice": {structure: mean_over_eyes}}}``.
+    """
+    if not sweep_pkl.exists():
+        print(f"  [warn] sweep_results.pkl not found: {sweep_pkl}; "
+              f"CNISP rows will be empty", file=sys.stderr)
+        return {}
+    with open(sweep_pkl, "rb") as f:
+        sweep: List[dict] = pickle.load(f)
+
+    structs_all = STRUCT_ORDER + ["mean"]
+    accum: Dict[Tuple[str, int, int], Dict[str, List[float]]] = defaultdict(
+        lambda: {s: [] for s in structs_all}
+    )
+    eff: Dict[Tuple[str, int, int], float] = {}
+    for r in sweep:
+        cn = r.get("casename")
+        if cn is None or not (cn.endswith("_OD") or cn.endswith("_OS")):
+            continue
+        sid = cn[:-3]
+        step = int(r["step_size"])
+        start = int(r.get("slice_start_id", 0))
+        key = (sid, step, start)
+        d = r.get("dice") or {}
+        per_class = d.get("per_class") or []
+        for i, name in enumerate(STRUCT_ORDER):
+            if i < len(per_class):
+                accum[key][name].append(float(per_class[i]))
+        if d.get("mean") is not None:
+            accum[key]["mean"].append(float(d["mean"]))
+        if r.get("effective_resolution_mm") is not None:
+            eff[key] = float(r["effective_resolution_mm"])
+
+    out: Dict[Tuple[str, int, int], Dict] = {}
+    for key, structs in accum.items():
+        out[key] = {
+            "effective_resolution_mm": eff.get(key),
+            "dice": {
+                name: (float(np.mean(v)) if v else float("nan"))
+                for name, v in structs.items()
+            },
+        }
+    return out
+
+
 def eff_res_from_sparse_manifest(
     work_dir: Path, experiment: str,
 ) -> Dict[Tuple[str, int], float]:

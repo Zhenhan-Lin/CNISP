@@ -34,13 +34,24 @@ export PYTHONPATH="$PROJECT_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
 # Only fall back to GPU 1 when invoked standalone with nothing set.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
+# Parse a scalar field out of a YAML file (no PyYAML dependency).
+_yaml_scalar() {  # $1=file $2=key
+    grep -E "^[[:space:]]*$2:" "$1" | head -1 \
+        | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]*#.*$//' \
+        | tr -d '"'"'"
+}
+
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
-# TRAIN_YAML="$PROJECT_ROOT/configs/train_default.yaml"
-TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
+# Train config + model name come from the parent (run_pipeline.sh exports
+# CNISP_TRAIN_YAML / CNISP_MODEL_NAME so the v5-5 / v6-5 / v6 model is selected
+# consistently). Defaults keep the standalone v6 behaviour. MODEL_NAME, when
+# not set, is read from the train yaml's model_name field (single source).
+TRAIN_YAML="${CNISP_TRAIN_YAML:-$PROJECT_ROOT/configs/train_sty2.yaml}"
+[[ -f "$TRAIN_YAML" || ! -f "$PROJECT_ROOT/configs/$TRAIN_YAML" ]] || \
+    TRAIN_YAML="$PROJECT_ROOT/configs/$TRAIN_YAML"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
 
-# Read model_name from train config (or override here)
-MODEL_NAME="orbital_ad_v6"
+MODEL_NAME="${CNISP_MODEL_NAME:-$(_yaml_scalar "$TRAIN_YAML" model_name)}"
 
 # Option C overrides (optional). Either pass on the command line or set
 # the corresponding fields in the test yaml. When unset, the test yaml

@@ -25,10 +25,21 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 export PYTHONPATH="$PROJECT_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
 
+# Parse a scalar field out of a YAML file (no PyYAML dependency).
+_yaml_scalar() {  # $1=file $2=key
+    grep -E "^[[:space:]]*$2:" "$1" | head -1 \
+        | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]*#.*$//' \
+        | tr -d '"'"'"
+}
+
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
-TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
+# Train config + model name from the parent (run_pipeline.sh exports
+# CNISP_TRAIN_YAML / CNISP_MODEL_NAME). Defaults keep standalone v6 behaviour.
+TRAIN_YAML="${CNISP_TRAIN_YAML:-$PROJECT_ROOT/configs/train_sty2.yaml}"
+[[ -f "$TRAIN_YAML" || ! -f "$PROJECT_ROOT/configs/$TRAIN_YAML" ]] || \
+    TRAIN_YAML="$PROJECT_ROOT/configs/$TRAIN_YAML"
 TEST_YAML="${1:-$PROJECT_ROOT/configs/test_default.yaml}"
-MODEL_NAME="orbital_ad_v6"
+MODEL_NAME="${CNISP_MODEL_NAME:-$(_yaml_scalar "$TRAIN_YAML" model_name)}"
 # Optional 2nd arg: run_tag override (atlas_gt / nnunet_pred / ...).
 # Optional 3rd arg: experiment (thin / thick / real) directory layer.
 # When unset, the test yaml's run_tag / sweep_mode win (defaults atlas_gt/thin).

@@ -139,6 +139,7 @@ def eval_case_at_resolution(
     mode: str = "thin",
     modality: str = "ct",
     num_classes: int = 5,
+    start: int = 0,
 ) -> Dict:
     """
     Sparsify → optimize latent → predict dense → Dice vs GT.
@@ -184,13 +185,13 @@ def eval_case_at_resolution(
         kernel = get_kernel(modality, step_size)
         label_obs, spacing_obs, offset_obs = degrade_thick(
             label_dense, spacing_dense, offset_dense,
-            step_axis, step_size, start=0,
+            step_axis, step_size, start=start,
             kernel=kernel, is_label=True, num_classes=num_classes,
         )
     else:
         label_obs, spacing_obs, offset_obs = sparsen_volume(
             label_dense, spacing_dense, offset_dense,
-            step_axis, step_size, 0, use_thick_slices,
+            step_axis, step_size, start, use_thick_slices,
         )
 
     # ── 64 mm inner crop around the visible-LCC centroid ──────────
@@ -385,7 +386,7 @@ def eval_case_at_resolution(
         # the sub-patch grid is still axis-aligned with the disk grid
         # (spacing is unchanged along each axis), so ``step_axis`` indexes
         # the same physical direction in the sub-patch frame.
-        obs_slices = list(range(0, pred_np.shape[step_axis], step_size))
+        obs_slices = list(range(start, pred_np.shape[step_axis], step_size))
         sl = [slice(None)] * 3
         sl[step_axis] = obs_slices
         dice_observed = _hard_dice(pred_np[tuple(sl)], gt_np[tuple(sl)],
@@ -396,7 +397,7 @@ def eval_case_at_resolution(
     # n_total is reported in DISK-PATCH units so step-size accounting
     # matches what infer.py records in step metadata.
     n_total = disk_patch_dense_shape[step_axis]
-    n_obs = len(range(0, n_total, max(step_size, 1)))
+    n_obs = len(range(start, n_total, max(step_size, 1)))
 
     return {
         "dice": dice_dense,
@@ -414,6 +415,7 @@ def eval_case_at_resolution(
         "latent_missing": False,
         "spacing": spacing_dense.numpy(),
         "step_size": step_size,
+        "slice_start_id": int(start),
         "step_axis": int(step_axis),
         "effective_resolution_mm": float(spacing_dense[step_axis]) * step_size,
         "n_observed_slices": n_obs,
@@ -636,8 +638,17 @@ def _crop_disk_to_subpatch(label_disk_np, sub_crop_lo, sub_crop_shape):
     return out
 
 
+def step_dir_name(step: int, start: int = 0) -> str:
+    """Per-(step, start) output-dir stem. start=0 keeps the legacy
+    ``step_XX`` name (byte-identical to pre-fan-out runs); start>0 appends
+    ``_o{start}`` so the high-eff_res start-offset fan-out writes parallel
+    artifacts (``step_03_o1`` ...) without colliding."""
+    base = f"step_{step:02d}"
+    return base if int(start) == 0 else f"{base}_o{int(start)}"
+
+
 def _try_load_cached(output_dir, casename, step, step_axis,
-                     label_dense, spacing_dense, num_classes):
+                     label_dense, spacing_dense, num_classes, start=0):
     """
     Check if step_XX/pred/{casename}_pred.nii.gz exists.
     If so, load it (plus its sidecar latent if available), compute Dice
@@ -664,14 +675,15 @@ def _try_load_cached(output_dir, casename, step, step_axis,
     """
     if output_dir is None:
         return None
-    pred_path = output_dir / f"step_{step:02d}" / "pred" / f"{casename}_pred.nii.gz"
+    _sd = step_dir_name(step, start)
+    pred_path = output_dir / _sd / "pred" / f"{casename}_pred.nii.gz"
     if not pred_path.exists():
         return None
 
     # Sub-patch sidecar is mandatory under the new (LCC + inner crop)
     # pipeline. A cached pred without it is from a pre-refactor run and
     # MUST be regenerated.
-    sub_crop_path = (output_dir / f"step_{step:02d}" / "pred"
+    sub_crop_path = (output_dir / _sd / "pred"
                      / f"{casename}_sub_crop.json")
     if not sub_crop_path.exists():
         print(f"  [cache stale] {casename}  step={step}  no sub_crop sidecar; "
@@ -713,7 +725,7 @@ def _try_load_cached(output_dir, casename, step, step_axis,
 
     dice_dense = _hard_dice(pred_np, gt_np, num_classes)
     if step > 1:
-        obs_slices = list(range(0, pred_np.shape[step_axis], step))
+        obs_slices = list(range(start, pred_np.shape[step_axis], step))
         sl = [slice(None)] * 3
         sl[step_axis] = obs_slices
         dice_observed = _hard_dice(pred_np[tuple(sl)], gt_np[tuple(sl)], num_classes)
@@ -725,7 +737,7 @@ def _try_load_cached(output_dir, casename, step, step_axis,
                if disk_patch_dense_shape is not None
                else pred_np.shape[step_axis])
 
-    latent_path = output_dir / f"step_{step:02d}" / "latents" / f"{casename}.npy"
+    latent_path = output_dir / _sd / "latents" / f"{casename}.npy"
     if latent_path.exists():
         latent_np = np.load(str(latent_path)).astype(np.float32)
         latent_missing = False
@@ -746,9 +758,10 @@ def _try_load_cached(output_dir, casename, step, step_axis,
         "latent_missing": latent_missing,
         "spacing": sp,
         "step_size": step,
+        "slice_start_id": int(start),
         "step_axis": int(step_axis),
         "effective_resolution_mm": float(sp[step_axis]) * step,
-        "n_observed_slices": len(range(0, n_total, max(step, 1))),
+        "n_observed_slices": len(range(start, n_total, max(step, 1))),
         "n_total_slices": n_total,
         "time_s": 0.0,
         "casename": casename,
@@ -806,6 +819,12 @@ def run_sweep(
     target_inc = float(cfg.get("target_eff_res_increment_mm", 1.0))
     max_count = int(cfg.get("max_num_steps_per_case", 5))
     max_eff = float(cfg.get("max_eff_resolution_mm", 12.0))
+    # High-eff_res start-offset fan-out. For (case, step) with eff_res above
+    # the threshold, repeat the eval for each configured start (shifted first
+    # observed slice). Starts >= step are dropped (they duplicate start-step).
+    # Absent threshold -> disabled (inf), reproducing the single-start sweep.
+    start_offsets_cfg = list(cfg.get("start_offsets", [0]) or [0])
+    start_off_min_mm = float(cfg.get("start_offset_eff_res_min_mm", float("inf")))
 
     # Normalize step_axis to a per-case list. Legacy callers pass a
     # single int; "auto" callers pass a sequence resolved from each
@@ -870,56 +889,71 @@ def run_sweep(
         for step in steps:
             eff_res = step * spacing_axis
 
-            cached = _try_load_cached(
-                output_dir, casename, step, case_axis,
-                labels_dense[ci], spacings_dense[ci], net.num_classes,
-            ) if output_dir else None
+            # Decide the start list for this (case, step). High eff_res ->
+            # fan out over starts (only those < step are distinct phases);
+            # otherwise single start=0 (legacy path).
+            if eff_res > start_off_min_mm and step > 1:
+                starts = [s for s in start_offsets_cfg if 0 <= s < step]
+                if 0 not in starts:
+                    starts = [0] + starts
+            else:
+                starts = [0]
 
-            if cached is not None:
-                tag = "CACHED" if not cached.get("latent_missing") else "CACHED (no z)"
-                print(f"  step={step:>2d} (eff_res={eff_res:.2f}mm) ... "
-                      f"{tag} dense={cached['dice']['mean']:.3f}  "
-                      f"obs={cached['dice_observed']['mean']:.3f}")
-                all_results.append(cached)
-                continue
+            for start in starts:
+                stag = "" if start == 0 else f" o{start}"
 
-            override = None
-            if label_obs_override_loader is not None:
-                override = label_obs_override_loader(casename, step)
-                if override is None:
-                    # Deployment-mode signal: skip this (case, step) row
-                    # because we couldn't build a usable input patch
-                    # (e.g. nnUNet missed the globe under high sparsity).
-                    print(f"  step={step:>2d} (eff_res={eff_res:.2f}mm) ... "
-                          f"SKIP (no input patch available)")
+                cached = _try_load_cached(
+                    output_dir, casename, step, case_axis,
+                    labels_dense[ci], spacings_dense[ci], net.num_classes,
+                    start=start,
+                ) if output_dir else None
+
+                if cached is not None:
+                    tag = "CACHED" if not cached.get("latent_missing") else "CACHED (no z)"
+                    print(f"  step={step:>2d}{stag} (eff_res={eff_res:.2f}mm) ... "
+                          f"{tag} dense={cached['dice']['mean']:.3f}  "
+                          f"obs={cached['dice_observed']['mean']:.3f}")
+                    all_results.append(cached)
                     continue
 
-            print(f"  step={step:>2d} (eff_res={eff_res:.2f}mm) ... ",
-                  end="", flush=True)
+                override = None
+                if label_obs_override_loader is not None:
+                    override = label_obs_override_loader(casename, step, start)
+                    if override is None:
+                        # Deployment-mode signal: skip this (case, step, start)
+                        # row because we couldn't build a usable input patch
+                        # (e.g. nnUNet missed the globe under high sparsity).
+                        print(f"  step={step:>2d}{stag} (eff_res={eff_res:.2f}mm) ... "
+                              f"SKIP (no input patch available)")
+                        continue
 
-            result = eval_case_at_resolution(
-                net=net, optimize_fn=optimize_fn,
-                label_dense=labels_dense[ci],
-                spacing_dense=spacings_dense[ci],
-                step_size=step, step_axis=case_axis,
-                params=params, device=device,
-                use_thick_slices=params.get("use_thick_slices", False),
-                label_obs_override=override,
-                mode=params.get("sweep_mode", "thin"),
-                modality=params.get("sweep_modality", "ct"),
-                num_classes=params.get("num_classes", 5),
-            )
-            result["casename"] = casename
+                print(f"  step={step:>2d}{stag} (eff_res={eff_res:.2f}mm) ... ",
+                      end="", flush=True)
 
-            dice = result["dice"]
-            dice_obs = result["dice_observed"]
-            bbox_pct = (result.get("bbox_points", 0) /
-                        max(result.get("full_points", 1), 1) * 100)
-            print(f"dense={dice['mean']:.3f}  obs={dice_obs['mean']:.3f}  "
-                  f"({result['n_observed_slices']}/{result['n_total_slices']} slices, "
-                  f"bbox={bbox_pct:.0f}%, {result['time_s']:.1f}s)")
+                result = eval_case_at_resolution(
+                    net=net, optimize_fn=optimize_fn,
+                    label_dense=labels_dense[ci],
+                    spacing_dense=spacings_dense[ci],
+                    step_size=step, step_axis=case_axis,
+                    params=params, device=device,
+                    use_thick_slices=params.get("use_thick_slices", False),
+                    label_obs_override=override,
+                    mode=params.get("sweep_mode", "thin"),
+                    modality=params.get("sweep_modality", "ct"),
+                    num_classes=params.get("num_classes", 5),
+                    start=start,
+                )
+                result["casename"] = casename
 
-            all_results.append(result)
+                dice = result["dice"]
+                dice_obs = result["dice_observed"]
+                bbox_pct = (result.get("bbox_points", 0) /
+                            max(result.get("full_points", 1), 1) * 100)
+                print(f"dense={dice['mean']:.3f}  obs={dice_obs['mean']:.3f}  "
+                      f"({result['n_observed_slices']}/{result['n_total_slices']} slices, "
+                      f"bbox={bbox_pct:.0f}%, {result['time_s']:.1f}s)")
+
+                all_results.append(result)
     return all_results
 
 
@@ -1002,7 +1036,8 @@ def save_sweep_csvs(all_results: List[Dict],
     output_dir = Path(output_dir)
 
     csv_path = output_dir / "test_results.csv"
-    fieldnames = (["casename", "step_size", "effective_resolution_mm",
+    fieldnames = (["casename", "step_size", "slice_start_id",
+                   "effective_resolution_mm",
                    "eff_res_bucket",
                    "dice_dense_mean", "dice_observed_mean"]
                   + [f"dice_dense_{cn}" for cn in class_names]
@@ -1016,6 +1051,7 @@ def save_sweep_csvs(all_results: List[Dict],
             row = {
                 "casename": r["casename"],
                 "step_size": r["step_size"],
+                "slice_start_id": int(r.get("slice_start_id", 0)),
                 "effective_resolution_mm": f"{r['effective_resolution_mm']:.3f}",
                 "eff_res_bucket": _bucket_label(bi, bucket_edges),
                 "dice_dense_mean": f"{r['dice']['mean']:.4f}",

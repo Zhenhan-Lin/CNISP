@@ -30,8 +30,19 @@ REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 export PYTHONPATH="$PROJECT_ROOT:$REPO_ROOT:${PYTHONPATH:-}"
 
 PATHS_YAML="$PROJECT_ROOT/configs/paths.yaml"
-# TRAIN_YAML="$PROJECT_ROOT/configs/train_default.yaml"
-TRAIN_YAML="$PROJECT_ROOT/configs/train_sty2.yaml"
+# Train config: $1 overrides (absolute path, or a name/relative path resolved
+# under configs/). Default is the v6 config train_sty2.yaml. Use
+# configs/train_v5_5.yaml or configs/train_v6_5.yaml for the intermediate runs.
+TRAIN_YAML="${1:-$PROJECT_ROOT/configs/train_sty2.yaml}"
+if [[ ! -f "$TRAIN_YAML" ]]; then
+    # Allow passing just a filename or a path relative to configs/.
+    if [[ -f "$PROJECT_ROOT/configs/$TRAIN_YAML" ]]; then
+        TRAIN_YAML="$PROJECT_ROOT/configs/$TRAIN_YAML"
+    else
+        echo "[run_02_train] train config not found: $TRAIN_YAML" >&2
+        exit 2
+    fi
+fi
 
 # GPU selection. Respect a GPU already chosen by a parent (e.g.
 # run_pipeline.sh --gpu exports CUDA_VISIBLE_DEVICES); fall back to GPU 1

@@ -141,21 +141,24 @@ def run(args) -> int:
     n_failed = 0
     issues: List[str] = []
 
-    work_items: List[Tuple[int, str, Path]] = []
+    work_items: List[Tuple[str, str, Path]] = []
     if not args.skip_step_01:
         work_items.extend(iter_step_01(work_dir, all_source_ids))
     work_items.extend(iter_sparse_inputs(work_dir, sparse_manifest, experiment))
 
     seen_step_dirs: set = set()
-    for step, sid, seg_path in work_items:
-        step_dir = aligned_dir / f"{prefix}{step:02d}"
-        if step not in seen_step_dirs:
+    for step_tag, sid, seg_path in work_items:
+        # step_tag is "XX" (canonical start=0) or "XX_oN" (start-offset
+        # fan-out); it names the patch dir directly so the CNISP read path
+        # (step_input_patch_path) finds it for the matching (step, start).
+        step_dir = aligned_dir / f"{prefix}{step_tag}"
+        if step_tag not in seen_step_dirs:
             step_dir.mkdir(parents=True, exist_ok=True)
-            seen_step_dirs.add(step)
+            seen_step_dirs.add(step_tag)
 
         if not seg_path.exists():
             n_missing_pred += 1
-            issues.append(f"step={step:02d} {sid}: pred missing at {seg_path}")
+            issues.append(f"step={step_tag} {sid}: pred missing at {seg_path}")
             continue
 
         # Skip when both eyes for this (sid, step) already on disk.
@@ -171,24 +174,24 @@ def run(args) -> int:
             results = align_single_case(
                 seg_path=str(seg_path),
                 source_id=sid,
-                source=f"dataset835_step_{step:02d}",
+                source=f"dataset835_step_{step_tag}",
                 patch_size_mm=patch_size_mm,
             )
         except Exception as e:  # noqa: BLE001
             n_failed += 1
-            issues.append(f"step={step:02d} {sid}: align_single_case raised "
+            issues.append(f"step={step_tag} {sid}: align_single_case raised "
                           f"{type(e).__name__}: {e}")
             continue
 
         if not results:
             n_failed += 1
-            issues.append(f"step={step:02d} {sid}: no eyes detected "
+            issues.append(f"step={step_tag} {sid}: no eyes detected "
                           f"(nnUNet may have dropped both globes at this "
                           f"sparsity)")
             continue
         if len(results) == 1:
             n_dropped_eye += 1
-            issues.append(f"step={step:02d} {sid}: only one eye detected")
+            issues.append(f"step={step_tag} {sid}: only one eye detected")
 
         for patch, pa, meta in results:
             out_path = step_dir / f"{meta.casename}.nii.gz"

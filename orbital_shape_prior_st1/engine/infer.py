@@ -40,6 +40,7 @@ from diagnostics.resolution_sweep import (
     print_sweep_summary,
     run_sweep,
     save_sweep_csvs,
+    step_dir_name,
 )
 from engine.train import create_model
 from engine.io_utils import load_latest_checkpoint
@@ -346,9 +347,16 @@ def create_obs_vs_recon_map(
 
 def _pick_primary_per_case(all_results: List[Dict],
                            primary_eff_res_mm: float) -> List[Dict]:
-    """For each case pick the result whose eff_res is closest to the target."""
+    """For each case pick the result whose eff_res is closest to the target.
+
+    Only start==0 results are eligible: the start-offset fan-out exists for
+    coarse acquisitions (eff_res>threshold) and the native-space primary pick
+    targets ~3 mm, so the canonical start is the deterministic representative.
+    """
     by_case = defaultdict(list)
     for r in all_results:
+        if int(r.get("slice_start_id", 0)) != 0:
+            continue
         by_case[r["casename"]].append(r)
     picked = []
     for _, results in by_case.items():
@@ -416,7 +424,7 @@ def _build_label_obs_loader(
     if layout.test_label_source == "real_pair":
         # Single real low-res input patch per case (step ignored): the real
         # anisotropy is fixed by the acquisition, not swept.
-        def _rp_loader(casename: str, step: int):
+        def _rp_loader(casename: str, step: int, start: int = 0):
             p = step_input_patch_path(layout, casename, step)
             if not p.exists():
                 return None
@@ -427,28 +435,28 @@ def _build_label_obs_loader(
     if layout.test_label_source != "nnunet_pred":
         return None
 
-    def _loader(casename: str, step: int):
+    def _loader(casename: str, step: int, start: int = 0):
         # step=1 is the dense baseline; under the deployment curve the
         # "step_01" sparse patch is just Dataset835's dense canonical-
         # aligned pred (same content as labels_dataset835/ for chk_*,
         # and a fresh canonical_align of the atlas dense pred). We
         # serve it via the same lookup so the latent-opt input grid
         # follows the input modality consistently across steps.
-        p = step_input_patch_path(layout, casename, step)
+        p = step_input_patch_path(layout, casename, step, start)
         if not p.exists():
             return None
         vol, spacing, offset = load_patch_as_label_tensor(p)
         if step > 1:
             # load_patch_as_label_tensor uses offset = spacing/2.  On the
             # through-plane (step) axis spacing = step * dense_spacing, so
-            # offset becomes step*dense_spacing/2.  But the ceiling curve
-            # (compute_sparse_affine with start=0) keeps offset =
-            # dense_spacing/2 — the position of sparse voxel 0's center
-            # coincides with dense voxel 0's center, not shifted by
-            # (step-1)*dense_spacing/2.  Correct by dividing the step-axis
-            # offset by step so both curves share the same coordinate frame.
+            # offset becomes step*dense_spacing/2.  The ceiling curve
+            # (compute_sparse_affine) puts sparse voxel 0's centre at dense
+            # voxel ``start``'s centre, i.e. dense_spacing*(start+0.5) =
+            # spacing*(2*start+1)/(2*step).  For start=0 this reduces to
+            # spacing/(2*step) (the original formula); for the high-eff_res
+            # start-offset fan-out it shifts by the started slice.
             step_axis = int(torch.argmax(spacing))
-            offset[step_axis] = spacing[step_axis] / (2.0 * step)
+            offset[step_axis] = spacing[step_axis] * (2 * start + 1) / (2.0 * step)
         return vol, spacing, offset
 
     return _loader
@@ -632,13 +640,35 @@ def infer_test_set(params):
         real_pair=(layout.test_label_source == "real_pair"),
     )
 
+    # ── Mask-saving whitelist ─────────────────────────────────────
+    # save_mask_source_ids restricts which sources get full .nii.gz masks
+    # written (per-step pred/obs_vs_recon/iso AND native-space). Empty/None
+    # -> save all (back-compat). Latents, *_sub_crop.json, metadata.json,
+    # sweep_results.pkl and test_results.csv are written for ALL sources so
+    # the eff_res aggregate (which reads canonical Dice from the pkl/csv) and
+    # cache bookkeeping stay complete regardless of which masks are on disk.
+    _save_ids_cfg = params.get("save_mask_source_ids") or None
+    save_id_set = set(_save_ids_cfg) if _save_ids_cfg else None
+
+    def _keep_mask(casename: str) -> bool:
+        if save_id_set is None:
+            return True
+        # casename ends with _OD / _OS (3 chars) -> source_id.
+        return casename[:-3] in save_id_set
+
+    if save_id_set is not None:
+        print(f"  [mask-whitelist] saving native/per-step masks for "
+              f"{len(save_id_set)} source(s) only; latents/json/pkl/csv "
+              f"kept for all.")
+
     # ── Export predictions per step subdirectory ──────────────────
     if params.get("export_predictions", True):
         step_metadata = defaultdict(list)
 
         for result in all_results:
             step = result["step_size"]
-            step_dir = output_dir / f"step_{step:02d}"
+            start = int(result.get("slice_start_id", 0))
+            step_dir = output_dir / step_dir_name(step, start)
             pred_dir = step_dir / "pred"
             lat_dir = step_dir / "latents"
             ovr_dir = step_dir / "obs_vs_recon"
@@ -651,11 +681,12 @@ def infer_test_set(params):
             casename = result["casename"]
 
             case_axis = int(result["step_axis"])
-            step_metadata[step].append({
+            step_metadata[(step, start)].append({
                 "casename": casename,
                 "spacing_xyz_mm": [float(s) for s in sp],
                 "effective_through_plane_mm": result["effective_resolution_mm"],
                 "step_size": step,
+                "slice_start_id": start,
                 "step_axis": case_axis,
                 "n_observed_slices": result["n_observed_slices"],
                 "n_total_slices": result["n_total_slices"],
@@ -663,11 +694,14 @@ def infer_test_set(params):
                 "dice_observed_mean": round(result["dice_observed"]["mean"], 4),
             })
 
-            # pred/  (always re-saved; tolerant of cache hits)
-            nib.save(
-                nib.Nifti1Image(result["pred_class_map"].astype(np.uint8), aff),
-                str(pred_dir / f"{casename}_pred.nii.gz"),
-            )
+            keep_mask = _keep_mask(casename)
+
+            # pred/  (re-saved when on the whitelist; tolerant of cache hits)
+            if keep_mask:
+                nib.save(
+                    nib.Nifti1Image(result["pred_class_map"].astype(np.uint8), aff),
+                    str(pred_dir / f"{casename}_pred.nii.gz"),
+                )
             # Sub-patch sidecar: tells the cache-reload path
             # (diagnostics.resolution_sweep._try_load_cached) where this
             # 64 mm prediction lives inside the 80 mm canonical disk
@@ -678,6 +712,7 @@ def infer_test_set(params):
             sub_crop_sidecar = {
                 "casename": casename,
                 "step_size": int(step),
+                "slice_start_id": start,
                 "step_axis": case_axis,
                 "sub_crop_lo_vox_dense": list(
                     map(int, result["sub_crop_lo_vox_dense"])
@@ -713,19 +748,23 @@ def infer_test_set(params):
                 np.save(str(lat_dir / f"{casename}.npy"),
                         np.asarray(result["latent"], dtype=np.float32))
 
-            # obs_vs_recon/
-            obs_vs_recon = create_obs_vs_recon_map(
-                result["pred_class_map"],
-                slice_step_size=step,
-                slice_start_id=0,
-                slice_axis=case_axis,
-            )
-            nib.save(
-                nib.Nifti1Image(obs_vs_recon.astype(np.uint8), aff),
-                str(ovr_dir / f"{casename}_obs_vs_recon.nii.gz"),
-            )
+            # obs_vs_recon/  (whitelist only)
+            if keep_mask:
+                obs_vs_recon = create_obs_vs_recon_map(
+                    result["pred_class_map"],
+                    slice_step_size=step,
+                    slice_start_id=start,
+                    slice_axis=case_axis,
+                )
+                nib.save(
+                    nib.Nifti1Image(obs_vs_recon.astype(np.uint8), aff),
+                    str(ovr_dir / f"{casename}_obs_vs_recon.nii.gz"),
+                )
 
-            # iso_space/  (skip if anisotropy is negligible OR latent unavailable)
+            # iso_space/  (whitelist only; skip if anisotropy is negligible
+            # OR latent unavailable)
+            if not keep_mask:
+                continue
             spacing_t = torch.from_numpy(sp)
             iso_sp = spacing_t.min().repeat(3)
             if torch.allclose(iso_sp, spacing_t, atol=0.01):
@@ -750,8 +789,8 @@ def infer_test_set(params):
                 str(iso_dir / f"{casename}_pred_iso.nii.gz"),
             )
 
-        for step, cases_meta in step_metadata.items():
-            step_dir = output_dir / f"step_{step:02d}"
+        for (step, start), cases_meta in step_metadata.items():
+            step_dir = output_dir / step_dir_name(step, start)
             meta_path = step_dir / "metadata.json"
             # step_axis may differ per case under slice_step_axis: auto;
             # surface the full mapping here as well as the top-level value
@@ -760,6 +799,7 @@ def infer_test_set(params):
             with open(meta_path, "w") as f:
                 json.dump({
                     "step_size": step,
+                    "slice_start_id": start,
                     "step_axis": (unique_axes[0]
                                   if len(unique_axes) == 1 else None),
                     "step_axes_unique": unique_axes,
@@ -797,6 +837,7 @@ def infer_test_set(params):
         native_paths = map_results_to_native(
             primary_results, layout.metadata_dir, native_dir,
             meta_path_for_casename=meta_path_for,
+            save_source_ids=save_id_set,
         )
         print(f"Native-space predictions: {native_dir} ({len(native_paths)} volumes)")
 
@@ -806,19 +847,26 @@ def infer_test_set(params):
     # loop so a single run produces every artifact the cross-model
     # comparison (see nnunet/compare_native.py) consumes.
     if all_results and params.get("export_predictions", True):
-        by_step: Dict[int, List[dict]] = defaultdict(list)
+        # Group by (step, start) so the high-eff_res start fan-out lands in
+        # parallel native_space_step_XX[_oN]/ dirs. start=0 keeps the legacy
+        # native_space_step_XX/ name + step-keyed manifest entry.
+        by_step: Dict[Tuple[int, int], List[dict]] = defaultdict(list)
         for r in all_results:
-            by_step[int(r["step_size"])].append(r)
+            by_step[(int(r["step_size"]),
+                     int(r.get("slice_start_id", 0)))].append(r)
         sweep_manifest: Dict[str, Dict[str, str]] = {}
         print(f"\nMapping all sweep steps to native space "
-              f"({len(by_step)} step values):")
-        for step in sorted(by_step):
-            step_native_dir = output_dir / f"native_space_step_{step:02d}"
-            suffix = f"_cnisp_step{step:02d}"
+              f"({len(by_step)} (step,start) values):")
+        for (step, start) in sorted(by_step):
+            _sd = step_dir_name(step, start)
+            step_native_dir = output_dir / f"native_space_{_sd}"
+            _ostr = "" if start == 0 else f"_o{start}"
+            suffix = f"_cnisp_step{step:02d}{_ostr}"
             step_paths = map_results_to_native(
-                by_step[step], layout.metadata_dir, step_native_dir,
+                by_step[(step, start)], layout.metadata_dir, step_native_dir,
                 suffix=suffix,
                 meta_path_for_casename=meta_path_for,
+                save_source_ids=save_id_set,
             )
 
             # ``by_source_id`` stores **basename only** -- consumers
@@ -828,7 +876,7 @@ def infer_test_set(params):
             # the manifest valid, no path rewrite needed.
             per_step_manifest: Dict[str, str] = {}
             seen = set()
-            for r in by_step[step]:
+            for r in by_step[(step, start)]:
                 mp = meta_path_for(r["casename"])
                 if not mp.exists():
                     continue
@@ -836,6 +884,11 @@ def infer_test_set(params):
                     m = json.load(f)
                 sid = str(m["source_id"])
                 if sid in seen:
+                    continue
+                # Only list sources whose native mask was actually written
+                # (the whitelist), so downstream readers don't point at a
+                # missing file.
+                if save_id_set is not None and sid not in save_id_set:
                     continue
                 seen.add(sid)
                 stem = (Path(m["original_nifti_path"]).name
@@ -848,12 +901,15 @@ def infer_test_set(params):
                     "run_tag": layout.run_tag,
                     "test_label_source": layout.test_label_source,
                     "step_size": step,
+                    "slice_start_id": start,
                     "suffix": suffix,
                     "n_sources": len(per_step_manifest),
                     "by_source_id": per_step_manifest,
                 }, f, indent=2)
-            sweep_manifest[str(step)] = per_step_manifest
-            print(f"  step_{step:02d}: {step_native_dir} "
+            # Manifest key: bare step for start=0 (back-compat), step_oN else.
+            _mkey = str(step) if start == 0 else f"{step}_o{start}"
+            sweep_manifest[_mkey] = per_step_manifest
+            print(f"  {_sd}: {step_native_dir} "
                   f"({len(step_paths)} sources)")
 
         with open(output_dir / "native_sweep_manifest.json", "w") as f:
@@ -862,6 +918,11 @@ def infer_test_set(params):
                 "run_tag": layout.run_tag,
                 "test_label_source": layout.test_label_source,
                 "primary_eff_res_mm": primary_eff_res,
+                # Whitelist of source_ids whose native masks were saved
+                # (null = all). The backfill (build_cnisp_native_sweep.py)
+                # reads this so it applies the same filter on legacy runs.
+                "save_mask_source_ids": (sorted(save_id_set)
+                                         if save_id_set is not None else None),
                 # Recorded so downstream (nnUNet sparsify, native mapping)
                 # can mirror per-case axes; sweep_results.pkl rows hold
                 # the authoritative per-(case, step) value.

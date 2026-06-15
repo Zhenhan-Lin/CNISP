@@ -101,9 +101,23 @@ from orbital_shape_prior_st1.data_prep.sparsify import sparsen_volume  # noqa: E
 from simulation.degradation import degrade_thick as _degrade_thick_sim  # noqa: E402
 from simulation.slice_profile import get_kernel as _get_kernel  # noqa: E402
 from simulation.affine_ops import (  # noqa: E402
-    assert_start_zero as _assert_start_zero,
     assert_odd_kernel as _assert_odd_kernel,
 )
+
+
+def _starts_for(eff_res: float, step: int,
+                start_offsets: List[int], min_mm: float) -> List[int]:
+    """Start list for one (source, step), mirroring resolution_sweep.run_sweep.
+
+    High eff_res -> fan out over the configured starts (only those that are a
+    distinct phase, i.e. < step); otherwise the single canonical start 0.
+    """
+    if eff_res > min_mm and step > 1:
+        starts = [s for s in start_offsets if 0 <= s < step]
+        if 0 not in starts:
+            starts = [0] + starts
+        return starts
+    return [0]
 
 
 def _build_sweep_set(
@@ -191,6 +205,7 @@ def _sparsify_one_ct(
     step_size: int,
     mode: str = "thin",
     modality: str = "ct",
+    start: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Apply degradation to a CT NIfTI; return (array, affine).
 
@@ -198,11 +213,16 @@ def _sparsify_one_ct(
     ----------
     mode : "thin" (point-sample, default) or "thick" (profile-conv)
     modality : "ct" or "mri" (determines kernel for thick mode)
+    start : index of the first kept slice along ``step_axis`` (start-offset
+        fan-out). ``start==0`` is the canonical sweep geometry; ``start>0``
+        keeps slices ``start, start+step, ...`` so sparse voxel ``i`` maps to
+        native voxel ``start + i*step``.
 
-    The affine's ``step_axis`` column is scaled by ``step_size``; origin
-    is unchanged because start=0 keeps voxel 0 at the same physical
-    location — valid for both thin and thick (centered conv preserves
-    position).
+    The affine's ``step_axis`` column is scaled by ``step_size`` and, for
+    ``start>0``, the world origin is advanced by ``start`` original voxels
+    along that column FIRST (so sparse voxel 0 sits at native voxel
+    ``start``). Valid for both thin and thick (odd/centered conv keeps each
+    kept slab centred on its kept slice).
     """
     img = nib.load(str(ct_path))
     arr = np.asarray(img.dataobj)
@@ -213,17 +233,21 @@ def _sparsify_one_ct(
     sp_t = torch.from_numpy(spacing)
     off_t = sp_t / 2.0
 
-    # Guard the position-exactness invariant: deployment sparse inputs MUST
-    # use start=0 so sparse voxel i maps to native voxel i*step exactly.
-    _start = 0
-    _assert_start_zero(_start)
+    # Start must be a distinct phase within the step period; the world-aware
+    # native resample (native_resample.resample_plan_to_native) reads the
+    # shifted affine below, so any 0 <= start < step is position-exact.
+    if not (0 <= int(start) < int(step_size)):
+        raise ValueError(
+            f"start={start} out of range for step={step_size} "
+            f"(require 0 <= start < step)."
+        )
 
     if mode == "thin":
         sparse_vol, _new_sp, _new_off = sparsen_volume(
             vol_t, sp_t, off_t,
             axis=step_axis,
             slice_step_size=step_size,
-            slice_start_id=_start,
+            slice_start_id=int(start),
             use_thick_slices=False,
         )
     elif mode == "thick":
@@ -233,7 +257,7 @@ def _sparsify_one_ct(
             vol_t.float(), sp_t, off_t,
             axis=step_axis,
             step=step_size,
-            start=_start,
+            start=int(start),
             kernel=kernel,
             is_label=False,
         )
@@ -243,6 +267,12 @@ def _sparsify_one_ct(
     sparse_arr = sparse_vol.numpy()
 
     new_affine = affine.copy()
+    # Advance origin by `start` ORIGINAL voxels along the step axis BEFORE
+    # scaling the column, so sparse voxel 0 maps to native voxel `start`.
+    if int(start) != 0:
+        new_affine[:3, 3] = (
+            new_affine[:3, 3] + int(start) * new_affine[:3, step_axis]
+        )
     new_affine[:3, step_axis] = new_affine[:3, step_axis] * step_size
 
     return sparse_arr, new_affine
@@ -302,6 +332,17 @@ def run(args) -> int:
     drift_tol = float(cfg.get("sparse_eff_res_max_drift", 0.30))
     canonical_axis = int(cfg.get("cnisp_slice_step_axis", 2))
     align_min = float(cfg.get("sparse_axis_alignment_min", 0.95))
+    # High-eff_res start-offset fan-out. MUST match the CNISP test yaml's
+    # adaptive_step_sweep (start_offsets / start_offset_eff_res_min_mm) so the
+    # nnunet_pred read path (engine/infer.py) finds an _oN input patch for
+    # every start run_sweep evaluates. Defaults mirror configs/test_default.yaml.
+    start_offsets = [int(s) for s in cfg.get("start_offsets", [0, 1, 2])]
+    start_off_min_mm = float(cfg.get("start_offset_eff_res_min_mm", 3.5))
+    # The start-offset fan-out only benefits the TEST inference sweep. The
+    # train-split nnUNet-obs bank (engine/dataset.py) reads start=0 patches
+    # only, so don't waste inference/disk producing _oN train patches.
+    if args.split == "train":
+        start_offsets = [0]
 
     source_to_path = work_dir / "source_to_path.json"
     if not source_to_path.exists():
@@ -411,10 +452,6 @@ def run(args) -> int:
         base_spacing_axis = float(zooms[step_axis])
 
         for step in steps:
-            step_dir = sparse_root / f"sparse_step_{step:02d}"
-            step_dir.mkdir(parents=True, exist_ok=True)
-            dst = step_dir / f"{sid}_0000.nii.gz"
-
             cnisp_eff_res = eff_res_idx.get((sid, step))
             expected_eff_res = base_spacing_axis * step
             if cnisp_eff_res is None:
@@ -451,46 +488,57 @@ def run(args) -> int:
                 )
                 n_drift_warn += 1
 
-            if dst.exists() and not args.force:
-                n_skipped_existing += 1
-            else:
-                sparse_arr, new_affine = _sparsify_one_ct(
-                    ct_path=ct_path,
-                    step_axis=step_axis,
-                    step_size=step,
-                    mode=args.mode,
-                    modality=args.modality,
-                )
-                # Post-write sanity: the affine column we scaled by
-                # step_size must yield spacing == base_spacing*step.
-                # Independent of CNISP's eff_res.
-                sanity_eff_res = _eff_res_from_affine(new_affine, step_axis)
-                rel2 = abs(sanity_eff_res - expected_eff_res) / expected_eff_res
-                assert rel2 <= 1e-3, (
-                    f"{sid} step={step}: post-write affine spacing "
-                    f"{sanity_eff_res:.3f} mm disagrees with "
-                    f"base_spacing*step={expected_eff_res:.3f} mm "
-                    f"(rel {rel2:.2%}). Bug in affine scaling."
-                )
-                out_img = nib.Nifti1Image(sparse_arr, new_affine)
-                out_img.set_qform(new_affine)
-                out_img.set_sform(new_affine)
-                nib.save(out_img, str(dst))
-                n_written += 1
+            # High-eff_res start fan-out: one sparse CT per start (start=0
+            # keeps the legacy sparse_step_XX/ dir + manifest key).
+            for start in _starts_for(cnisp_eff_res, step,
+                                     start_offsets, start_off_min_mm):
+                step_tag = (f"{step:02d}" if start == 0
+                            else f"{step:02d}_o{start}")
+                step_dir = sparse_root / f"sparse_step_{step_tag}"
+                step_dir.mkdir(parents=True, exist_ok=True)
+                dst = step_dir / f"{sid}_0000.nii.gz"
 
-            out_manifest["by_step"][f"{step:02d}"][sid] = {
-                "input": str(dst),
-                # eff_res_mm reflects CNISP's row so summary buckets line
-                # up across methods; actual_eff_res_mm preserves the raw
-                # CT's true post-sparsification spacing for traceability.
-                "eff_res_mm": round(cnisp_eff_res, 4),
-                "actual_eff_res_mm": round(expected_eff_res, 4),
-                "step_axis": step_axis,
-                "mode": args.mode,
-                # start is always 0 (position-exactness invariant); recorded
-                # so predict_sparse_iso.py can assert it before native remap.
-                "start": 0,
-            }
+                if dst.exists() and not args.force:
+                    n_skipped_existing += 1
+                else:
+                    sparse_arr, new_affine = _sparsify_one_ct(
+                        ct_path=ct_path,
+                        step_axis=step_axis,
+                        step_size=step,
+                        mode=args.mode,
+                        modality=args.modality,
+                        start=start,
+                    )
+                    # Post-write sanity: the affine column we scaled by
+                    # step_size must yield spacing == base_spacing*step.
+                    # Independent of CNISP's eff_res and of start.
+                    sanity_eff_res = _eff_res_from_affine(new_affine, step_axis)
+                    rel2 = abs(sanity_eff_res - expected_eff_res) / expected_eff_res
+                    assert rel2 <= 1e-3, (
+                        f"{sid} step={step} start={start}: post-write affine "
+                        f"spacing {sanity_eff_res:.3f} mm disagrees with "
+                        f"base_spacing*step={expected_eff_res:.3f} mm "
+                        f"(rel {rel2:.2%}). Bug in affine scaling."
+                    )
+                    out_img = nib.Nifti1Image(sparse_arr, new_affine)
+                    out_img.set_qform(new_affine)
+                    out_img.set_sform(new_affine)
+                    nib.save(out_img, str(dst))
+                    n_written += 1
+
+                out_manifest["by_step"][step_tag][sid] = {
+                    "input": str(dst),
+                    # eff_res_mm reflects CNISP's row so summary buckets line
+                    # up across methods; actual_eff_res_mm preserves the raw
+                    # CT's true post-sparsification spacing for traceability.
+                    "eff_res_mm": round(cnisp_eff_res, 4),
+                    "actual_eff_res_mm": round(expected_eff_res, 4),
+                    "step_axis": step_axis,
+                    "mode": args.mode,
+                    # Start-offset of the first kept slice; predict_sparse_iso.py
+                    # reads it (and the shifted affine) for the native remap.
+                    "start": int(start),
+                }
 
     if warnings:
         print(
