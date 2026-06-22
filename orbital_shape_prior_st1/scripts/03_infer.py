@@ -73,6 +73,14 @@ def main():
               "(sweep_mode) so the applied degradation matches the folder. "
               "Defaults: 'real' for real_pair, else sweep_mode (thin)."),
     )
+    parser.add_argument(
+        "--test-casefile", default=None,
+        help=("Override test_casefile from the test yaml (a filename under "
+              "casefiles_dir). Use a subset list to infer/compare only a few "
+              "cases, e.g. test_cases_v7small.txt for ~20 images / 40 eyes. "
+              "Downstream compare/viz only see the sources this run produced, "
+              "so the head-to-head plots are restricted to the same subset."),
+    )
     args = parser.parse_args()
 
     # Merge configs: paths → train (architecture) → test (overrides runtime settings)
@@ -91,6 +99,8 @@ def main():
         params["run_tag"] = args.run_tag
     if args.experiment is not None:
         params["experiment"] = args.experiment
+    if args.test_casefile is not None:
+        params["test_casefile"] = args.test_casefile
 
     # infer_test_set writes inference_results.pkl + sweep_results.pkl itself
     infer_test_set(params)

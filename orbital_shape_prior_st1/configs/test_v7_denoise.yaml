@@ -42,17 +42,27 @@ latent_num_iters: 3000
 latent_lr: 1.0e-2
 max_num_const_train_dsc: 10
 
-# ── Soft latent-fit (Problem 5: retain nnUNet boundary uncertainty) ──
-# Hard integer nnUNet mask + label smoothing (the nnUNet softmax itself is not
-# in the aligned-patch pipeline). Soft-fit ON for the noisy thick deployment.
-latent_fit_soft: true
+# ── Latent-fit target hardness (test-time only; training loss untouched) ──
+# latent_fit_soft:false -> HARD 0/1 target (fit=hard). Diagnosis showed that
+# label smoothing (ls=0.10) decoupled the latent objective from true shape
+# quality: even on the finest, in-distribution step=1 observation, dice fell
+# 0.739->0.539 while |z|^2 grew 6->71 as the optimiser chased the softened
+# ~0.05/0.95 target away from the correct-shape latent region. Hard target
+# restores the original CNISP behaviour. (label_smoothing below is inert while
+# soft is false; kept for easy A/B.)
+latent_fit_soft: false
 latent_fit_label_smoothing: 0.1
 
 # ── Output ────────────────────────────────────────────────────────
 export_predictions: true
 evaluate_predictions: true
 
-# Reconstruction-mask saving whitelist (qualitative inspection set).
+# Reconstruction-mask saving whitelist (qualitative inspection set). Sources
+# not listed here, or not present in a given run (e.g. a --test-casefile
+# subset), are simply skipped -- never an error. NOTE: compare_native.py can
+# only pair sources whose native mask is on disk, so the head-to-head plots
+# cover the INTERSECTION of this whitelist and the run's casefile; add the
+# source_ids you want compared if they're not already listed.
 save_mask_source_ids:
   - atlas_orbit0001_ubMask_al2_fill
   - atlas_orbit0002_ubMask_al2_fill
