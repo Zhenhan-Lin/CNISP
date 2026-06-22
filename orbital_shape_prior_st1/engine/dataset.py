@@ -449,7 +449,9 @@ class OrbitalImplicitDataset(data.Dataset):
                  degradation_bank=None,
                  items_per_epoch=None,
                  point_sample_fraction=None,
-                 train_supervision="observation"):
+                 train_supervision="observation",
+                 boundary_weighted_sampling=False,
+                 boundary_weight=4.0):
         super().__init__()
         if verbose:
             print(f"Loading {len(casenames)} orbital patches "
@@ -472,8 +474,23 @@ class OrbitalImplicitDataset(data.Dataset):
         #       contains plausible shapes — at inference a noisy nnUNet
         #       observation then gets pulled back toward a real shape
         #       instead of being reproduced faithfully.
+        #   "dual" (denoise framework): each TRAIN item returns BOTH the
+        #       co-framed DENSE GT samples (``labels_dense_sub`` -> the clean
+        #       target for alpha_GT) AND the SPARSE nnUNet-pred samples
+        #       (``labels_sparse`` -> the noisy target for alpha_nn). Requires
+        #       the item to be an nnUNet-obs bank item (``bank_obs_source ==
+        #       'nnunet'``); both views share the same 64 mm sub-patch frame
+        #       (see ``inner_crop_64mm``). VAL under "dual" falls back to the
+        #       dense GT target with the single (alpha_GT) latent, exactly
+        #       like "dense".
         # INF always fits the sparse observation regardless of this flag.
         self.train_supervision = str(train_supervision)
+        # Problem 6 (boundary-weighted sampling, default OFF): when enabled,
+        # the GT-coord draws used by the dual recon/denoise terms upweight the
+        # nnUNet-vs-GT disagreement region (host-vs-GT working ROI) so the
+        # Delta net sees more of the voxels that actually need correcting.
+        self.boundary_weighted_sampling = bool(boundary_weighted_sampling)
+        self.boundary_weight = float(boundary_weight)
         self._epoch_item_indices = None  # set per epoch if items_per_epoch
 
         # ── Load dense volumes (kept for diagnostics + INF) ───────
@@ -1083,16 +1100,148 @@ class OrbitalImplicitDataset(data.Dataset):
         EpochSubsetSampler in create_data_loader."""
         pass
 
+    def _resolve_num_pts(self) -> int:
+        """Fixed per-item point count (so a batch collates to one shape)."""
+        if self.point_sample_fraction is not None:
+            return max(1, int(self.num_points * self.point_sample_fraction))
+        return self.num_points
+
+    @staticmethod
+    def _sample_voxel_points(label, num_pts, weight_flat=None):
+        """Draw ``num_pts`` voxels from ``label`` (uniform, or weighted).
+
+        Returns ``(voxel_ids[num_pts,3] long, label_values[num_pts])``.
+        ``weight_flat`` (optional) is a flat [prod(shape)] non-negative weight
+        used for ``torch.multinomial`` sampling (Problem 6 boundary weighting).
+        """
+        if weight_flat is None:
+            voxel_ids = torch.empty(num_pts, 3, dtype=torch.int64)
+            for d in range(3):
+                voxel_ids[:, d] = torch.randint(0, label.shape[d], [num_pts])
+        else:
+            flat_idx = torch.multinomial(weight_flat, num_pts, replacement=True)
+            d0, d1, d2 = int(label.shape[0]), int(label.shape[1]), int(label.shape[2])
+            # Manual C-order unravel (version-safe; torch.unravel_index is new).
+            i0 = flat_idx // (d1 * d2)
+            rem = flat_idx % (d1 * d2)
+            i1 = rem // d2
+            i2 = rem % d2
+            voxel_ids = torch.stack([i0, i1, i2], dim=-1).to(torch.int64)
+        label_values = label[voxel_ids[:, 0], voxel_ids[:, 1], voxel_ids[:, 2]]
+        return voxel_ids, label_values
+
+    def _nn_disagreement_weight_flat(self, item) -> torch.Tensor:
+        """Flat sampling weights over the DENSE sub-patch grid that upweight
+        voxels where the nnUNet sparse pred disagrees with the dense GT.
+
+        Both sub-patches share the dense lower-corner origin (see
+        ``inner_crop_64mm``), so the nnUNet view is mapped onto the dense grid
+        by nearest-neighbour physical lookup before comparing.
+        """
+        gt = self.labels_dense_sub[item]
+        sp_d = self.spacings_dense_sub[item].to(torch.float32)
+        of_d = self.offsets_dense_sub[item].to(torch.float32)
+        nn = self.labels_sparse[item]
+        sp_s = self.spacings_sparse[item].to(torch.float32)
+        of_s = self.offsets_sparse[item].to(torch.float32)
+
+        idx = [torch.arange(gt.shape[d]) for d in range(3)]
+        grid = torch.stack(torch.meshgrid(idx, indexing="ij"), dim=-1).to(torch.float32)
+        coords = grid * sp_d + of_d                       # dense-grid mm
+        s_vox = ((coords - of_s) / sp_s).round().long()   # -> sparse voxel idx
+        for d in range(3):
+            s_vox[..., d] = s_vox[..., d].clamp(0, nn.shape[d] - 1)
+        nn_on_dense = nn[s_vox[..., 0], s_vox[..., 1], s_vox[..., 2]]
+        disagree = (nn_on_dense != gt).to(torch.float32)
+        weight = 1.0 + (self.boundary_weight - 1.0) * disagree
+        return weight.reshape(-1).clamp(min=1e-6)
+
+    def _make_sample(self, label, spacing, offset, num_pts, weight_flat=None):
+        """Sample points and return (coords[num_pts,1,1,3], labels[num_pts,1,1])."""
+        voxel_ids, label_values = self._sample_voxel_points(
+            label, num_pts, weight_flat
+        )
+        voxel_ids = voxel_ids.unsqueeze(1).unsqueeze(1)
+        label_values = label_values.unsqueeze(1).unsqueeze(1)
+        coords = voxel_ids.float() * spacing + offset
+        return coords, label_values
+
+    def _getitem_dual(self, item):
+        """Dual-latent item: GT (dense sub) + nnUNet (sparse) samples.
+
+        Asserts the item is an nnUNet-obs bank item so both ``labels_dense_sub``
+        (co-framed dense GT) and ``labels_sparse`` (sparse nnUNet pred) exist in
+        the shared 64 mm sub-patch frame. The GT pair is also returned under the
+        legacy keys "coords"/"labels" so validate()/metrics stay unchanged.
+        """
+        obs_src = getattr(self, "bank_obs_source", None)
+        if obs_src is None or obs_src[item] != "nnunet":
+            raise RuntimeError(
+                "train_supervision='dual' requires nnUNet-obs bank items "
+                "(obs_sources must be [nnunet]); item "
+                f"{item} ({self.casenames[item]}) has obs_source="
+                f"{None if obs_src is None else obs_src[item]!r}. "
+                "Fix the degradation_bank.obs_sources config."
+            )
+        if self.num_points <= 0:
+            raise RuntimeError("dual supervision requires num_points > 0")
+
+        num_pts = self._resolve_num_pts()
+
+        gt_label = self.labels_dense_sub[item]
+        gt_spacing = self.spacings_dense_sub[item]
+        gt_offset = self.offsets_dense_sub[item]
+        nn_label = self.labels_sparse[item]
+        nn_spacing = self.spacings_sparse[item]
+        nn_offset = self.offsets_sparse[item]
+
+        weight_flat = (
+            self._nn_disagreement_weight_flat(item)
+            if self.boundary_weighted_sampling else None
+        )
+        coords_gt, labels_gt = self._make_sample(
+            gt_label, gt_spacing, gt_offset, num_pts, weight_flat
+        )
+        coords_nn, labels_nn = self._make_sample(
+            nn_label, nn_spacing, nn_offset, num_pts, None
+        )
+
+        return {
+            # GT pair, also exposed under the legacy keys for validate()/metric.
+            "coords": coords_gt, "labels": labels_gt,
+            "coords_gt": coords_gt, "labels_gt": labels_gt,
+            "coords_nn": coords_nn, "labels_nn": labels_nn,
+            "spacings": gt_spacing, "offsets": gt_offset,
+            "spacings_nn": nn_spacing, "offsets_nn": nn_offset,
+            "casenames": self.casenames[item],
+            "caseids": self.caseids[item],
+            "scan_ids": self.scan_ids[item],
+            "observed_centroid_mm": self.observed_centroids_mm[item],
+            "sub_crop_lo_vox_dense": self.sub_crop_lo_vox_dense[item],
+            "sub_crop_shape_vox_dense": self.sub_crop_shape_vox_dense[item],
+        }
+
     def __getitem__(self, item):
+        # ── Dual-latent supervision (denoise framework) ───────────────
+        # TRAIN-only: return BOTH the dense GT samples (clean target for
+        # alpha_GT, also exposed as the legacy "coords"/"labels" so validate()
+        # and metrics keep working) AND the sparse nnUNet-pred samples (noisy
+        # target for alpha_nn). Requires an nnUNet-obs bank item so both views
+        # exist and share the 64 mm sub-patch frame.
+        if (self.train_supervision == "dual"
+                and self.phase_type == PhaseType.TRAIN):
+            return self._getitem_dual(item)
+
         # Supervision-target selection. INF always fits the sparse
         # observation (the deployment input); TRAIN/VAL can instead fit the
-        # dense sub-patch GT when train_supervision == "dense" (tight-prior
-        # objective). The dense sub-patch shares the same 64 mm sub-patch
+        # dense sub-patch GT when train_supervision in {"dense","dual"}
+        # (tight-prior objective; "dual" VAL collapses to the dense target).
+        # The dense sub-patch shares the same 64 mm sub-patch
         # origin as the sparse view (see inner_crop_64mm), so the latent
         # frame is identical either way — only the labels/coords sampled
         # differ.
         use_dense_target = (
-            self.train_supervision == "dense"
+            self.train_supervision in ("dense", "dual")
             and self.phase_type in (PhaseType.TRAIN, PhaseType.VAL)
         )
         if use_dense_target:
@@ -1305,6 +1454,10 @@ def create_data_loader(params, phase_type, verbose=True):
         items_per_epoch=params.get("items_per_epoch") if is_training else None,
         point_sample_fraction=params.get("point_sample_fraction") if is_training else None,
         train_supervision=params.get("train_supervision", "observation"),
+        boundary_weighted_sampling=(
+            (params.get("denoise") or {}).get("boundary_weighted_sampling", False)
+        ),
+        boundary_weight=(params.get("denoise") or {}).get("boundary_weight", 4.0),
     )
 
     # ── Sampler / shuffle ─────────────────────────────────────────

@@ -22,6 +22,7 @@ Two test_label_source modes share this code path (see test_default.yaml):
                two curves never overwrite each other's predictions.
 """
 
+import functools
 import json
 import pickle
 import time
@@ -146,9 +147,22 @@ def load_model_checkpoint(model_dir: Path, which: str = "best", verbose: bool = 
 
 def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
                     lat_reg_lambda, num_iters, max_num_const_dsc,
-                    device, verbose=True, soft=False, label_smoothing=0.1):
+                    device, verbose=True, soft=False, label_smoothing=0.1,
+                    delta=None):
     """
     Test-time latent optimization for one case.
+
+    Denoise framework (``delta`` not None)
+    --------------------------------------
+    The latent ``alpha_nn_test`` is fit to the nnUNet observation exactly as
+    before (net + Delta both frozen; only the latent is a Parameter). AFTER
+    convergence the trained Delta is applied once:
+
+        alpha_hat = alpha_nn_test + Delta(alpha_nn_test)
+
+    and ``alpha_hat`` is returned, so every downstream consumer (dense decode,
+    iso, native map, the saved latents/<case>.npy cache) reproduces the
+    corrected prediction without needing Delta again at replay time.
 
     Single forward+backward per iteration (no chunking).
     Memory budget assumption: the caller has filtered patch sizes so that
@@ -235,7 +249,19 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
                 break
             prev_dsc = dsc
 
-    return latent.detach()
+    latent_final = latent.detach()
+    if delta is not None:
+        # Apply the frozen Delta correction once: navigate the noisy test-fit
+        # latent toward the GT-decoding latent before dense reconstruction.
+        delta.eval()
+        with torch.no_grad():
+            resid = delta(latent_final)
+            latent_final = latent_final + resid
+        if verbose:
+            print(f"  delta applied: |alpha_nn|={torch.norm(latent.detach()).item():.3f} "
+                  f"|delta|={torch.norm(resid).item():.3f} "
+                  f"|alpha_hat|={torch.norm(latent_final).item():.3f}")
+    return latent_final
 
 
 # ── Average shape ────────────────────────────────────────────────
@@ -570,6 +596,38 @@ def infer_test_set(params):
     net.load_state_dict(model_state["net"], strict=True)
     net = net.to(device).eval()
 
+    # ── Denoise framework: load + freeze Delta (gated by config) ──────
+    # Problem 4: a config that asks for Delta but a checkpoint without it is a
+    # silent-collapse hazard -- fail loudly instead of running plain CNISP.
+    den = params.get("denoise") or {}
+    use_delta = bool(den.get("enabled", False)) and bool(den.get("use_delta", True))
+    delta = None
+    if use_delta:
+        delta_state = model_state.get("delta", None)
+        if delta_state is None:
+            raise RuntimeError(
+                "denoise.use_delta=true but the loaded checkpoint contains no "
+                "'delta' weights. Re-train with denoise.use_delta or set "
+                "denoise.use_delta:false / denoise.enabled:false to run plain "
+                "CNISP."
+            )
+        from models.denoise import LatentDenoiser  # local import; avoid cycles
+        delta = LatentDenoiser(
+            latent_dim=params["latent_dim"],
+            hidden_dim=den.get("delta_hidden_dim") or None,
+            num_hidden_layers=int(den.get("delta_num_hidden_layers", 2)),
+        )
+        delta.load_state_dict(delta_state)
+        delta = delta.to(device).eval()
+        for p in delta.parameters():
+            p.requires_grad_(False)
+        print(f"  [denoise] Delta loaded + frozen "
+              f"(hidden={den.get('delta_hidden_dim') or params['latent_dim']}, "
+              f"layers={int(den.get('delta_num_hidden_layers', 2))})")
+
+    # Bind Delta into the latent optimiser used by the sweep (no-op when None).
+    optimize_fn = functools.partial(optimize_latent, delta=delta)
+
     # ── Load test data (dense Dice targets) ───────────────────────
     casefiles_dir = Path(params["casefiles_dir"])
     casenames_all = load_casenames(casefiles_dir / params["test_casefile"])
@@ -707,7 +765,7 @@ def infer_test_set(params):
     # ── Run sweep ─────────────────────────────────────────────────
     all_results = run_sweep(
         net=net,
-        optimize_fn=optimize_latent,
+        optimize_fn=optimize_fn,
         casenames=casenames,
         labels_dense=labels_dense,
         spacings_dense=spacings_dense,

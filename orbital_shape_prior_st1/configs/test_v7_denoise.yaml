@@ -1,0 +1,72 @@
+# --- Test config (v7 — latent denoise, THICK deployment) ---
+# Test-time latent optimization fits a fresh alpha_nn_test to the THICK nnUNet
+# prediction, then applies the trained (frozen) Delta:
+#     alpha_hat = alpha_nn_test + Delta(alpha_nn_test)
+# and decodes alpha_hat. The denoise:* block is inherited from the train config
+# (train_v7_denoise.yaml) at merge time, so use_delta is honoured here.
+#
+# v7 first pass: start=0 ONLY (no start>0 fan-out) to speed up inference.
+
+# Deployment-curve defaults (also set on the CLI by run_03_test.sh / pipeline).
+test_label_source: nnunet_pred
+run_tag: nnunet_pred
+
+realpair_reg_kind: rigid
+
+test_casefile: test_cases.txt
+
+# ── Adaptive resolution sweep ─────────────────────────────────────
+adaptive_step_sweep:
+  target_eff_res_increment_mm: 1.0
+  max_num_steps_per_case: 5
+  max_eff_resolution_mm: 12.0
+  primary_eff_res_mm: 3.0
+  summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+  # START=0 ONLY — disables the high-eff_res start-offset fan-out for the v7
+  # first pass. (Must match nnunet/configs_v7.yaml::start_offsets.)
+  start_offset_eff_res_min_mm: 3.5
+  start_offsets: [0]
+
+slice_step_axis: auto
+use_thick_slices: false
+
+# THICK degradation for the sweep (also auto-synced from --experiment thick).
+sweep_mode: thick
+sweep_modality: ct
+
+# ── Checkpoint selection ──────────────────────────────────────────
+checkpoint: best
+
+# ── Test-time latent optimization ─────────────────────────────────
+latent_num_iters: 3000
+latent_lr: 1.0e-2
+max_num_const_train_dsc: 10
+
+# ── Soft latent-fit (Problem 5: retain nnUNet boundary uncertainty) ──
+# Hard integer nnUNet mask + label smoothing (the nnUNet softmax itself is not
+# in the aligned-patch pipeline). Soft-fit ON for the noisy thick deployment.
+latent_fit_soft: true
+latent_fit_label_smoothing: 0.1
+
+# ── Output ────────────────────────────────────────────────────────
+export_predictions: true
+evaluate_predictions: true
+
+# Reconstruction-mask saving whitelist (qualitative inspection set).
+save_mask_source_ids:
+  - atlas_orbit0001_ubMask_al2_fill
+  - atlas_orbit0002_ubMask_al2_fill
+  - atlas_orbit0003_ubMask_al2_fill
+  - atlas_orbit0004_ubMask_al2_fill
+  - atlas_orbit0005_ubMask_al2_fill
+  - atlas_orbit0006_ubMask_al2_fill
+  - atlas_orbit0017_ubMask_al2_fill
+  - atlas_orbit0019_ubMask_al2_fill
+  - atlas_orbit0028_ubMask_al2_fill
+  - atlas_orbit0033_ubMask_al2_fill
+  - chk_24344
+  - chk_14455
+
+incremental_native_remap: true
+
+batch_size_val: 1

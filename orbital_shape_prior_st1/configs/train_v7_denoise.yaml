@@ -1,0 +1,105 @@
+# --- Training configuration (v7 — latent denoise framework) ---
+# THICK-ONLY, nnUNet-prediction input. Dual per-case latents + a shared Delta
+# net learn to correct nnUNet's systematic errors in latent space while a clean
+# alpha_GT welds the true shape into the decoder manifold.
+#
+#   alpha_GT  <- co-framed DENSE GT  (labels_dense_sub)  "clean" target
+#   alpha_nn  <- SPARSE nnUNet pred  (labels_sparse)     "noisy" input
+#   Delta     <- shared MLP, residual correction on alpha_nn (term 3)
+#
+# Requires the THICK train-split nnUNet obs patches
+#   labels_dataset835_thick_train_step_XX/
+# (run_pipeline.sh nnunet-predict-sweep-train, experiment=thick).
+
+# Model identification
+model_name: orbital_ad_v7
+
+# --- Architecture ---
+num_classes: 5            # BG + ON + Globe + Fat + Recti
+latent_dim: 128
+op_num_layers: 8
+op_coord_layers: [0, 4]   # layers where coordinates are injected
+
+# --- Data ---
+labels_dirname: labels     # subdirectory name under aligned_dir
+train_casefile: train_cases.txt
+val_fraction: 0.15
+
+num_sparsify_offsets: 4    # ignored under Strategy C; used only for VAL baseline
+val_casefile: val_cases.txt
+
+test_fraction: 0.2
+
+# --- Sparsification (synthetic anisotropy for training) ---
+degradation_bank:
+  modality: ct                      # orbital CT -> box kernel for thick averaging
+  modes: [thick]                    # THICK-ONLY for v7
+  target_eff_res_increment_mm: 2.0  # ~half the test sweep density
+  max_eff_resolution_mm: 12.0       # cap effective resolution
+  offsets_per_setting: 1            # offsets per (mode, step); 1 = no offset augment
+  num_classes: 5                    # BG + ON + Globe + Fat + Recti
+  cache_dir: null                   # null -> auto: {labels_dir}/../degraded_bank/
+
+  # nnUNet-only input observation; GT is the dense supervision target only.
+  obs_sources: [nnunet]
+  nnunet_patch_prefix: labels_dataset835_{exp}_train_step_
+  coframe_recenter_fallback: true
+
+  split:
+    split_seed: 2
+    val_fraction: 0.15
+    split_granularity: scan
+
+# Per-epoch sampling (Strategy C only)
+items_per_epoch: 100        # sample 100 items from the bank each epoch
+point_sample_fraction: 0.75 # sample 75% of dense voxels per item
+
+# --- Supervision target ---
+# "dual": each TRAIN item returns BOTH dense GT samples (alpha_GT target) and
+# sparse nnUNet samples (alpha_nn target). VAL collapses to the dense GT target.
+train_supervision: dual
+
+# --- Latent denoise framework (all gated; ablate by flipping the switches) ---
+denoise:
+  enabled: true          # master off -> original single-latent CNISP
+  use_alpha_nn: true     # off -> single-latent CNISP (alpha_GT only)
+  use_delta: true        # off -> dual-latent reconstruction only (no L_denoise)
+  lambda_nn: 0.5          # term 2 weight; try {0.3, 0.5, 1.0}
+  lambda_denoise: 1.0     # term 3 weight; try {0.5, 1.0, 2.0}
+  eta: 1.0e-2             # ||Delta||^2 residual reg; try {1e-3, 1e-2, 1e-1}
+  delta_hidden_dim: null  # null -> = latent_dim
+  delta_num_hidden_layers: 2
+  # alpha_nn L2 must be weaker than alpha_GT's so term 2 (not L2) drives it.
+  # null -> 0.5 * lat_reg_lambda.
+  lambda_l2_nn: null
+  # Disagreement-region (nnUNet vs GT) upweighted sampling for GT-coord draws.
+  # Built but OFF for the v7 baseline; flip to true for the ablation.
+  boundary_weighted_sampling: false
+  boundary_weight: 4.0
+
+# Legacy knobs below are INERT for training while degradation_bank is set.
+slice_step_size: 4
+slice_step_axis: auto
+use_thick_slices: false
+
+# --- Sampling ---
+num_points_per_example_per_dim_train: 64
+batch_size_train: 10
+batch_size_val: 1
+
+# --- Loss ---
+loss_ce_weight: 1.0
+loss_dice_weight: 1.0
+dice_class_weights: null
+
+# --- Optimization ---
+learning_rate: 1.0e-4      # for network + Delta params, scaled by batch_size
+learning_rate_lat: 1.0e-3   # for latent codes (both tables), NOT scaled
+lat_reg_lambda: 1.0e-4      # L2 regularization on alpha_GT (alpha_nn uses lambda_l2_nn)
+num_epochs: 1800
+
+# --- Logging & checkpointing ---
+log_epoch_count: 1
+checkpoint_epoch_count: 100
+max_num_checkpoints: 5
+num_workers: 2

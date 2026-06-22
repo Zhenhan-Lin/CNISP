@@ -18,6 +18,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from models.multiclass_ad import MultiClassAutoDecoder
+from models.denoise import LatentDenoiser
 from models.losses import MultiClassShapeLoss, MultiClassDiceMetric
 from engine.dataset import create_data_loader, EpochSubsetSampler, PhaseType
 from engine.io_utils import RollingCheckpointWriter, Logger
@@ -113,6 +114,152 @@ def train_one_epoch(
               f"|z|²={lat_norm2:.2f}")
 
     return {"train_loss": avg_loss, "train_dice": avg_dice, "lat_norm2": lat_norm2}
+
+
+def train_one_epoch_denoise(
+    dl: torch.utils.data.DataLoader,
+    net: MultiClassAutoDecoder,
+    latents_gt: torch.nn.Parameter,
+    latents_nn: torch.nn.Parameter,
+    delta,                                   # LatentDenoiser or None
+    optimizer: torch.optim.Optimizer,
+    criterion: MultiClassShapeLoss,
+    metric: MultiClassDiceMetric,
+    lat_reg_lambda: float,
+    lat_reg_lambda_nn: float,
+    lambda_nn: float,
+    lambda_denoise: float,
+    eta: float,
+    device: torch.device,
+    epoch: int,
+    global_step: torch.Tensor,
+    logger,
+    log_this_epoch: bool,
+):
+    """Dual-latent + Delta training epoch (denoise framework).
+
+    Three terms (sg[.] = detach):
+      L1 = DiceCE(F(alpha_GT, x_gt), onehot_GT)               -> F, alpha_GT
+      L2 = DiceCE(F(alpha_nn, x_nn), onehot_nn)               -> F, alpha_nn
+      L3 = DiceCE(F(sg[alpha_nn]+Delta(sg[alpha_nn]), x_gt),
+                  onehot_GT) + eta*||Delta(sg[alpha_nn])||^2   -> F, Delta
+      L  = L1 + lambda_nn*L2 + lambda_denoise*L3 + ramped L2 latent reg.
+
+    The detach on alpha_nn in L3 routes its gradient exclusively to L2, so
+    alpha_nn stays pinned to the nnUNet observation while Delta+F learn the
+    correction. lat_reg_lambda(_nn) apply the (ramped) latent L2 separately so
+    alpha_nn is not pulled to the origin (Problem 2b).
+    """
+    use_delta = delta is not None
+    net.train()
+    if use_delta:
+        delta.train()
+
+    loss_running = 0.0
+    l1_run = l2_run = l3_run = 0.0
+    n_losses = 0
+    dice_running = 0.0
+    n_examples = 0
+    gap_run = 0.0
+    dnorm_run = 0.0
+    ramp = min(1.0, epoch / 100.0)
+
+    for batch in dl:
+        coords_gt = batch["coords_gt"].to(device)
+        labels_gt = batch["labels_gt"].to(device)
+        coords_nn = batch["coords_nn"].to(device)
+        labels_nn = batch["labels_nn"].to(device)
+        ids = batch["caseids"]
+
+        z_gt = latents_gt[ids].to(device)
+        z_nn = latents_nn[ids].to(device)
+
+        optimizer.zero_grad()
+
+        # ── Term 1: clean reconstruction (F + alpha_GT) ──
+        logits_gt = net(z_gt, coords_gt)
+        l1 = criterion(logits_gt, labels_gt)
+
+        # ── Term 2: noisy reconstruction (F + alpha_nn) ──
+        logits_nn = net(z_nn, coords_nn)
+        l2 = criterion(logits_nn, labels_nn)
+
+        loss = l1 + lambda_nn * l2
+
+        # ── Term 3: denoise (F + Delta only; alpha_nn detached) ──
+        if use_delta:
+            z_nn_sg = z_nn.detach()
+            resid = delta(z_nn_sg)
+            z_hat = z_nn_sg + resid
+            logits_dn = net(z_hat, coords_gt)
+            l3_recon = criterion(logits_dn, labels_gt)
+            l3_reg = eta * torch.mean(torch.sum(resid ** 2, dim=1))
+            l3 = l3_recon + l3_reg
+            loss = loss + lambda_denoise * l3
+        else:
+            l3 = torch.zeros((), device=device)
+
+        # ── Ramped latent L2 (separate weights for the two tables) ──
+        if lat_reg_lambda > 0:
+            reg_gt = torch.mean(torch.sum(z_gt ** 2, dim=1))
+            loss = loss + ramp * lat_reg_lambda * reg_gt
+        if lat_reg_lambda_nn > 0:
+            reg_nn = torch.mean(torch.sum(z_nn ** 2, dim=1))
+            loss = loss + ramp * lat_reg_lambda_nn * reg_nn
+
+        loss.backward()
+        optimizer.step()
+
+        loss_running += loss.item()
+        l1_run += l1.item()
+        l2_run += l2.item()
+        l3_run += float(l3.item()) if use_delta else 0.0
+        n_losses += 1
+
+        with torch.no_grad():
+            dice_info = metric(logits_gt, labels_gt)
+            dice_running += dice_info["mean"] * labels_gt.shape[0]
+            n_examples += labels_gt.shape[0]
+            # Health metrics: alpha gap (collapse detector) + Delta magnitude.
+            gap_run += torch.mean(torch.norm(z_nn - z_gt, dim=1)).item()
+            if use_delta:
+                dnorm_run += torch.mean(
+                    torch.norm(delta(z_nn.detach()), dim=1)
+                ).item()
+
+        global_step += 1
+
+    nb = max(n_losses, 1)
+    avg_loss = loss_running / nb
+    avg_dice = dice_running / max(n_examples, 1)
+    metrics = {
+        "train_loss": avg_loss,
+        "train_dice": avg_dice,
+        "lat_norm2": 0.0,  # kept for CSV schema compatibility
+        "loss_recon_gt": l1_run / nb,
+        "loss_recon_nn": l2_run / nb,
+        "loss_denoise": l3_run / nb,
+        "mean_alpha_gap": gap_run / nb,
+        "mean_delta_norm": dnorm_run / nb,
+    }
+
+    ep = epoch + 1
+    if log_this_epoch:
+        if logger:
+            logger.add_scalar("loss/train", avg_loss, global_step=ep)
+            logger.add_scalar("dice/train", avg_dice, global_step=ep)
+            logger.add_scalar("loss/recon_gt", metrics["loss_recon_gt"], global_step=ep)
+            logger.add_scalar("loss/recon_nn", metrics["loss_recon_nn"], global_step=ep)
+            logger.add_scalar("loss/denoise", metrics["loss_denoise"], global_step=ep)
+            logger.add_scalar("health/mean_alpha_gap", metrics["mean_alpha_gap"], global_step=ep)
+            logger.add_scalar("health/mean_delta_norm", metrics["mean_delta_norm"], global_step=ep)
+        print(f"[{ep}] loss={avg_loss:.4f} dice={avg_dice:.3f} "
+              f"L1={metrics['loss_recon_gt']:.4f} L2={metrics['loss_recon_nn']:.4f} "
+              f"L3={metrics['loss_denoise']:.4f} "
+              f"gap={metrics['mean_alpha_gap']:.3f} "
+              f"|Δ|={metrics['mean_delta_norm']:.4f}")
+
+    return metrics
 
 
 def validate(
@@ -233,10 +380,68 @@ def train_model(params: dict):
                      [n_train, latent_dim], device=device)
     )
 
-    optimizer = torch.optim.Adam([
+    # ── Denoise framework (dual latent + Delta), all gated by config ──
+    den = params.get("denoise") or {}
+    denoise_enabled = bool(den.get("enabled", False))
+    use_alpha_nn = denoise_enabled and bool(den.get("use_alpha_nn", True))
+    use_delta = use_alpha_nn and bool(den.get("use_delta", True))
+    lambda_nn = float(den.get("lambda_nn", 0.5))
+    lambda_denoise = float(den.get("lambda_denoise", 1.0))
+    eta = float(den.get("eta", 1.0e-2))
+    # alpha_nn L2 must be weaker than alpha_GT's so term 2 (not L2) drives it.
+    _l2_nn_cfg = den.get("lambda_l2_nn", None)
+    lat_reg_lambda_nn = (
+        float(_l2_nn_cfg) if _l2_nn_cfg is not None else 0.5 * lat_reg_lambda
+    )
+
+    latents_nn = None
+    delta = None
+    param_groups = [
         {"params": net.parameters(), "lr": lr},
         {"params": latents_train, "lr": lr_lat},
-    ])
+    ]
+    if use_alpha_nn:
+        if params.get("train_supervision") != "dual":
+            raise ValueError(
+                "denoise.use_alpha_nn=true requires train_supervision: dual "
+                f"(got {params.get('train_supervision')!r})."
+            )
+        # Problem 2a: INDEPENDENT init draw (own generator), NOT a copy of
+        # latents_train, so alpha_nn and alpha_GT start separated.
+        gen_nn = torch.Generator(device="cpu").manual_seed(1234)
+        latents_nn = torch.nn.Parameter(
+            (torch.normal(0.0, 1.0 / math.sqrt(latent_dim),
+                          [n_train, latent_dim], generator=gen_nn)).to(device)
+        )
+        param_groups.append({"params": latents_nn, "lr": lr_lat})
+    if use_delta:
+        delta = LatentDenoiser(
+            latent_dim=latent_dim,
+            hidden_dim=den.get("delta_hidden_dim") or None,
+            num_hidden_layers=int(den.get("delta_num_hidden_layers", 2)),
+        ).to(device)
+        param_groups.append({"params": delta.parameters(), "lr": lr})
+
+    optimizer = torch.optim.Adam(param_groups)
+
+    if denoise_enabled:
+        print(f"[denoise] enabled={denoise_enabled} use_alpha_nn={use_alpha_nn} "
+              f"use_delta={use_delta} lambda_nn={lambda_nn} "
+              f"lambda_denoise={lambda_denoise} eta={eta} "
+              f"lat_reg_lambda_nn={lat_reg_lambda_nn}")
+
+    def _model_state():
+        """Checkpoint model_state; carries the dual latent + Delta when active.
+
+        Back-compat: ``latents_nn`` / ``delta`` keys are simply absent for the
+        original single-latent runs, so old loaders are unaffected.
+        """
+        ms = {"net": net.state_dict(), "latents_train": latents_train}
+        if latents_nn is not None:
+            ms["latents_nn"] = latents_nn
+        if delta is not None:
+            ms["delta"] = delta.state_dict()
+        return ms
 
     criterion = MultiClassShapeLoss(
         ce_weight=params.get("loss_ce_weight", 1.0),
@@ -265,11 +470,19 @@ def train_model(params: dict):
         if isinstance(dl_train.sampler, EpochSubsetSampler):
             dl_train.sampler.set_epoch(epoch)
 
-        train_metrics = train_one_epoch(
-            dl_train, net, latents_train, optimizer, criterion, metric,
-            lat_reg_lambda, device, epoch, global_step,
-            writer, log_this,
-        )
+        if use_alpha_nn:
+            train_metrics = train_one_epoch_denoise(
+                dl_train, net, latents_train, latents_nn, delta, optimizer,
+                criterion, metric, lat_reg_lambda, lat_reg_lambda_nn,
+                lambda_nn, lambda_denoise, eta, device, epoch, global_step,
+                writer, log_this,
+            )
+        else:
+            train_metrics = train_one_epoch(
+                dl_train, net, latents_train, optimizer, criterion, metric,
+                lat_reg_lambda, device, epoch, global_step,
+                writer, log_this,
+            )
 
         val_metrics = {}
         if log_this:
@@ -298,8 +511,7 @@ def train_model(params: dict):
                 best_val_dice = current_val_dice
                 best_path = model_dir / "best_checkpoint.pth"
                 torch.save({
-                    "model_state": {"net": net.state_dict(),
-                                    "latents_train": latents_train},
+                    "model_state": _model_state(),
                     "optimizer_state": optimizer.state_dict(),
                     "num_steps_trained": int(global_step.item()),
                     "num_epochs_trained": epoch + 1,
@@ -319,7 +531,7 @@ def train_model(params: dict):
 
         if ckpt_writer and epoch % ckpt_every == 0:
             ckpt_writer.write_checkpoint(
-                {"net": net.state_dict(), "latents_train": latents_train},
+                _model_state(),
                 optimizer.state_dict(),
                 int(global_step.item()), epoch + 1,
             )
@@ -327,7 +539,7 @@ def train_model(params: dict):
     # Final checkpoint
     if ckpt_writer:
         ckpt_writer.write_checkpoint(
-            {"net": net.state_dict(), "latents_train": latents_train},
+            _model_state(),
             optimizer.state_dict(),
             int(global_step.item()), num_epochs,
         )
