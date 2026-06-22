@@ -19,10 +19,14 @@ cnisp_model_name: orbital_ad_v7
 cnisp_train_yaml: train_v7_denoise.yaml
 
 # ── Which CNISP runs to compare against nnUNet ────────────────────
-# v7 first pass compares only the deployment curve (nnUNet-pred input).
+# Each entry's run_tag MUST match a runs/<exp>/<run_tag>/ dir that inference
+# actually wrote (i.e. the --run-tag passed to 03_infer.py). The Delta-off
+# A/B run was written to nnunet_pred_nodelta. Add a second entry (e.g.
+# run_tag: nnunet_pred with the Delta-on results) once that run exists to plot
+# both curves side by side.
 cnisp_runs_to_compare:
-  - run_tag: nnunet_pred
-    method_label: CNISP-nnUNetPred-v7
+  - run_tag: nnunet_pred_nodelta
+    method_label: CNISP-nnUNetPred-v7-noDelta
 
 deployment_gt_dirname_for_chk: prediction/native
 
