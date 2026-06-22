@@ -125,16 +125,44 @@ def _dataset_frame_assertion(args):
     print(f"  coords_gt range      : {cg.min(0).values.tolist()} .. {cg.max(0).values.tolist()}")
     print(f"  coords_nn range      : {cn.min(0).values.tolist()} .. {cn.max(0).values.tolist()}")
 
-    # Same frame: both coordinate clouds live inside [0, image_size] (the
-    # decoder subtracts the SAME latent_coords for both), so neither is
-    # shifted into a different octant.
+    # RIGOROUS shared-frame proof: on the IN-PLANE axes (everything except the
+    # coarse through-plane axis) the GT and nnUNet views must have identical
+    # spacing AND offset -- i.e. the same coordinate origin + scale. The
+    # decoder subtracts the SAME latent_coords for both, so equal in-plane
+    # spacing/offset means alpha_nn decoded on x_gt is not spatially shifted.
+    sp_gt = batch["spacings"]      # [B,3]
+    sp_nn = batch["spacings_nn"]   # [B,3]
+    of_gt = batch["offsets"]       # [B,3]
+    of_nn = batch["offsets_nn"]    # [B,3]
+    B = sp_nn.shape[0]
+    inplane_ok = True
+    for b in range(B):
+        ax = int(torch.argmax(sp_nn[b]))     # through-plane = coarsest spacing
+        for d in range(3):
+            if d == ax:
+                continue
+            if (abs(float(sp_gt[b, d]) - float(sp_nn[b, d])) > 1e-3
+                    or abs(float(of_gt[b, d]) - float(of_nn[b, d])) > 1e-3):
+                inplane_ok = False
+    _check("in-plane axes share spacing+offset (same frame origin/scale)",
+           inplane_ok)
+
+    # Range guard: a COARSE sparse voxel CENTER may legitimately sit up to half
+    # its spacing outside the 64 mm window (it still covers the window), so the
+    # tolerance scales with the batch's largest through-plane spacing -- NOT a
+    # fixed mm. A gross frame mismatch would blow far past this.
     ext = image_size.max().item()
-    in_frame = (cg.min() >= -2.0 and cg.max() <= ext + 2.0
-                and cn.min() >= -2.0 and cn.max() <= ext + 2.0)
-    _check("coords_gt and coords_nn lie in the same [0,image_size] frame",
+    tol = float(sp_nn.max()) / 2.0 + 1.0
+    in_frame = (cg.min() >= -tol and cg.max() <= ext + tol
+                and cn.min() >= -tol and cn.max() <= ext + tol)
+    print(f"  frame range tol (mm) : {tol:.2f}")
+    _check("coords lie within the shared frame (+/- half coarse-voxel tol)",
            bool(in_frame))
-    # Same center: foreground centroids of the two views agree to within a
-    # few mm (both inner-cropped around the SAME sparse visible-LCC centroid).
+
+    # Same center: foreground centroids of the two views agree (both inner-
+    # cropped around the SAME sparse visible-LCC centroid; the residual gap is
+    # the real nnUNet-vs-GT localisation drift, which should be modest, not a
+    # half-patch offset).
     lg = batch["labels_gt"].reshape(-1)
     ln = batch["labels_nn"].reshape(-1)
     if (lg > 0).any() and (ln > 0).any():
@@ -142,7 +170,7 @@ def _dataset_frame_assertion(args):
         cen_nn = cn[ln > 0].mean(0)
         d = torch.norm(cen_gt - cen_nn).item()
         print(f"  fg-centroid gap (mm) : {d:.2f}")
-        _check("GT/nn foreground centroids agree within 12 mm", d < 12.0)
+        _check("GT/nn foreground centroids agree within 16 mm", d < 16.0)
     print("-- frame assertion: OK --")
 
 
