@@ -16,10 +16,11 @@ CNISP model, on the FIRST image of the test set only (its OD+OS, merged):
          the real inference -> native pipeline round-trips geometry correctly.)
 
 It runs the normal inference (engine.infer.infer_test_set) restricted to the
-first source via a temporary 2-case casefile, with output redirected under
-``reconstructions/tmp`` so it never touches the real run trees. The chosen
-native mask is also copied to ``reconstructions/tmp/<stem>_valid_stepXX.nii.gz``
-and a ``valid_report.json`` is written there.
+first source via a temporary 2-case casefile, at step_size=1 only (the dense
+baseline; no degradation), with output redirected under ``reconstructions/tmp``
+so it never touches the real run trees. The chosen native mask is also copied to
+``reconstructions/tmp/<stem>_valid_stepXX.nii.gz`` and a ``valid_report.json``
+is written there.
 
 Usage:
     python orbital_shape_prior_st1/scripts/031_valid_test.py \
@@ -188,8 +189,6 @@ def main() -> int:
                     choices=["atlas_gt", "nnunet_pred", "real_pair"])
     ap.add_argument("--run-tag", default="valid_tmp")
     ap.add_argument("--experiment", default="thick", choices=["thin", "thick", "real"])
-    ap.add_argument("--max-steps", type=int, default=2,
-                    help="cap adaptive sweep steps per case (default 2, for speed)")
     args = ap.parse_args()
 
     paths_yaml = _resolve_cfg(args.paths)
@@ -220,10 +219,15 @@ def main() -> int:
     tmp_base = Path(params["output_basedir"]) / "tmp"
     params["output_basedir"] = str(tmp_base)
 
-    # Save every mask (override the 12-source whitelist) + small fast sweep.
+    # Save every mask (override the 12-source whitelist).
     params["save_mask_source_ids"] = None
+    # Only step_size=1 (dense baseline, no degradation) per case. A huge
+    # target_eff_res_increment_mm makes delta_step huge, so the 2nd candidate
+    # step's eff_res exceeds max_eff_resolution_mm and adaptive_steps_for_case
+    # returns [1] (the dense baseline is always kept).
     ass = dict(params.get("adaptive_step_sweep", {}) or {})
-    ass["max_num_steps_per_case"] = int(args.max_steps)
+    ass["max_num_steps_per_case"] = 1
+    ass["target_eff_res_increment_mm"] = 1.0e6
     ass["start_offsets"] = [0]
     params["adaptive_step_sweep"] = ass
 
@@ -232,6 +236,7 @@ def main() -> int:
     print(f"  model          : {args.model_name} (checkpoint={args.checkpoint})")
     print(f"  label source   : {args.test_label_source}  experiment={args.experiment}")
     print(f"  first source   : {first_sid}  cases={sel}")
+    print(f"  sweep          : step_size=1 only (dense baseline)")
     print(f"  output (tmp)   : {tmp_base}")
     print("=" * 64)
 
