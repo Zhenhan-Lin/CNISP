@@ -36,3 +36,4 @@ review_checklist_part2.csv
 .cursor
 .DS_Store
 main.py
+simulation/__pycache__

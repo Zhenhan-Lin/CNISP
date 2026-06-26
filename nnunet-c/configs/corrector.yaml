@@ -71,7 +71,7 @@ corrector_train_casefile: corrector_train_cases.txt
 # corrector reads from one place.
 corrector_data:
   # QA checklist CSV (relative to repo root or absolute).
-  checklist_csv: review_checklist_part2.csv
+  checklist_csv: /fs5/p_masi/linz18/QA_record/QA/PHOTON_CP/new_check/review_checklist_part2.csv
   # Selection: keep == False AND qa_status == "yes"; take the first `n` images
   # (in file order) whose source image actually exists on disk.
   select:

@@ -76,7 +76,7 @@ dice_class_weights: null
 learning_rate: 1.0e-4      # for network params, scaled by batch_size
 learning_rate_lat: 1.0e-3   # for latent codes, NOT scaled by batch_size
 lat_reg_lambda: 1.0e-4      # L2 regularization on latent codes
-num_epochs: 1800
+num_epochs: 1000
 
 # --- Logging & checkpointing ---
 log_epoch_count: 1
