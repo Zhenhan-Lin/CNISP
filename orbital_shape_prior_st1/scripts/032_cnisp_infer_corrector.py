@@ -330,7 +330,7 @@ def main() -> int:
     label_obs_loader = _build_label_obs_loader(layout)
     step_axes = resolve_slice_step_axes(params["slice_step_axis"], spacings_dense)
 
-    # ── compute results IN MEMORY (writes nothing) ───────────────────
+    # ── compute + save final masks ───────────────────────────────────
     if args.steps.strip().lower() == "adaptive":
         # Fall back to the per-case adaptive sweep (won't necessarily hit 3/6/9).
         results = run_sweep(
@@ -342,12 +342,15 @@ def main() -> int:
             real_pair=(layout.test_label_source == "real_pair"),
             on_case_done=None,
         )
+        print("\n[032] writing final corrector masks ...")
+        manifest = _save_final_masks(results, layout, out_dir)
     else:
-        # EXPLICIT steps matching the degraded data (3/6/9). The adaptive rule
-        # can't produce 6, so we loop eval_case_at_resolution per (case, step).
+        # EXPLICIT steps matching the degraded data. Loop eval_case_at_resolution
+        # per (source, eye, step) and SAVE each source's masks the moment its
+        # eyes+steps finish -> files appear during the run + crash-resumable.
+        from collections import OrderedDict
         steps = [int(s) for s in args.steps.split(",") if s.strip()]
         print(f"[032] explicit steps = {steps}  skip_existing={args.skip_existing}")
-        results = []
         meta_for = _meta_path_for_case(layout)
         _stem_cache: Dict[str, str] = {}
 
@@ -362,40 +365,48 @@ def main() -> int:
                 _stem_cache[s] = stem
             return _stem_cache[s]
 
+        # group eyes by source so both eyes of a (source, step) merge together
+        src_cases: "OrderedDict[str, list]" = OrderedDict()
         for ci, cn in enumerate(casenames):
-            for step in steps:
-                if allowed_pairs is not None and (_source_of(cn), step) not in allowed_pairs:
-                    continue  # outside the global --max-samples selection
-                if args.skip_existing:
-                    stem = _source_stem(cn)
-                    if stem and (out_dir / f"{stem}_step{step:02d}.nii.gz").exists():
-                        print(f"  {cn} step={step:02d}: SKIP (output exists)")
-                        continue
-                override = (label_obs_loader(cn, step, 0)
-                            if label_obs_loader is not None else None)
-                if label_obs_loader is not None and override is None:
-                    print(f"  {cn} step={step:02d}: SKIP (no input patch)")
-                    continue
-                r = eval_case_at_resolution(
-                    net=net, optimize_fn=optimize_fn,
-                    label_dense=labels_dense[ci], spacing_dense=spacings_dense[ci],
-                    step_size=step, step_axis=step_axes[ci],
-                    params=params, device=INFER_DEVICE,
-                    use_thick_slices=params.get("use_thick_slices", False),
-                    label_obs_override=override,
-                    mode=params.get("sweep_mode", "thin"),
-                    modality=params.get("sweep_modality", "ct"),
-                    num_classes=params.get("num_classes", 5),
-                    start=0,
-                )
-                r["casename"] = cn
-                results.append(r)
-                print(f"  {cn} step={step:02d}: dense={r['dice']['mean']:.3f} "
-                      f"obs={r['dice_observed']['mean']:.3f}")
+            src_cases.setdefault(_source_of(cn), []).append((ci, cn))
 
-    # ── save ONLY the final merged {1,2,3,4} native masks ────────────
-    print("\n[032] writing final corrector masks ...")
-    manifest = _save_final_masks(results, layout, out_dir)
+        manifest: Dict[str, list] = {}
+        n_src = len(src_cases)
+        for si, (src, eyecases) in enumerate(src_cases.items(), 1):
+            src_results = []
+            for ci, cn in eyecases:
+                for step in steps:
+                    if allowed_pairs is not None and (src, step) not in allowed_pairs:
+                        continue  # outside the global --max-samples selection
+                    if args.skip_existing:
+                        stem = _source_stem(cn)
+                        if stem and (out_dir / f"{stem}_step{step:02d}.nii.gz").exists():
+                            print(f"  {cn} step={step:02d}: SKIP (output exists)")
+                            continue
+                    override = (label_obs_loader(cn, step, 0)
+                                if label_obs_loader is not None else None)
+                    if label_obs_loader is not None and override is None:
+                        print(f"  {cn} step={step:02d}: SKIP (no input patch)")
+                        continue
+                    r = eval_case_at_resolution(
+                        net=net, optimize_fn=optimize_fn,
+                        label_dense=labels_dense[ci], spacing_dense=spacings_dense[ci],
+                        step_size=step, step_axis=step_axes[ci],
+                        params=params, device=INFER_DEVICE,
+                        use_thick_slices=params.get("use_thick_slices", False),
+                        label_obs_override=override,
+                        mode=params.get("sweep_mode", "thin"),
+                        modality=params.get("sweep_modality", "ct"),
+                        num_classes=params.get("num_classes", 5),
+                        start=0,
+                    )
+                    r["casename"] = cn
+                    src_results.append(r)
+                    print(f"  [{si}/{n_src}] {cn} step={step:02d}: "
+                          f"dense={r['dice']['mean']:.3f} obs={r['dice_observed']['mean']:.3f}")
+            if src_results:
+                manifest.update(_save_final_masks(src_results, layout, out_dir))
+
     # Shard-aware manifest name so concurrent workers don't clobber each other.
     shard_tag = str(args.shard_id).replace(",", "-")
     mf_name = ("cnisp_pred_manifest.json" if args.num_shards <= 1

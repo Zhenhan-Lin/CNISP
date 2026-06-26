@@ -107,7 +107,7 @@ build_workers_from_failed() {
 
 worker_cmd() {  # $1=dev $2=ids -> the exact python command (for review/rerun)
     local cuda; cuda="$(cuda_of "$1")"
-    echo "CUDA_VISIBLE_DEVICES=\"$cuda\" PYTHONPATH=\".:$REPO_ROOT\" python3 $INFER" \
+    echo "CUDA_VISIBLE_DEVICES=\"$cuda\" PYTHONUNBUFFERED=1 PYTHONPATH=\".:$REPO_ROOT\" python3 -u $INFER" \
          "-m $MODEL -t $TRAIN_YAML -c $TEST_YAML --checkpoint $CHECKPOINT" \
          "--test-label-source $LABEL_SOURCE --experiment $EXPERIMENT" \
          "--test-casefile $CASEFILE --steps $STEPS --max-samples $MAX_SAMPLES" \
@@ -138,8 +138,9 @@ for i in "${!w_name[@]}"; do
         cd "$CNISP_DIR"
         CUDA_VISIBLE_DEVICES="$cuda" \
         OMP_NUM_THREADS="$th" MKL_NUM_THREADS="$th" \
+        PYTHONUNBUFFERED=1 \
         PYTHONPATH=".:$REPO_ROOT:${PYTHONPATH:-}" \
-        python3 "$INFER" \
+        python3 -u "$INFER" \
             -m "$MODEL" -t "$TRAIN_YAML" -c "$TEST_YAML" \
             --checkpoint "$CHECKPOINT" \
             --test-label-source "$LABEL_SOURCE" \
