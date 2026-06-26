@@ -59,7 +59,7 @@ from engine.test_label_sources import build_run_layout          # noqa: E402
 from engine.native_mapping import (                             # noqa: E402
     invert_alignment_single_eye, _extract_sub_crop_info,
 )
-from diagnostics.resolution_sweep import run_sweep              # noqa: E402
+from diagnostics.resolution_sweep import run_sweep, eval_case_at_resolution  # noqa: E402
 from data_prep.sparsify import resolve_slice_step_axes          # noqa: E402
 
 # Fixed canonical -> nnUNet remap (by structure name). DO NOT value-shift.
@@ -174,6 +174,24 @@ def main() -> int:
                     help="casefile under casefiles_dir (default: test yaml's value)")
     ap.add_argument("--out-dir", default=None,
                     help="output dir (default: nnunet-c/data/cnisp_pred)")
+    ap.add_argument("--steps", default="3,6,9",
+                    help="explicit step sizes matching the degraded data "
+                         "(default 3,6,9). Use 'adaptive' to fall back to the "
+                         "test yaml's adaptive_step_sweep.")
+    ap.add_argument("--num-shards", type=int, default=1,
+                    help="split sources across N shard slots (for multi-GPU / "
+                         "CPU concurrency). Sharding is by SOURCE so OD+OS stay "
+                         "together for the merge.")
+    ap.add_argument("--shard-id", default="0",
+                    help="this worker's shard slot(s) in [0,num_shards); "
+                         "comma-separated for weighted assignment, e.g. '0,2'.")
+    ap.add_argument("--skip-existing", dest="skip_existing", action="store_true",
+                    default=True,
+                    help="skip (source,step) whose output mask already exists "
+                         "(default ON; makes a crashed worker's re-run resume).")
+    ap.add_argument("--no-skip-existing", dest="skip_existing",
+                    action="store_false",
+                    help="recompute even if the output mask exists.")
     args = ap.parse_args()
 
     params = _load_params(_resolve_cfg(args.paths),
@@ -221,29 +239,115 @@ def main() -> int:
     if not casenames:
         print("[032] no resolvable cases; nothing to do", file=sys.stderr)
         return 1
+
+    # ── shard by SOURCE (keep OD+OS together) for multi-GPU/CPU concurrency ─
+    if args.num_shards > 1:
+        try:
+            shard_ids = [int(x) for x in str(args.shard_id).split(",") if x.strip()]
+        except ValueError:
+            print(f"[032] bad --shard-id {args.shard_id!r}", file=sys.stderr)
+            return 2
+        for sid in shard_ids:
+            if not (0 <= sid < args.num_shards):
+                print(f"[032] shard-id {sid} out of range [0,{args.num_shards})",
+                      file=sys.stderr)
+                return 2
+        src_order = []
+        for cn in casenames:
+            s = _source_of(cn)
+            if s not in src_order:
+                src_order.append(s)
+        sorted_src = sorted(src_order)
+        keep = set()
+        for sid in shard_ids:
+            keep |= set(sorted_src[sid::args.num_shards])
+        idx = [i for i, cn in enumerate(casenames) if _source_of(cn) in keep]
+        casenames = [casenames[i] for i in idx]
+        labels_dense = [labels_dense[i] for i in idx]
+        spacings_dense = [spacings_dense[i] for i in idx]
+        print(f"[032] shard {shard_ids}/{args.num_shards}: "
+              f"{len(keep)} source(s), {len(casenames)} case(s)")
+        if not casenames:
+            print("[032] empty shard; nothing to do")
+            return 0
+
     label_obs_loader = _build_label_obs_loader(layout)
     step_axes = resolve_slice_step_axes(params["slice_step_axis"], spacings_dense)
-    sweep_cfg = dict(params.get("adaptive_step_sweep", {}))
 
-    # ── run sweep IN MEMORY (output_dir=None -> writes nothing) ───────
-    results = run_sweep(
-        net=net, optimize_fn=optimize_fn, casenames=casenames,
-        labels_dense=labels_dense, spacings_dense=spacings_dense,
-        step_axis=step_axes, params=params, device=INFER_DEVICE,
-        sweep_cfg=sweep_cfg, output_dir=None,
-        label_obs_override_loader=label_obs_loader,
-        real_pair=(layout.test_label_source == "real_pair"),
-        on_case_done=None,
-    )
+    # ── compute results IN MEMORY (writes nothing) ───────────────────
+    if args.steps.strip().lower() == "adaptive":
+        # Fall back to the per-case adaptive sweep (won't necessarily hit 3/6/9).
+        results = run_sweep(
+            net=net, optimize_fn=optimize_fn, casenames=casenames,
+            labels_dense=labels_dense, spacings_dense=spacings_dense,
+            step_axis=step_axes, params=params, device=INFER_DEVICE,
+            sweep_cfg=dict(params.get("adaptive_step_sweep", {})), output_dir=None,
+            label_obs_override_loader=label_obs_loader,
+            real_pair=(layout.test_label_source == "real_pair"),
+            on_case_done=None,
+        )
+    else:
+        # EXPLICIT steps matching the degraded data (3/6/9). The adaptive rule
+        # can't produce 6, so we loop eval_case_at_resolution per (case, step).
+        steps = [int(s) for s in args.steps.split(",") if s.strip()]
+        print(f"[032] explicit steps = {steps}  skip_existing={args.skip_existing}")
+        results = []
+        meta_for = _meta_path_for_case(layout)
+        _stem_cache: Dict[str, str] = {}
+
+        def _source_stem(casename: str):
+            s = _source_of(casename)
+            if s not in _stem_cache:
+                mp = Path(meta_for(casename))
+                stem = None
+                if mp.exists():
+                    on = json.load(open(mp)).get("original_nifti_path", "")
+                    stem = Path(on).name.replace(".nii.gz", "").replace(".nii", "")
+                _stem_cache[s] = stem
+            return _stem_cache[s]
+
+        for ci, cn in enumerate(casenames):
+            for step in steps:
+                if args.skip_existing:
+                    stem = _source_stem(cn)
+                    if stem and (out_dir / f"{stem}_step{step:02d}.nii.gz").exists():
+                        print(f"  {cn} step={step:02d}: SKIP (output exists)")
+                        continue
+                override = (label_obs_loader(cn, step, 0)
+                            if label_obs_loader is not None else None)
+                if label_obs_loader is not None and override is None:
+                    print(f"  {cn} step={step:02d}: SKIP (no input patch)")
+                    continue
+                r = eval_case_at_resolution(
+                    net=net, optimize_fn=optimize_fn,
+                    label_dense=labels_dense[ci], spacing_dense=spacings_dense[ci],
+                    step_size=step, step_axis=step_axes[ci],
+                    params=params, device=INFER_DEVICE,
+                    use_thick_slices=params.get("use_thick_slices", False),
+                    label_obs_override=override,
+                    mode=params.get("sweep_mode", "thin"),
+                    modality=params.get("sweep_modality", "ct"),
+                    num_classes=params.get("num_classes", 5),
+                    start=0,
+                )
+                r["casename"] = cn
+                results.append(r)
+                print(f"  {cn} step={step:02d}: dense={r['dice']['mean']:.3f} "
+                      f"obs={r['dice_observed']['mean']:.3f}")
 
     # ── save ONLY the final merged {1,2,3,4} native masks ────────────
     print("\n[032] writing final corrector masks ...")
     manifest = _save_final_masks(results, layout, out_dir)
-    with open(out_dir / "cnisp_pred_manifest.json", "w") as f:
+    # Shard-aware manifest name so concurrent workers don't clobber each other.
+    shard_tag = str(args.shard_id).replace(",", "-")
+    mf_name = ("cnisp_pred_manifest.json" if args.num_shards <= 1
+               else f"cnisp_pred_manifest.shard{shard_tag}of{args.num_shards}.json")
+    with open(out_dir / mf_name, "w") as f:
         json.dump({"model": args.model_name, "experiment": args.experiment,
-                   "label_source": args.test_label_source, "sources": manifest}, f,
-                  indent=2)
-    print(f"[032] manifest -> {out_dir/'cnisp_pred_manifest.json'}")
+                   "label_source": args.test_label_source,
+                   "shard_ids": shard_tag, "num_shards": args.num_shards,
+                   "sources": manifest}, f, indent=2)
+    print(f"[032] manifest -> {out_dir/mf_name}")
     return 0
 
 

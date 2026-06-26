@@ -37,3 +37,6 @@ review_checklist_part2.csv
 .DS_Store
 main.py
 simulation/__pycache__
+# nnUNet-C runtime logs/status (keep dir, ignore contents)
+nnunet-c/logs/*
+!nnunet-c/logs/.gitkeep
