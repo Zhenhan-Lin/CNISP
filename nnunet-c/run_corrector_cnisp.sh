@@ -17,8 +17,9 @@
 #   * RERUN_FAILED=1 re-launches ONLY the workers that failed last time
 #
 # Usage:
-#   bash nnunet-c/run_corrector_cnisp.sh                      # gpu0+gpu1+cpu
-#   DEVICES="0 1"   bash nnunet-c/run_corrector_cnisp.sh      # GPUs only
+#   bash nnunet-c/run_corrector_cnisp.sh                      # gpu0+gpu1 (default, GPU-only)
+#   DEVICES="0 1 cpu" bash nnunet-c/run_corrector_cnisp.sh    # also use the CPU
+#   GPUS="0 1 2"      bash nnunet-c/run_corrector_cnisp.sh    # GPUS is an alias for DEVICES
 #   GPU_SHARDS=3 CPU_SHARDS=1 bash nnunet-c/run_corrector_cnisp.sh
 #   RERUN_FAILED=1 bash nnunet-c/run_corrector_cnisp.sh       # retry crashed workers
 set -uo pipefail   # NB: no -e; we manage per-worker rc ourselves
@@ -33,7 +34,9 @@ REVIEW="$LOG_DIR/cnisp_review.txt"
 mkdir -p "$LOG_DIR"
 
 # ── config block ─────────────────────────────────────────────────────
-DEVICES="${DEVICES:-0 1 cpu}"        # space-separated: GPU ids and/or "cpu"
+# Devices: space-separated GPU ids and/or "cpu". GPUS is accepted as an alias.
+# Default is GPU-only (no CPU worker); add "cpu" explicitly to use the CPU too.
+DEVICES="${DEVICES:-${GPUS:-0 1}}"
 GPU_SHARDS="${GPU_SHARDS:-2}"        # shard slots per GPU worker (weight)
 CPU_SHARDS="${CPU_SHARDS:-1}"        # shard slots for the CPU worker (weight)
 MODEL="${MODEL:-orbital_ad_v6_5_gt}"
