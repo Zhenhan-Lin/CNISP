@@ -90,8 +90,12 @@ def rebuild_train_val_from_metadata(
     total_cases = sum(len(v) for v in by_pat.values())
     target_val = int(round(total_cases * val_fraction))
 
+    # Permute indices (not the array itself) so the patient ids stay plain
+    # Python str -- np.random.permutation(list_of_str) would yield np.str_,
+    # which prints as np.str_('...') and is confusing in logs.
     rng = np.random.RandomState(seed)
-    shuffled = list(rng.permutation(patients)) if patients else []
+    order = rng.permutation(len(patients)) if patients else []
+    shuffled = [patients[i] for i in order]
 
     val_patients, val_count = set(), 0
     for p in shuffled:
