@@ -47,9 +47,18 @@ nnUNetv2_extract_fingerprint -d "$CTRL_DATASET_ID" --verify_dataset_integrity
 echo "[run_train] (2) plan_experiment d=$CTRL_DATASET_ID"
 nnUNetv2_plan_experiment -d "$CTRL_DATASET_ID"
 
-echo "[run_train] (3) build_finetune_plan (potholes 1 & 3) -> $PLAN_NAME"
+echo "[run_train] (3) build_finetune_plan (potholes 1 & 3 + per-channel resampler) -> $PLAN_NAME"
 python3 "$HERE/scripts/build_finetune_plan.py" \
     --config "$CONFIG" --control "$CONTROL" --out-plan-name "$PLAN_NAME"
+
+echo "[run_train] (3b) install per-channel resampler into nnunetv2 (ch0 order3, ch1-N order0)"
+python3 - "$HERE/engine/corrector_resampling.py" <<'PY'
+import sys, shutil, os
+import nnunetv2.preprocessing.resampling as r
+dst = os.path.join(os.path.dirname(r.__file__), "corrector_resampling.py")
+shutil.copyfile(sys.argv[1], dst)
+print(f"[run_train] installed resampler -> {dst}")
+PY
 
 echo "[run_train] (4) preprocess with merged plan $PLAN_NAME"
 nnUNetv2_preprocess -d "$CTRL_DATASET_ID" -plans_name "$PLAN_NAME" -c "$CONFIGURATION"

@@ -151,16 +151,15 @@ def main() -> int:
             print(f"[check] ch{c}: unique<= {uniq[:6]}{' ...' if uniq.size > 6 else ''} "
                   f"range={rng} binary={bool(is_binary)}")
             if not is_binary:
-                # Build is on the original grid -> nnUNet resamples ch1-4 (order 3)
-                # to plan spacing, so SOFT/continuous prelabels are expected and
-                # accepted. Report range; require it stays within a sane [0,1]-ish
-                # band (spline can slightly overshoot) -- only FAIL if wildly off.
-                lo, hi = rng
-                if lo < -0.5 or hi > 1.5:
-                    failures.append(
-                        f"ch{c} range {rng} far outside [0,1] -- prelabel looks wrong")
-                else:
-                    print(f"[check]   ch{c}: SOFT prelabel (continuous in ~[0,1]) -- OK")
+                # Expect binary: the per-channel resampler (resample_corrector_
+                # data_to_shape, order 0 for ch1-N) should keep these {0,1}. If
+                # they're continuous, that custom resampler is NOT active (not
+                # installed under nnunetv2/preprocessing/resampling/, or the plan's
+                # resampling_fn_data wasn't set) -> nnUNet fell back to order-3.
+                failures.append(
+                    f"ch{c} is NOT binary (range={rng}) -- the per-channel "
+                    f"resampler isn't active; install corrector_resampling.py and "
+                    f"ensure plan resampling_fn_data=resample_corrector_data_to_shape")
 
     # (4) label values subset of {0,1,2,3,4}
     seg_uniq = np.unique(seg)

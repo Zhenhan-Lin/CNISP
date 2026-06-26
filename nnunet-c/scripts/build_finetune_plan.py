@@ -55,6 +55,14 @@ def main() -> int:
                     help="plan identifier to write (default: %(default)s)")
     ap.add_argument("--configuration", default=None,
                     help="override configuration (default: from config)")
+    ap.add_argument("--binary-resampling", dest="binary_resampling",
+                    action="store_true", default=True,
+                    help="use the per-channel resampler (ch0 order 3, ch1-N order "
+                         "0) so binary prelabels survive preprocess (default ON).")
+    ap.add_argument("--no-binary-resampling", dest="binary_resampling",
+                    action="store_false",
+                    help="use nnUNet's default order-3 resampling for all channels "
+                         "(ch1-N become soft).")
     ap.add_argument("--report-json", default=None)
     args = ap.parse_args()
 
@@ -90,6 +98,15 @@ def main() -> int:
     cfgs = merged["configurations"]
     old_di = cfgs[configuration].get("data_identifier", f"{args.target_plan_name}_{configuration}")
     cfgs[configuration]["data_identifier"] = f"{args.out_plan_name}_{configuration}"
+
+    # Per-channel data resampling: ch0 order 3, binary ch1-N order 0. Requires the
+    # custom fn installed under nnunetv2/preprocessing/resampling/ (see
+    # nnunet-c/engine/corrector_resampling.py). The seg (label) resampler is left
+    # at nnUNet's default.
+    if args.binary_resampling:
+        cfgs[configuration]["resampling_fn_data"] = "resample_corrector_data_to_shape"
+        overrides.append(
+            f"configurations.{configuration}.resampling_fn_data=resample_corrector_data_to_shape")
 
     out_path = target_dir / f"{args.out_plan_name}.json"
     save_plan(target, target_dir / "plan_before.json")
