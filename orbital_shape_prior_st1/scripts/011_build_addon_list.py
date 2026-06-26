@@ -23,8 +23,11 @@ Subjects/cases already present in an existing split (train/val/test_cases.txt)
 are excluded so a part2 patient never lands in two splits (e.g. subject 10398
 is already in val_cases.txt).
 
-The manifest columns are: seg_path, source_id, source, ignore_labels[, note].
-Feed the manifest to scripts/012_add_training_data.py.
+The manifest columns are: seg_path, source_id, source, ignore_labels, modality
+[, note]. ``modality`` is "ct" for chk_* and "mri" for the FLAIR/T2 atlases --
+CT and MRI use the SAME raw value sets but DIFFERENT structure assignments, so
+the modality must be declared explicitly (it can't be auto-detected from the
+values). Feed the manifest to scripts/012_add_training_data.py.
 
 Usage:
     python scripts/011_build_addon_list.py -p configs/paths.yaml \
@@ -49,10 +52,10 @@ def _strip_nii(name: str) -> str:
     return name
 
 
-def _existing_chk_subjects(casefiles_dir: Path):
-    """Return the set of subject IDs already used by chk_ cases in any split."""
+def _existing_chk_subjects(casefiles_dir: Path, fnames):
+    """Return the set of subject IDs used by chk_ cases in the given casefiles."""
     subjects = set()
-    for fname in ("train_cases.txt", "val_cases.txt", "test_cases.txt"):
+    for fname in fnames:
         fp = casefiles_dir / fname
         if not fp.exists():
             continue
@@ -67,10 +70,10 @@ def _existing_chk_subjects(casefiles_dir: Path):
     return subjects
 
 
-def _existing_source_ids(casefiles_dir: Path):
-    """Return the set of source_ids (case minus _OD/_OS) already in any split."""
+def _existing_source_ids(casefiles_dir: Path, fnames):
+    """Return the set of source_ids (case minus _OD/_OS) in the given casefiles."""
     ids = set()
-    for fname in ("train_cases.txt", "val_cases.txt", "test_cases.txt"):
+    for fname in fnames:
         fp = casefiles_dir / fname
         if not fp.exists():
             continue
@@ -111,13 +114,14 @@ def _collect_part2(part2_csv: Path, exclude_subjects):
             "source_id": f"chk_{subject}",
             "source": "checklist",
             "ignore_labels": "",
+            "modality": "ct",  # chk_* are CT nnUNet predictions
             "note": f"part2 keep=True session={session} {note}".strip(),
         })
     return rows
 
 
 def _collect_atlas(label_dir: Path, source: str, prefix: str,
-                   ignore_labels: str, exclude_ids):
+                   ignore_labels: str, modality: str, exclude_ids):
     rows = []
     if not label_dir.exists():
         print(f"  WARN atlas dir not found: {label_dir}")
@@ -132,6 +136,7 @@ def _collect_atlas(label_dir: Path, source: str, prefix: str,
             "source_id": source_id,
             "source": source,
             "ignore_labels": ignore_labels,
+            "modality": modality,
             "note": "",
         })
     return rows
@@ -158,6 +163,11 @@ def main():
     ap.add_argument("-o", "--out", default=None,
                     help="output manifest CSV "
                          "(default <casefiles_dir>/train_addon_manifest.csv)")
+    ap.add_argument("--include-existing", action="store_true",
+                    help="re-include sources already in train/val (only the "
+                         "TEST leakage guard is kept). Use this to RE-PROCESS "
+                         "cases, e.g. to overwrite FLAIR/T2 patches that were "
+                         "aligned with the wrong modality.")
     args = ap.parse_args()
 
     casefiles_dir = None
@@ -171,10 +181,16 @@ def main():
     exclude_subjects = set()
     exclude_ids = set()
     if casefiles_dir and casefiles_dir.exists():
-        exclude_subjects = _existing_chk_subjects(casefiles_dir)
-        exclude_ids = _existing_source_ids(casefiles_dir)
-        print(f"Existing splits: {len(exclude_subjects)} chk subjects, "
-              f"{len(exclude_ids)} source_ids (will be excluded)")
+        # test_cases.txt is ALWAYS excluded (leakage guard, never re-add a test
+        # case to the train pool). train/val are excluded too unless the caller
+        # is deliberately re-processing (--include-existing).
+        fnames = (["test_cases.txt"] if args.include_existing
+                  else ["train_cases.txt", "val_cases.txt", "test_cases.txt"])
+        exclude_subjects = _existing_chk_subjects(casefiles_dir, fnames)
+        exclude_ids = _existing_source_ids(casefiles_dir, fnames)
+        scope = "TEST only" if args.include_existing else "train/val/test"
+        print(f"Excluding {scope}: {len(exclude_subjects)} chk subjects, "
+              f"{len(exclude_ids)} source_ids")
     else:
         print("No casefiles_dir given/found -> NOT excluding existing cases. "
               "Pass -p configs/paths.yaml to avoid train/val/test leakage.")
@@ -185,13 +201,14 @@ def main():
     rows += p2
 
     fl = _collect_atlas(Path(args.flair_label_dir), "atlas_flair",
-                        "atlas_flair_", "", exclude_ids)
-    print(f"atlas_flair: {len(fl)} masks")
+                        "atlas_flair_", "", "mri", exclude_ids)
+    print(f"atlas_flair: {len(fl)} masks (modality=mri)")
     rows += fl
 
     t2 = _collect_atlas(Path(args.t2_label_dir), "atlas_t2",
-                        "atlas_t2_", args.t2_ignore_labels, exclude_ids)
-    print(f"atlas_t2: {len(t2)} masks (ignore_labels='{args.t2_ignore_labels}')")
+                        "atlas_t2_", args.t2_ignore_labels, "mri", exclude_ids)
+    print(f"atlas_t2: {len(t2)} masks (modality=mri, "
+          f"ignore_labels='{args.t2_ignore_labels}')")
     rows += t2
 
     if args.out:
@@ -202,7 +219,8 @@ def main():
         out = Path("train_addon_manifest.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    fields = ["seg_path", "source_id", "source", "ignore_labels", "note"]
+    fields = ["seg_path", "source_id", "source", "ignore_labels",
+              "modality", "note"]
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
