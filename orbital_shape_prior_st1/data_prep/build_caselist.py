@@ -14,9 +14,125 @@ When val_fraction == 0, produces train_cases.txt + test_cases.txt.
 
 import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+
+def _read_casefile(fp: Path) -> List[str]:
+    if not fp.exists():
+        return []
+    return [l.strip() for l in fp.read_text().splitlines() if l.strip()]
+
+
+def rebuild_train_val_from_metadata(
+    aligned_dir: str,
+    casefiles_dir: str,
+    val_fraction: float = 0.10,
+    seed: int = 42,
+    min_structures: int = 3,
+    dry_run: bool = False,
+    verbose: bool = True,
+) -> Tuple[List[str], List[str]]:
+    """Rebuild train_cases.txt + val_cases.txt from the on-disk metadata.
+
+    This mirrors ``generate_train_test_split``'s metadata-driven design (the
+    authoritative list of cases is ``aligned_dir/metadata/*.json``, NOT the
+    existing .txt files) but with two differences tailored to *incrementally
+    adding* training data:
+
+      * ``test_cases.txt`` is treated as FIXED and read verbatim -- every case
+        listed there is held out of the train/val pool (and never reassigned),
+        so a re-split can't leak a test eye into training nor silently drop the
+        test set.
+      * The remaining (non-test) cases -- i.e. ALL previously-aligned training
+        data plus anything newly added by ``012_add_training_data.py`` -- are
+        re-partitioned into train/val. Both eyes (and any variants) of a
+        patient share one ``source_id`` and are assigned atomically, and val is
+        filled to ~``val_fraction`` of CASES (eyes), not patients.
+
+    Because the pool is derived from metadata, previous data is never lost just
+    because it was missing from train_cases.txt/val_cases.txt.
+
+    Returns ``(train_cases, val_cases)`` (each sorted).
+    """
+    meta_dir = Path(aligned_dir) / "metadata"
+    casefiles_dir = Path(casefiles_dir)
+    casefiles_dir.mkdir(parents=True, exist_ok=True)
+
+    if not meta_dir.is_dir():
+        raise FileNotFoundError(
+            f"rebuild_train_val_from_metadata: {meta_dir} not found. Run the "
+            f"canonical-align step (01_prepare_data.py / 012_add_training_data.py) "
+            f"first so the metadata is on disk."
+        )
+
+    test_cases = set(_read_casefile(casefiles_dir / "test_cases.txt"))
+
+    all_meta = []
+    for jp in sorted(meta_dir.glob("*.json")):
+        with open(jp) as f:
+            all_meta.append(json.load(f))
+
+    n_total = len(all_meta)
+    valid = [m for m in all_meta
+             if m.get("num_structures_found", 0) >= min_structures]
+    n_low = n_total - len(valid)
+
+    # Pool = every valid case that is not held out for test.
+    pool = [m for m in valid if m["casename"] not in test_cases]
+
+    # Group eyes/variants by patient (source_id).
+    by_pat: Dict[str, List[str]] = {}
+    for m in pool:
+        by_pat.setdefault(m["source_id"], []).append(m["casename"])
+    patients = sorted(by_pat)
+    total_cases = sum(len(v) for v in by_pat.values())
+    target_val = int(round(total_cases * val_fraction))
+
+    rng = np.random.RandomState(seed)
+    shuffled = list(rng.permutation(patients)) if patients else []
+
+    val_patients, val_count = set(), 0
+    for p in shuffled:
+        if val_count >= target_val:
+            break
+        val_patients.add(p)
+        val_count += len(by_pat[p])
+
+    val_cases = sorted(c for p in val_patients for c in by_pat[p])
+    train_cases = sorted(c for p in patients if p not in val_patients
+                         for c in by_pat[p])
+
+    if verbose:
+        print(f"Metadata scan: {n_total} cases "
+              f"({n_low} dropped <{min_structures} structs, "
+              f"{len(test_cases)} held in test)")
+        print(f"  pool (non-test): {total_cases} cases / {len(patients)} patients")
+        print(f"  target val ~{val_fraction:.0%} -> {target_val} cases")
+        print(f"  train: {len(train_cases)} cases / "
+              f"{len(patients) - len(val_patients)} patients")
+        print(f"  val:   {len(val_cases)} cases / {len(val_patients)} patients "
+              f"({(len(val_cases)/total_cases if total_cases else 0):.1%})")
+        print(f"  val patients: {sorted(val_patients)}")
+
+    # Invariants: disjoint, total preserved, no patient straddles the split.
+    assert set(train_cases).isdisjoint(val_cases)
+    assert len(train_cases) + len(val_cases) == total_cases
+    assert {c for c in train_cases} | {c for c in val_cases} == \
+        {c for v in by_pat.values() for c in v}
+
+    if not dry_run:
+        (casefiles_dir / "train_cases.txt").write_text(
+            "\n".join(train_cases) + "\n")
+        (casefiles_dir / "val_cases.txt").write_text(
+            "\n".join(val_cases) + "\n")
+        if verbose:
+            print(f"  wrote {casefiles_dir/'train_cases.txt'}")
+            print(f"  wrote {casefiles_dir/'val_cases.txt'}")
+            print("  test_cases.txt left unchanged.")
+
+    return train_cases, val_cases
 
 
 def generate_train_test_split(
