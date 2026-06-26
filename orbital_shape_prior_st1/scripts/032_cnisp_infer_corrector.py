@@ -118,9 +118,13 @@ def _maybe_load_delta(params: dict, model_state: dict):
 
 def _save_final_masks(results: List[Dict], layout, out_dir: Path) -> Dict:
     """Group results by (source, step), merge eyes (canonical), remap, save one
-    {1,2,3,4} native mask per (source, step). Returns a manifest dict."""
+    {1,2,3,4} native mask per (source, step). Also save each eye's optimized
+    latent under out_dir/latent/ for reference / cheap re-decode (e.g. at iso).
+    Returns a manifest dict."""
     meta_for = _meta_path_for_case(layout)
     out_dir.mkdir(parents=True, exist_ok=True)
+    latent_dir = out_dir / "latent"
+    latent_dir.mkdir(parents=True, exist_ok=True)
 
     # group by (source_id, step) over start==0 rows only
     groups: Dict[Tuple[str, int], List[Tuple[dict, dict]]] = defaultdict(list)
@@ -141,6 +145,11 @@ def _save_final_masks(results: List[Dict], layout, out_dir: Path) -> Dict:
         ref_meta = items[0][1]
         merged = np.zeros(ref_meta["original_shape"], dtype=np.int16)
         for r, meta in items:
+            # Save this eye's optimized latent for reference / cheap re-decode.
+            lat = r.get("latent")
+            if lat is not None:
+                np.save(str(latent_dir / f"{r['casename']}_step{step:02d}.npy"),
+                        np.asarray(lat))
             lo, sh = _extract_sub_crop_info(r, r["casename"])
             full = invert_alignment_single_eye(
                 r["pred_class_map"], meta,

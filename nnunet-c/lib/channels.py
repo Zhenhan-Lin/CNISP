@@ -69,16 +69,22 @@ def _assemble_images(
     prelabel_struct_to_value: Optional[Dict[str, int]],
     file_ending: str,
     degraded_marker: Optional[str] = None,
+    ref_grid: Optional[tuple] = None,
 ):
-    """Write ch0 (+ binary ch1..chN) to images_dir on the 835 plan-spacing grid.
+    """Write ch0 (+ binary ch1..chN) to images_dir on a common reference grid.
 
-    Returns (target_shape, target_affine, written_filenames). Shared by training
-    assembly (assemble_case) and inference assembly (assemble_inference_case).
+    The reference grid is either ``ref_grid=(shape, affine)`` (e.g. the image's
+    ORIGINAL/native grid -- corrector training) or built from the CT at
+    ``target_spacing``. All channels are resampled onto it (ch0 order 3, binary
+    masks order 0). Returns (target_shape, target_affine, written_filenames).
     """
     assert_degraded_ct_path(Path(ct_path), experiment, marker=degraded_marker)
 
     ct_img = nib.load(str(ct_path))
-    target_shape, target_affine = _rs.build_reference_grid(ct_img, target_spacing)
+    if ref_grid is not None:
+        target_shape, target_affine = ref_grid
+    else:
+        target_shape, target_affine = _rs.build_reference_grid(ct_img, target_spacing)
 
     # ch0: CT, cubic spline.
     ct_rs = _rs.resample_to_grid(ct_img, target_shape, target_affine, order=3)
@@ -145,7 +151,7 @@ def assemble_case(
     case_id: str,
     ct_path: Path,
     gt_path: Path,
-    target_spacing: List[float],
+    target_spacing: Optional[List[float]],
     n_channels: int,
     structures: List[str],
     gt_struct_to_value: Dict[str, int],
@@ -156,18 +162,20 @@ def assemble_case(
     prelabel_struct_to_value: Optional[Dict[str, int]] = None,
     file_ending: str = ".nii.gz",
     degraded_marker: Optional[str] = None,
+    ref_grid: Optional[tuple] = None,
 ) -> Dict:
-    """Assemble one nnUNet TRAINING case onto the 835 plan-spacing reference grid.
+    """Assemble one nnUNet TRAINING case onto a common reference grid.
 
-    Writes images_dir/{case}_0000{fe} (CT, order 3) and, for 5-channel controls,
-    images_dir/{case}_0001..000N{fe} (binary prelabel channels, order 0), plus
-    labels_dir/{case}{fe} (GT remapped to {1,2,3,4}, order 0). All share the
-    reference grid exactly. Returns a summary dict for manifest/asserts.
+    ref_grid=(shape, affine) pins the grid (e.g. the image's ORIGINAL/native grid
+    so all step 3/6/9 share one mask and ch0 is upsampled to native); otherwise
+    the grid is built from the CT at target_spacing. Writes _0000 (CT, order 3),
+    _0001..000N (binary prelabel, order 0), and the label (GT remapped to
+    {1,2,3,4}, order 0). Returns a summary dict.
     """
     target_shape, target_affine, written = _assemble_images(
         case_id, ct_path, target_spacing, n_channels, structures, images_dir,
         experiment, prelabel_path, prelabel_struct_to_value, file_ending,
-        degraded_marker=degraded_marker,
+        degraded_marker=degraded_marker, ref_grid=ref_grid,
     )
 
     # label: GT remapped to {1,2,3,4}, nearest.
@@ -185,7 +193,7 @@ def assemble_case(
     return {
         "case_id": case_id,
         "shape": [int(x) for x in target_shape],
-        "spacing": [float(x) for x in target_spacing],
+        "spacing": [float(x) for x in _rs.voxel_spacing(np.asarray(target_affine))],
         "n_channels": n_channels,
         "image_files": written,
         "label_file": label_name,

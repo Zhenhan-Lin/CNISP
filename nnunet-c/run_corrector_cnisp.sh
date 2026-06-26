@@ -51,6 +51,11 @@ MAX_SAMPLES="${MAX_SAMPLES:-0}"      # global cap on (source,step) samples (0=al
 GPU_THREADS="${GPU_THREADS:-4}"
 CPU_THREADS="${CPU_THREADS:-8}"
 RERUN_FAILED="${RERUN_FAILED:-0}"
+# Resume by default (skip (source,step) whose mask already exists). Set
+# SKIP_EXISTING=0 to RECOMPUTE everything -- needed e.g. to (re)generate the
+# saved latents for masks that already exist.
+SKIP_EXISTING="${SKIP_EXISTING:-1}"
+SKIP_FLAG="--skip-existing"; [[ "$SKIP_EXISTING" == "0" ]] && SKIP_FLAG="--no-skip-existing"
 
 # ── prerequisite: the corrector casefile must exist (written by align) ─
 # Avoids launching N workers that each crash with the same FileNotFoundError.
@@ -114,7 +119,7 @@ worker_cmd() {  # $1=dev $2=ids -> the exact python command (for review/rerun)
          "-m $MODEL -t $TRAIN_YAML -c $TEST_YAML --checkpoint $CHECKPOINT" \
          "--test-label-source $LABEL_SOURCE --experiment $EXPERIMENT" \
          "--test-casefile $CASEFILE --steps $STEPS --max-samples $MAX_SAMPLES" \
-         "--num-shards $NUM_SHARDS --shard-id $2 --skip-existing"
+         "--num-shards $NUM_SHARDS --shard-id $2 $SKIP_FLAG"
 }
 
 # ── build the worker set ─────────────────────────────────────────────
@@ -150,7 +155,7 @@ for i in "${!w_name[@]}"; do
             --experiment "$EXPERIMENT" \
             --test-casefile "$CASEFILE" \
             --steps "$STEPS" --max-samples "$MAX_SAMPLES" \
-            --num-shards "$NUM_SHARDS" --shard-id "$ids" --skip-existing
+            --num-shards "$NUM_SHARDS" --shard-id "$ids" $SKIP_FLAG
     ) >> "$log" 2>&1 &
     pids+=("$!")
 done

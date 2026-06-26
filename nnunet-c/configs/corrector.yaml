@@ -34,14 +34,18 @@ degraded_ct_root: null            # null -> "{work_dir}/input"
 # nnUNetPlans_iso05) before running Stage 4.
 reference_dataset_id: 835
 reference_dataset_name: PHOTON_CT_QAfiltered
-reference_plan: nnUNetPlans
+# 835 was trained ISO 0.5 with the iso05 plan -> follow THAT plan (NOT the
+# default anisotropic nnUNetPlans.json) for spacing/architecture/intensity stats.
+reference_plan: nnUNetPlans_iso05
 configuration: 3d_fullres
 trainer: nnUNetTrainer
 reference_fold: 2
 
-# Target spacing for the pothole-2 (a-ii) no-op resample. null -> read from the
-# 835 plan JSON (configurations.<configuration>.spacing) on the GPU box. Set an
-# explicit [sx, sy, sz] to resample locally without the plan JSON present.
+# Build everything on each image's ORIGINAL native grid (label = GT shared across
+# step 3/6/9; ch1-4 = CNISP native mask; ch0 upsampled to it). nnUNet then
+# resamples original -> iso 0.5 (nnUNetPlans_iso05) at preprocess via its default
+# resampling (ch1-4 become SOFT/continuous -- accepted). target_spacing unused by
+# the builder in this mode; kept null.
 target_spacing: null
 
 # ── Label scheme (fixed channel order for ch1..ch4) ──────────────────

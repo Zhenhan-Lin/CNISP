@@ -32,8 +32,10 @@ from lib.config import add_repo_to_syspath, load_corrector_config, get_control  
 
 add_repo_to_syspath(__file__)
 
+import numpy as np  # noqa: E402
+import nibabel as nib  # noqa: E402
+
 from lib import channels as _ch  # noqa: E402
-from lib import resample as _rs  # noqa: E402
 from lib.labels import NNUNET_LABELS  # noqa: E402
 from engine.build_dataset import _raw_root, _dataset_dir, _write_dataset_json  # noqa: E402
 
@@ -78,7 +80,6 @@ def main() -> int:
         return 2
     manifest = json.load(open(manifest_path))
 
-    target_spacing = _rs.resolve_target_spacing(cfg)
     raw = _raw_root(args.raw_root)
     ds_dir = _dataset_dir(raw, control)
     images_out = ds_dir / "imagesTr"
@@ -87,7 +88,8 @@ def main() -> int:
     labels_out.mkdir(parents=True, exist_ok=True)
 
     print(f"[build] control={args.control.upper()} -> {ds_dir}")
-    print(f"[build] ch0={images_dir}  prelabel={prelabel_dir}  target_spacing={target_spacing}")
+    print(f"[build] ch0={images_dir}  prelabel={prelabel_dir}  grid=GT original (per source)")
+    print(f"[build]   (nnUNet resamples this original grid -> iso 0.5 plan at preprocess)")
 
     assembled, skipped = [], 0
     for case_id, entry in sorted(manifest["cases"].items()):
@@ -95,6 +97,11 @@ def main() -> int:
         if not gt or not Path(gt).exists():
             skipped += 1
             continue
+        # Common grid = the GT's ORIGINAL native grid: label = GT (shared across
+        # steps), ch1-4 = CNISP native mask (already on this grid), ch0 = degraded
+        # upsampled to it. nnUNet then resamples original -> iso 0.5 at preprocess.
+        gt_img = nib.load(str(gt))
+        ref_grid = (gt_img.shape[:3], np.asarray(gt_img.affine))
         for step_s, sinfo in entry.get("steps", {}).items():
             if not sinfo.get("kept"):
                 continue
@@ -110,7 +117,8 @@ def main() -> int:
             cid = f"corr_{case_id}_step{step:02d}"
             summary = _ch.assemble_case(
                 case_id=cid, ct_path=ct, gt_path=Path(gt),
-                target_spacing=target_spacing, n_channels=5, structures=_STRUCTS,
+                target_spacing=None, ref_grid=ref_grid,
+                n_channels=5, structures=_STRUCTS,
                 gt_struct_to_value=dict(NNUNET_LABELS),
                 images_dir=images_out, labels_dir=labels_out,
                 experiment=cfg["experiment"],
