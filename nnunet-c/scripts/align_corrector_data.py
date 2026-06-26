@@ -129,6 +129,19 @@ def main() -> int:
     print(f"[align] dense target -> {dense_labels_dir} (+ {dense_meta_dir})")
     print(f"[align] step obs     -> {aligned_patch}/{step_prefix}XX/")
 
+    # Casefile (for 032 --test-casefile) is written INCREMENTALLY after each
+    # case so a still-running / interrupted align already exposes ready cases.
+    casefiles_dir = res["casefiles_dir"]
+    casefiles_dir.mkdir(parents=True, exist_ok=True)
+    out_cf = casefiles_dir / cfg["corrector_train_casefile"]
+
+    def _flush_casefile():
+        uniq = sorted(set(all_casenames))
+        tmp = out_cf.with_suffix(out_cf.suffix + ".tmp")
+        tmp.write_text("\n".join(uniq) + ("\n" if uniq else ""))
+        tmp.replace(out_cf)   # atomic: readers never see a half-written file
+        return uniq
+
     all_casenames: List[str] = []
     n_dense = n_step = n_fail = 0
     issues: List[str] = []
@@ -173,12 +186,10 @@ def main() -> int:
                 n_fail += 1
                 issues.append(f"{case_id} step={step:02d}: {type(e).__name__}: {e}")
 
-    # Write the corrector casenames file for 032 (--test-casefile).
-    casefiles_dir = res["casefiles_dir"]
-    casefiles_dir.mkdir(parents=True, exist_ok=True)
-    out_cf = casefiles_dir / cfg["corrector_train_casefile"]
-    uniq = sorted(set(all_casenames))
-    out_cf.write_text("\n".join(uniq) + ("\n" if uniq else ""))
+        # Case fully processed -> (re)write the casefile so far.
+        _flush_casefile()
+
+    uniq = _flush_casefile()
 
     if issues:
         print(f"\n[align] {len(issues)} issue(s):", file=sys.stderr)

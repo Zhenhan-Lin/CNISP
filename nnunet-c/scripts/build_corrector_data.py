@@ -94,7 +94,7 @@ def main() -> int:
     n = int(args.n if args.n is not None else cd["n"])
     steps = ([int(s) for s in args.steps.split(",")] if args.steps
              else [int(s) for s in cd["steps"]])
-    thresh_mm = float(cd.get("thick_threshold_mm", 7.0))
+    thresh_mm = float(cd.get("thick_threshold_mm", 10.0))
     thresh_steps = {int(s) for s in cd.get("thick_threshold_steps", [])}
     modality = cd.get("modality", "ct")
 

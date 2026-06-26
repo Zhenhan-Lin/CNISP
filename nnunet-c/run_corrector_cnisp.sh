@@ -39,7 +39,7 @@ CPU_SHARDS="${CPU_SHARDS:-1}"        # shard slots for the CPU worker (weight)
 MODEL="${MODEL:-orbital_ad_v6_5_gt}"
 TRAIN_YAML="${TRAIN_YAML:-configs/train_v6_5_gt.yaml}"
 TEST_YAML="${TEST_YAML:-configs/test_corrector.yaml}"
-CHECKPOINT="${CHECKPOINT:-best}"
+CHECKPOINT="${CHECKPOINT:-latest}"
 LABEL_SOURCE="${LABEL_SOURCE:-nnunet_pred}"
 EXPERIMENT="${EXPERIMENT:-thick}"
 CASEFILE="${CASEFILE:-corrector_train_cases.txt}"
@@ -48,6 +48,19 @@ MAX_SAMPLES="${MAX_SAMPLES:-0}"      # global cap on (source,step) samples (0=al
 GPU_THREADS="${GPU_THREADS:-4}"
 CPU_THREADS="${CPU_THREADS:-8}"
 RERUN_FAILED="${RERUN_FAILED:-0}"
+
+# ── prerequisite: the corrector casefile must exist (written by align) ─
+# Avoids launching N workers that each crash with the same FileNotFoundError.
+CASEFILES_DIR="$(python3 "$HERE/scripts/corrector_env.py" --control C 2>/dev/null \
+    | sed -n 's/^CASEFILES_DIR="\(.*\)"$/\1/p')"
+if [[ -n "$CASEFILES_DIR" && ! -f "$CASEFILES_DIR/$CASEFILE" ]]; then
+    echo "[run_corrector_cnisp] ERROR: casefile not found:" >&2
+    echo "    $CASEFILES_DIR/$CASEFILE" >&2
+    echo "  Run alignment first AND let it finish:" >&2
+    echo "    python3 nnunet-c/scripts/align_corrector_data.py" >&2
+    echo "  (align now writes the casefile incrementally, so partial runs are OK.)" >&2
+    exit 2
+fi
 
 # Parallel arrays describing workers. w_dev is the device TOKEN ("0"/"1"/"cpu")
 # -- never empty, so the TSV round-trips cleanly (an empty CUDA field would be
