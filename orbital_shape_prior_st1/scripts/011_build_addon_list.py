@@ -12,8 +12,15 @@ to the CNISP training set. Three sources are merged:
       to mirror data_prep.canonical_align._collect_scan_list).
   2. FLAIR atlas manual labels (atlas_labels/*.nii.gz) -> source "atlas_flair"
   3. T2   atlas manual labels (atlas_labels/*.nii.gz) -> source "atlas_t2"
-     (these carry a mislabeled raw value 2; recorded in ignore_labels so the
-      aligner drops it before label-scheme detection).
+
+The FLAIR/T2 atlases use the MRI label convention (ON/Globe/Fat/Recti order),
+which differs from CT (ON/Recti/Globe/Fat). To keep ONE convention across the
+whole dataset, this script CONVERTS each MRI atlas label into the CT convention
+up front (data_prep/relabel_mri.py), writes the converted native-space file to
+a staging dir, and points the manifest at that CT-convention file. The T2
+masks' mislabeled raw value 2 is dropped during conversion. As a result the
+manifest is uniformly CT and the downstream align step makes no modality
+decision.
 
 CNISP only consumes masks, so the image modality (CT vs MRI) is irrelevant —
 the manifest lists masks only. The CT degradation bank (modality: ct in
@@ -23,11 +30,9 @@ Subjects/cases already present in an existing split (train/val/test_cases.txt)
 are excluded so a part2 patient never lands in two splits (e.g. subject 10398
 is already in val_cases.txt).
 
-The manifest columns are: seg_path, source_id, source, ignore_labels, modality
-[, note]. ``modality`` is "ct" for chk_* and "mri" for the FLAIR/T2 atlases --
-CT and MRI use the SAME raw value sets but DIFFERENT structure assignments, so
-the modality must be declared explicitly (it can't be auto-detected from the
-values). Feed the manifest to scripts/012_add_training_data.py.
+The manifest columns are: seg_path, source_id, source[, note]. Every seg_path
+is already in the CT convention. Feed the manifest to
+scripts/012_add_training_data.py.
 
 Usage:
     python scripts/011_build_addon_list.py -p configs/paths.yaml \
@@ -40,9 +45,24 @@ Usage:
 import argparse
 import csv
 import glob
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from data_prep.relabel_mri import convert_mri_file_to_ct
+
 KEEP_TRUE = {"true", "1", "yes", "y"}
+
+
+def _parse_int_list(raw: str):
+    out = []
+    for chunk in (raw or "").replace(",", " ").replace(";", " ").split():
+        try:
+            out.append(int(float(chunk)))
+        except ValueError:
+            continue
+    return out
 
 
 def _strip_nii(name: str) -> str:
@@ -110,18 +130,19 @@ def _collect_part2(part2_csv: Path, exclude_subjects):
     for subject in sorted(by_subject):
         session, pred, note = by_subject[subject]
         rows.append({
-            "seg_path": pred,
+            "seg_path": pred,  # chk_* are CT nnUNet predictions -> already CT
             "source_id": f"chk_{subject}",
             "source": "checklist",
-            "ignore_labels": "",
-            "modality": "ct",  # chk_* are CT nnUNet predictions
             "note": f"part2 keep=True session={session} {note}".strip(),
         })
     return rows
 
 
-def _collect_atlas(label_dir: Path, source: str, prefix: str,
-                   ignore_labels: str, modality: str, exclude_ids):
+def _collect_atlas(label_dir: Path, source: str, prefix: str, exclude_ids,
+                   convert_mri: bool = False, convert_dir: Path = None,
+                   drop_labels=()):
+    """List atlas masks. For MRI atlases (convert_mri=True), convert each label
+    to the CT convention and point seg_path at the converted file."""
     rows = []
     if not label_dir.exists():
         print(f"  WARN atlas dir not found: {label_dir}")
@@ -131,13 +152,18 @@ def _collect_atlas(label_dir: Path, source: str, prefix: str,
         source_id = f"{prefix}{stem}"
         if source_id in exclude_ids:
             continue
+        seg_path = fp
+        note = ""
+        if convert_mri:
+            dst = Path(convert_dir) / f"{source_id}.nii.gz"
+            form = convert_mri_file_to_ct(fp, dst, drop_labels=drop_labels)
+            seg_path = str(dst)
+            note = f"MRI->CT ({form}); src={fp}"
         rows.append({
-            "seg_path": fp,
+            "seg_path": seg_path,
             "source_id": source_id,
             "source": source,
-            "ignore_labels": ignore_labels,
-            "modality": modality,
-            "note": "",
+            "note": note,
         })
     return rows
 
@@ -157,9 +183,13 @@ def main():
     ap.add_argument("--t2-label-dir",
                     default="/fs5/p_masi/linz18/data/atlas_megadocker_export/"
                             "T2-atlas/atlas_labels")
-    ap.add_argument("--t2-ignore-labels", default="2",
-                    help="raw label value(s) to drop from T2 atlas masks "
-                         "(space/comma separated). Default '2'.")
+    ap.add_argument("--t2-drop-labels", default="2",
+                    help="raw label value(s) dropped (->0) from T2 atlas masks "
+                         "during MRI->CT conversion (space/comma separated). "
+                         "Default '2' (the known mislabel).")
+    ap.add_argument("--mri-ct-dir", default=None,
+                    help="dir for the CT-converted MRI atlas labels "
+                         "(default <casefiles_dir>/mri_native_ct_labels)")
     ap.add_argument("-o", "--out", default=None,
                     help="output manifest CSV "
                          "(default <casefiles_dir>/train_addon_manifest.csv)")
@@ -195,21 +225,35 @@ def main():
         print("No casefiles_dir given/found -> NOT excluding existing cases. "
               "Pass -p configs/paths.yaml to avoid train/val/test leakage.")
 
+    # Where to write the CT-converted MRI atlas labels.
+    if args.mri_ct_dir:
+        mri_ct_dir = Path(args.mri_ct_dir)
+    elif casefiles_dir:
+        mri_ct_dir = casefiles_dir / "mri_native_ct_labels"
+    else:
+        mri_ct_dir = Path("mri_native_ct_labels")
+
     rows = []
     p2 = _collect_part2(Path(args.part2_csv), exclude_subjects)
     print(f"checklist (part2 keep=True, deduped, excluded): {len(p2)} subjects")
     rows += p2
 
     fl = _collect_atlas(Path(args.flair_label_dir), "atlas_flair",
-                        "atlas_flair_", "", "mri", exclude_ids)
-    print(f"atlas_flair: {len(fl)} masks (modality=mri)")
+                        "atlas_flair_", exclude_ids,
+                        convert_mri=True, convert_dir=mri_ct_dir,
+                        drop_labels=())
+    print(f"atlas_flair: {len(fl)} masks (MRI->CT)")
     rows += fl
 
+    t2_drop = _parse_int_list(args.t2_drop_labels)
     t2 = _collect_atlas(Path(args.t2_label_dir), "atlas_t2",
-                        "atlas_t2_", args.t2_ignore_labels, "mri", exclude_ids)
-    print(f"atlas_t2: {len(t2)} masks (modality=mri, "
-          f"ignore_labels='{args.t2_ignore_labels}')")
+                        "atlas_t2_", exclude_ids,
+                        convert_mri=True, convert_dir=mri_ct_dir,
+                        drop_labels=t2_drop)
+    print(f"atlas_t2: {len(t2)} masks (MRI->CT, drop_labels={t2_drop})")
     rows += t2
+    if fl or t2:
+        print(f"CT-converted MRI labels written to: {mri_ct_dir}")
 
     if args.out:
         out = Path(args.out)
@@ -219,8 +263,7 @@ def main():
         out = Path("train_addon_manifest.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    fields = ["seg_path", "source_id", "source", "ignore_labels",
-              "modality", "note"]
+    fields = ["seg_path", "source_id", "source", "note"]
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()

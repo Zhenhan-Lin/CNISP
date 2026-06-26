@@ -56,18 +56,12 @@ from scipy import ndimage
 # ── Label conventions ─────────────────────────────────────────────
 # Input maps: names MUST match CANONICAL_LABELS keys exactly.
 #
-# CRITICAL: CT and MRI atlases use the SAME raw value sets ({1,3,5,7}
-# "labelfusion"/odd, or {1,2,3,4} "nnunet"/consecutive) but assign those
-# values to DIFFERENT structures. The odd-vs-consecutive *form* is
-# auto-detectable from the values present, but CT-vs-MRI *modality* is NOT
-# (identical value sets) -- it must be declared per source (``modality=``).
-#   CT  : value order ON, Recti, Globe, Fat
-#   MRI : value order ON, Globe, Fat, Recti
+# This step is CT-only: every mask reaching it is expected to already be in the
+# CT label convention. MRI atlases (FLAIR/T2) are converted to CT up front by
+# data_prep/relabel_mri.py (driven by scripts/011_build_addon_list.py), so no
+# modality decision is made here.
 NNUNET_MAP_CT = {1: "ON", 2: "Recti", 3: "Globe", 4: "Fat"}
 LABELFUSION_MAP_CT = {1: "ON", 3: "Recti", 5: "Globe", 7: "Fat"}
-# MRI atlases (FLAIR / T2): {1:ON, 2/3:Globe, 3/5:Orbital Fat, 4/7:Recti Muscle}
-NNUNET_MAP_MRI = {1: "ON", 2: "Globe", 3: "Fat", 4: "Recti"}
-LABELFUSION_MAP_MRI = {1: "ON", 3: "Globe", 5: "Fat", 7: "Recti"}
 
 # Canonical output: fixed across all downstream code
 CANONICAL_LABELS = {"BG": 0, "ON": 1, "Globe": 2, "Fat": 3, "Recti": 4}
@@ -202,9 +196,7 @@ class AlignmentMetadata:
     original_affine: list       # 4×4 nested list
     original_shape: list
 
-    input_label_scheme: str     # "nnunet" (consecutive) or "labelfusion" (odd)
-    modality: str               # "ct" or "mri" -- which structure assignment
-                                # the input_label_scheme values map to
+    input_label_scheme: str     # "nnunet" or "labelfusion"
 
     # Centroids are stored in the ORIGINAL scanner world frame (before the RAS
     # reorient + OS→OD flip). They map back to the original NIfTI via
@@ -242,18 +234,10 @@ class AlignmentMetadata:
 
 
 # ── Label detection ───────────────────────────────────────────────
-# Detects the odd ("labelfusion", {1,3,5,7}) vs consecutive ("nnunet",
-# {1,2,3,4}) FORM from the values present, then picks the CT or MRI structure
-# assignment based on ``modality`` (which the values alone cannot reveal).
-def detect_label_scheme(
-    data: np.ndarray, modality: str = "ct"
-) -> Tuple[str, Dict[int, str]]:
-    modality = (modality or "ct").lower()
-    if modality == "mri":
-        nnunet_map, lf_map = NNUNET_MAP_MRI, LABELFUSION_MAP_MRI
-    else:
-        nnunet_map, lf_map = NNUNET_MAP_CT, LABELFUSION_MAP_CT
-
+# CT-only: detects the odd ("labelfusion", {1,3,5,7}) vs consecutive
+# ("nnunet", {1,2,3,4}) CT scheme from the values present. MRI masks must be
+# converted to CT before reaching this function (see data_prep/relabel_mri.py).
+def detect_label_scheme(data: np.ndarray) -> Tuple[str, Dict[int, str]]:
     labels = set(np.unique(data)) - {0}
     if not labels:
         return "empty", {}
@@ -263,17 +247,23 @@ def detect_label_scheme(
     if min_label < 0:
         offset = min_label  # e.g., -1000
         labels = {l - offset for l in labels} - {0}
-        # Rebuild map with original (offset) keys, modality-aware values.
+        # Rebuild map with original (negative) keys
         if labels & {5, 7}:
-            return "labelfusion", {offset + v: n for v, n in lf_map.items()}
+            return "labelfusion", {
+                offset + 1: "ON", offset + 3: "Recti",
+                offset + 5: "Globe", offset + 7: "Fat",
+            }
         if 2 in labels:
-            return "nnunet", {offset + v: n for v, n in nnunet_map.items()}
+            return "nnunet", {
+                offset + 1: "ON", offset + 2: "Recti",
+                offset + 3: "Globe", offset + 4: "Fat",
+            }
         return "empty", {}
 
     if 2 in labels:
-        return "nnunet", nnunet_map
+        return "nnunet", NNUNET_MAP_CT
     if labels & {5, 7}:
-        return "labelfusion", lf_map
+        return "labelfusion", LABELFUSION_MAP_CT
     # No reliable signal — refuse to guess so downstream remapping doesn't
     # silently produce garbage.
     return "unknown", {}
@@ -514,8 +504,7 @@ def flip_os_to_od(data, affine):
 # ── Single-case ───────────────────────────────────────────────────
 
 def align_single_case(seg_path, source_id, source="checklist",
-                      patch_size_mm=80.0, search_size_mm=None,
-                      ignore_labels=None, modality="ct"):
+                      patch_size_mm=80.0, search_size_mm=None):
     """Crop one ``patch_size_mm`` cubic patch per eye, centred on the eye's
     single-eye LCC centroid.
 
@@ -557,19 +546,7 @@ def align_single_case(seg_path, source_id, source="checklist",
     data = np.asarray(img.dataobj).astype(np.int16, copy=False)
     affine = img.affine.copy()
 
-    # Drop spurious / unwanted raw label values BEFORE scheme detection. This
-    # is needed e.g. for the T2 atlas, whose masks carry a mislabeled raw
-    # value 2 on top of the labelfusion {1,3,5,7} scheme. Without this strip,
-    # detect_label_scheme sees "2 in labels" and wrongly classifies the case
-    # as the nnUNet CT scheme. Setting the voxels to 0 is safe in both the
-    # plain and the -1000-offset conventions: 0 is excluded from the label set
-    # in detect_label_scheme and is mapped to canonical BG by remap_to_canonical.
-    if ignore_labels:
-        data = data.copy()
-        for lbl in ignore_labels:
-            data[data == int(lbl)] = 0
-
-    scheme_name, label_map = detect_label_scheme(data, modality=modality)
+    scheme_name, label_map = detect_label_scheme(data)
     if not label_map:
         raise ValueError(f"{source_id}: unrecognized label scheme")
 
@@ -677,7 +654,6 @@ def align_single_case(seg_path, source_id, source="checklist",
             original_affine=affine.tolist(),
             original_shape=list(data.shape),
             input_label_scheme=scheme_name,
-            modality=modality,
             globe_centroid_world=globe_centroid_world.tolist(),
             crop_centroid_world=crop_centroid_world.tolist(),
             patch_size_mm=patch_size_mm,
@@ -704,46 +680,16 @@ def align_single_case(seg_path, source_id, source="checklist",
 
 # ── Dataset-level ─────────────────────────────────────────────────
 
-def _parse_ignore_labels(raw):
-    """Parse an ``ignore_labels`` cell into a list[int].
-
-    Accepts None / NaN / "" -> [], a single int, or a separated string such
-    as "2", "2;5", "2,5", "2 5". Returns sorted unique ints.
-    """
-    if raw is None:
-        return []
-    if isinstance(raw, (int, np.integer)):
-        return [int(raw)]
-    if isinstance(raw, float):
-        # NaN (missing cell from pandas) or a plain numeric float
-        if np.isnan(raw):
-            return []
-        return [int(raw)]
-    s = str(raw).strip()
-    if not s or s.lower() in {"nan", "none"}:
-        return []
-    parts = [p for chunk in s.replace(",", " ").replace(";", " ").split()
-             for p in [chunk.strip()] if p]
-    out = []
-    for p in parts:
-        try:
-            out.append(int(float(p)))
-        except ValueError:
-            continue
-    return sorted(set(out))
-
-
 def _collect_scan_list(checklist_csv=None, atlas_label_dir=None,
                        manifest_csv=None):
     """Build unified scan list from checklist + atlas (+ optional manifest).
 
     ``manifest_csv`` is an explicit, pre-built "list" of scans to align with
-    columns: ``seg_path, source_id, source`` and an optional ``ignore_labels``
-    (raw label values to drop before scheme detection). It is the path used
-    when *adding* training data via scripts/011_build_addon_list.py +
-    scripts/012_add_training_data.py, so the caller controls source_id naming
-    and the T2-atlas label-2 strip explicitly rather than relying on the
-    checklist/atlas-dir auto-discovery below.
+    columns: ``seg_path, source_id, source``. It is the path used when *adding*
+    training data via scripts/011_build_addon_list.py +
+    scripts/012_add_training_data.py, so the caller controls source_id naming.
+    Every mask referenced by the manifest must already be in the CT label
+    convention (MRI atlases are converted to CT by 011 via relabel_mri.py).
     """
     scans = []
 
@@ -760,16 +706,6 @@ def _collect_scan_list(checklist_csv=None, atlas_label_dir=None,
                 "seg_path": str(row["seg_path"]),
                 "source_id": str(row["source_id"]),
                 "source": str(row["source"]),
-                "ignore_labels": _parse_ignore_labels(
-                    row["ignore_labels"] if "ignore_labels" in df.columns
-                    else None
-                ),
-                "modality": (
-                    str(row["modality"]).strip().lower()
-                    if "modality" in df.columns and pd.notna(row["modality"])
-                    and str(row["modality"]).strip()
-                    else "ct"
-                ),
             })
         print(f"Manifest: {len(scans)} scans ({manifest_csv})")
         return scans
@@ -844,8 +780,6 @@ def align_dataset(checklist_csv=None, atlas_label_dir=None,
                 scan["seg_path"], scan["source_id"], scan["source"],
                 patch_size_mm=patch_size_mm,
                 search_size_mm=search_size_mm,
-                ignore_labels=scan.get("ignore_labels"),
-                modality=scan.get("modality", "ct"),
             )
         except Exception as e:  # noqa: BLE001 — keep batch going on per-case failure
             n_failed += 1
