@@ -44,6 +44,7 @@ LABEL_SOURCE="${LABEL_SOURCE:-nnunet_pred}"
 EXPERIMENT="${EXPERIMENT:-thick}"
 CASEFILE="${CASEFILE:-corrector_train_cases.txt}"
 STEPS="${STEPS:-3,6,9}"
+MAX_SAMPLES="${MAX_SAMPLES:-0}"      # global cap on (source,step) samples (0=all)
 GPU_THREADS="${GPU_THREADS:-4}"
 CPU_THREADS="${CPU_THREADS:-8}"
 RERUN_FAILED="${RERUN_FAILED:-0}"
@@ -96,7 +97,7 @@ worker_cmd() {  # $1=dev $2=ids -> the exact python command (for review/rerun)
     echo "CUDA_VISIBLE_DEVICES=\"$cuda\" PYTHONPATH=\".:$REPO_ROOT\" python3 $INFER" \
          "-m $MODEL -t $TRAIN_YAML -c $TEST_YAML --checkpoint $CHECKPOINT" \
          "--test-label-source $LABEL_SOURCE --experiment $EXPERIMENT" \
-         "--test-casefile $CASEFILE --steps $STEPS" \
+         "--test-casefile $CASEFILE --steps $STEPS --max-samples $MAX_SAMPLES" \
          "--num-shards $NUM_SHARDS --shard-id $2 --skip-existing"
 }
 
@@ -105,7 +106,7 @@ if [[ "$RERUN_FAILED" == "1" ]]; then build_workers_from_failed; else build_work
 
 echo "================================================================"
 echo "[run_corrector_cnisp] devices='$DEVICES' num_shards=$NUM_SHARDS"
-echo "[run_corrector_cnisp] model=$MODEL steps=$STEPS casefile=$CASEFILE"
+echo "[run_corrector_cnisp] model=$MODEL steps=$STEPS casefile=$CASEFILE max_samples=$MAX_SAMPLES"
 echo "[run_corrector_cnisp] logs -> $LOG_DIR/{gpu*,cpu}.log"
 echo "================================================================"
 
@@ -131,7 +132,7 @@ for i in "${!w_name[@]}"; do
             --test-label-source "$LABEL_SOURCE" \
             --experiment "$EXPERIMENT" \
             --test-casefile "$CASEFILE" \
-            --steps "$STEPS" \
+            --steps "$STEPS" --max-samples "$MAX_SAMPLES" \
             --num-shards "$NUM_SHARDS" --shard-id "$ids" --skip-existing
     ) >> "$log" 2>&1 &
     pids+=("$!")

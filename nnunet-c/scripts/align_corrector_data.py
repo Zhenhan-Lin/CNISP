@@ -43,7 +43,6 @@ import numpy as np  # noqa: E402
 # data_prep.* (orbital_shape_prior_st1 on path) + reusable nnUNet helpers
 from nnunet.helpers.config import add_cnisp_src_to_syspath  # noqa: E402
 from nnunet.helpers.patch_size import resolve_patch_size_mm  # noqa: E402
-from nnunet.lib.patches import dataset835_layout  # noqa: E402
 
 add_cnisp_src_to_syspath(__file__)
 
@@ -95,11 +94,13 @@ def main() -> int:
     cd = cfg["corrector_data"]
     cnisp_paths = cfg["_cnisp_paths"]
     experiment = cfg["experiment"]
-    aligned_dir = res["aligned_dir"]
+    cnisp_aligned_dir = res["aligned_dir"]   # CNISP training patches (for patch-size only)
 
     data_root = Path(cd["data_root"])
     data_root = data_root if data_root.is_absolute() else (res["repo_root"] / data_root)
     nnunet_pred_dir = data_root / cd.get("nnunet_pred_dirname", "nnunet_pred")
+    # Corrector aligned patches live under data/aligned_patch (not CNISP aligned_dir).
+    aligned_patch = data_root / cd.get("aligned_patch_dirname", "aligned_patch")
     manifest_path = data_root / "corrector_data_manifest.json"
     if not manifest_path.is_file():
         print(f"[align] {manifest_path} missing -- run build_corrector_data.py first.",
@@ -109,18 +110,24 @@ def main() -> int:
 
     # Patch size pinned to the trained CNISP metadata (must match the AutoDecoder).
     patch_size_mm = resolve_patch_size_mm(
-        args.patch_size, aligned_dir / "metadata",
+        args.patch_size, cnisp_aligned_dir / "metadata",
         log_prefix="corrector_align", infer_fn=infer_patch_size_mm,
     )
 
-    layout = dataset835_layout(cnisp_paths, aligned_dir)        # dense target dirs
+    # Output dirs: same subdir NAMES as the CNISP convention, but rooted under the
+    # corrector's own aligned_patch dir so 032 reads them with --aligned-dir.
+    dense_labels_dir = aligned_patch / cnisp_paths.get(
+        "labels_dataset835_dirname", "labels_dataset835")
+    dense_meta_dir = aligned_patch / cnisp_paths.get(
+        "metadata_dataset835_dirname", "metadata_dataset835")
     base_prefix = cnisp_paths.get("labels_dataset835_step_prefix",
                                   "labels_dataset835_step_")
     step_prefix = exp_step_prefix(base_prefix, experiment)      # per-step obs dirs
 
     print(f"[align] experiment={experiment} patch={patch_size_mm}mm")
-    print(f"[align] dense target -> {layout['labels_dir']} (+ {layout['meta_dir']})")
-    print(f"[align] step obs     -> {aligned_dir}/{step_prefix}XX/")
+    print(f"[align] aligned_patch root -> {aligned_patch}")
+    print(f"[align] dense target -> {dense_labels_dir} (+ {dense_meta_dir})")
+    print(f"[align] step obs     -> {aligned_patch}/{step_prefix}XX/")
 
     all_casenames: List[str] = []
     n_dense = n_step = n_fail = 0
@@ -133,7 +140,7 @@ def main() -> int:
             try:
                 cns = _align_and_write(
                     Path(gt_pred), case_id, "corrector_dense", patch_size_mm,
-                    layout["labels_dir"], layout["meta_dir"], force=args.force,
+                    dense_labels_dir, dense_meta_dir, force=args.force,
                 )
                 all_casenames.extend(cns)
                 n_dense += 1
@@ -156,7 +163,7 @@ def main() -> int:
                 issues.append(f"{case_id} step={step:02d}: nnUNet pred missing "
                               f"({seg}); run run_corrector_data.sh predict")
                 continue
-            step_dir = aligned_dir / f"{step_prefix}{step:02d}"
+            step_dir = aligned_patch / f"{step_prefix}{step:02d}"
             try:
                 _align_and_write(seg, case_id, f"corrector_step_{step:02d}",
                                  patch_size_mm, step_dir, meta_dir=None,

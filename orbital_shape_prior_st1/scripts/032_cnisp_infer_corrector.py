@@ -55,7 +55,7 @@ from engine.infer import (                                      # noqa: E402
     _load_labels_dense_per_case, _build_label_obs_loader, _meta_path_for_case,
     device as INFER_DEVICE,
 )
-from engine.test_label_sources import build_run_layout          # noqa: E402
+from engine.test_label_sources import build_run_layout, step_input_patch_path  # noqa: E402
 from engine.native_mapping import (                             # noqa: E402
     invert_alignment_single_eye, _extract_sub_crop_info,
 )
@@ -64,6 +64,11 @@ from data_prep.sparsify import resolve_slice_step_axes          # noqa: E402
 
 # Fixed canonical -> nnUNet remap (by structure name). DO NOT value-shift.
 CANON2NNUNET = {0: 0, 1: 1, 2: 3, 3: 4, 4: 2}
+
+
+def _source_of(casename: str) -> str:
+    """`chk_X_OD` / `10058_..._CT_0_OD` -> source id (strip the _OD/_OS eye)."""
+    return casename[:-3] if casename.endswith(("_OD", "_OS")) else casename
 
 
 def _resolve_cfg(path_arg: str) -> Path:
@@ -174,6 +179,11 @@ def main() -> int:
                     help="casefile under casefiles_dir (default: test yaml's value)")
     ap.add_argument("--out-dir", default=None,
                     help="output dir (default: nnunet-c/data/cnisp_pred)")
+    ap.add_argument("--aligned-dir",
+                    default=str(REPO_ROOT / "nnunet-c" / "data" / "aligned_patch"),
+                    help="aligned_dir for the corrector patches (labels_dataset835*/ "
+                         "+ metadata_dataset835/). Default: nnunet-c/data/aligned_patch. "
+                         "Pass the CNISP aligned_dir to use the shared tree instead.")
     ap.add_argument("--steps", default="3,6,9",
                     help="explicit step sizes matching the degraded data "
                          "(default 3,6,9). Use 'adaptive' to fall back to the "
@@ -192,6 +202,12 @@ def main() -> int:
     ap.add_argument("--no-skip-existing", dest="skip_existing",
                     action="store_false",
                     help="recompute even if the output mask exists.")
+    ap.add_argument("--max-samples", type=int, default=0,
+                    help="cap the number of (source,step) samples to run, "
+                         "GLOBALLY (0=all). Selected as the first N by sorted "
+                         "(source_id, step) among those with an nnUNet obs "
+                         "patch. Applied BEFORE sharding so multi-worker runs "
+                         "stay consistent. (explicit --steps only)")
     args = ap.parse_args()
 
     params = _load_params(_resolve_cfg(args.paths),
@@ -211,7 +227,13 @@ def main() -> int:
     out_dir = (Path(args.out_dir) if args.out_dir
                else REPO_ROOT / "nnunet-c" / "data" / "cnisp_pred")
 
+    # Read/write the corrector's aligned patches from data/aligned_patch (not the
+    # shared CNISP aligned_dir), unless overridden.
+    if args.aligned_dir:
+        params["aligned_dir"] = args.aligned_dir
+
     layout = build_run_layout(params)   # used for metadata/label resolution only
+    print(f"[032] aligned_dir = {params['aligned_dir']}")
     model_dir = Path(params["model_basedir"]) / params["model_name"]
 
     print("=" * 64)
@@ -233,6 +255,40 @@ def main() -> int:
     # ── cases + dense targets + (deployment) input loader ────────────
     casefiles_dir = Path(params["casefiles_dir"])
     casenames_all = load_casenames(casefiles_dir / params["test_casefile"])
+
+    # ── GLOBAL --max-samples cap (first N (source,step) with an obs patch) ─
+    # Computed from the RAW casefile (deterministic, identical across workers)
+    # so the cap is consistent before sharding. Restricts which sources we even
+    # bother loading dense targets for.
+    allowed_pairs = None
+    explicit_steps = args.steps.strip().lower() != "adaptive"
+    if args.max_samples and args.max_samples > 0 and explicit_steps:
+        steps_list = [int(s) for s in args.steps.split(",") if s.strip()]
+        by_src: Dict[str, List[str]] = {}
+        for cn in casenames_all:
+            by_src.setdefault(_source_of(cn), []).append(cn)
+        is_atlas_gt = (layout.test_label_source == "atlas_gt")
+        allowed_pairs, allowed_src = set(), set()
+        for src in sorted(by_src):
+            for step in steps_list:
+                # "has nnUNet pred" = the per-step obs patch exists for an eye
+                # (atlas_gt has no obs patch -> count all by availability of GT).
+                ok = is_atlas_gt or any(
+                    step_input_patch_path(layout, cn, step, 0).exists()
+                    for cn in by_src[src]
+                )
+                if not ok:
+                    continue
+                allowed_pairs.add((src, step))
+                allowed_src.add(src)
+                if len(allowed_pairs) >= args.max_samples:
+                    break
+            if len(allowed_pairs) >= args.max_samples:
+                break
+        casenames_all = [cn for cn in casenames_all if _source_of(cn) in allowed_src]
+        print(f"[032] --max-samples {args.max_samples}: selected "
+              f"{len(allowed_pairs)} (source,step) over {len(allowed_src)} source(s)")
+
     labels_dense, spacings_dense, casenames = _load_labels_dense_per_case(
         layout, casenames_all,
     )
@@ -308,6 +364,8 @@ def main() -> int:
 
         for ci, cn in enumerate(casenames):
             for step in steps:
+                if allowed_pairs is not None and (_source_of(cn), step) not in allowed_pairs:
+                    continue  # outside the global --max-samples selection
                 if args.skip_existing:
                     stem = _source_stem(cn)
                     if stem and (out_dir / f"{stem}_step{step:02d}.nii.gz").exists():

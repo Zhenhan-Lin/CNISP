@@ -22,18 +22,24 @@ from lib import resample as _rs
 from lib.labels import remap_to_nnunet
 
 
-def assert_degraded_ct_path(ct_path: Path, experiment: str) -> None:
-    """Pin ch0 to the degraded/thick sparse CT; reject native/dense inputs."""
+def assert_degraded_ct_path(ct_path: Path, experiment: str,
+                            marker: Optional[str] = None) -> None:
+    """Pin ch0 to a degraded CT; reject native/dense inputs.
+
+    Two accepted degraded sources:
+      * work_dir sweep:  marker is None -> require '/{experiment}/sparse_step_'
+      * data/ tree:      pass marker='/data/images/' (build_corrector_dataset)
+    """
     s = str(ct_path)
-    marker = f"/{experiment}/sparse_step_"
-    if marker not in s:
-        raise AssertionError(
-            f"ch0 must be a degraded sparse CT under '{marker}...', got {s!r}. "
-            f"Refusing to build the corrector on a non-degraded image."
-        )
     if "/input/native/" in s or s.rstrip("/").endswith("/native"):
         raise AssertionError(
             f"ch0 points at a NATIVE/dense CT ({s!r}); ch0 must be degraded."
+        )
+    needle = marker if marker is not None else f"/{experiment}/sparse_step_"
+    if needle not in s:
+        raise AssertionError(
+            f"ch0 must be a degraded CT under '{needle}...', got {s!r}. "
+            f"Refusing to build the corrector on a non-degraded image."
         )
 
 
@@ -62,13 +68,14 @@ def _assemble_images(
     prelabel_path: Optional[Path],
     prelabel_struct_to_value: Optional[Dict[str, int]],
     file_ending: str,
+    degraded_marker: Optional[str] = None,
 ):
     """Write ch0 (+ binary ch1..chN) to images_dir on the 835 plan-spacing grid.
 
     Returns (target_shape, target_affine, written_filenames). Shared by training
     assembly (assemble_case) and inference assembly (assemble_inference_case).
     """
-    assert_degraded_ct_path(Path(ct_path), experiment)
+    assert_degraded_ct_path(Path(ct_path), experiment, marker=degraded_marker)
 
     ct_img = nib.load(str(ct_path))
     target_shape, target_affine = _rs.build_reference_grid(ct_img, target_spacing)
@@ -116,11 +123,13 @@ def assemble_inference_case(
     prelabel_path: Optional[Path] = None,
     prelabel_struct_to_value: Optional[Dict[str, int]] = None,
     file_ending: str = ".nii.gz",
+    degraded_marker: Optional[str] = None,
 ) -> Dict:
     """Assemble inference channels only (no GT/label) into images_dir."""
     target_shape, target_affine, written = _assemble_images(
         case_id, ct_path, target_spacing, n_channels, structures, images_dir,
         experiment, prelabel_path, prelabel_struct_to_value, file_ending,
+        degraded_marker=degraded_marker,
     )
     _assert_geometry_images(images_dir, written, target_shape, target_affine)
     return {
@@ -146,6 +155,7 @@ def assemble_case(
     prelabel_path: Optional[Path] = None,
     prelabel_struct_to_value: Optional[Dict[str, int]] = None,
     file_ending: str = ".nii.gz",
+    degraded_marker: Optional[str] = None,
 ) -> Dict:
     """Assemble one nnUNet TRAINING case onto the 835 plan-spacing reference grid.
 
@@ -157,6 +167,7 @@ def assemble_case(
     target_shape, target_affine, written = _assemble_images(
         case_id, ct_path, target_spacing, n_channels, structures, images_dir,
         experiment, prelabel_path, prelabel_struct_to_value, file_ending,
+        degraded_marker=degraded_marker,
     )
 
     # label: GT remapped to {1,2,3,4}, nearest.
