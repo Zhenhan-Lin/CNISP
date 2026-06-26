@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Corrector training-data generation (CSV-driven):
 #   1. select keep=False & qa_status=yes images (first N) and THICK-degrade them
-#      at steps 3/6/9 (drop step-9 if eff_res = spacing*9 > 10mm) -> data/images
+#      at steps 3/6/9/12 (drop step-9/12 if eff_res = spacing*step > 10mm) -> data/images
 #   2. predict the degraded images with the Dataset835 nnUNet     -> data/nnunet_pred
 #   (CNISP predictions later land in data/cnisp_pred)
 #

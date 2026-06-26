@@ -43,7 +43,7 @@ CHECKPOINT="${CHECKPOINT:-latest}"
 LABEL_SOURCE="${LABEL_SOURCE:-nnunet_pred}"
 EXPERIMENT="${EXPERIMENT:-thick}"
 CASEFILE="${CASEFILE:-corrector_train_cases.txt}"
-STEPS="${STEPS:-3,6,9}"
+STEPS="${STEPS:-3,6,9,12}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"      # global cap on (source,step) samples (0=all)
 GPU_THREADS="${GPU_THREADS:-4}"
 CPU_THREADS="${CPU_THREADS:-8}"

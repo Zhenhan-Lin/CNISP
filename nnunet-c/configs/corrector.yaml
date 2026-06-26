@@ -81,9 +81,9 @@ corrector_data:
   # Thick degradation step sizes. For steps listed in thick_threshold_steps,
   # drop that (case, step) variant if resulting slice thickness
   # (= through-plane spacing * step) exceeds thick_threshold_mm.
-  steps: [3, 6, 9]
+  steps: [3, 6, 9, 12]
   thick_threshold_mm: 10.0          # drop a thresholded step if eff_res (spacing*step) exceeds this
-  thick_threshold_steps: [9]
+  thick_threshold_steps: [9, 12]
   modality: ct
   # Output tree (relative to repo root): degraded CTs, 835 preds, CNISP preds.
   data_root: nnunet-c/data

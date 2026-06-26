@@ -184,9 +184,9 @@ def main() -> int:
                     help="aligned_dir for the corrector patches (labels_dataset835*/ "
                          "+ metadata_dataset835/). Default: nnunet-c/data/aligned_patch. "
                          "Pass the CNISP aligned_dir to use the shared tree instead.")
-    ap.add_argument("--steps", default="3,6,9",
+    ap.add_argument("--steps", default="3,6,9,12",
                     help="explicit step sizes matching the degraded data "
-                         "(default 3,6,9). Use 'adaptive' to fall back to the "
+                         "(default 3,6,9,12). Use 'adaptive' to fall back to the "
                          "test yaml's adaptive_step_sweep.")
     ap.add_argument("--num-shards", type=int, default=1,
                     help="split sources across N shard slots (for multi-GPU / "
