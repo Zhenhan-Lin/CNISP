@@ -168,10 +168,41 @@ def validate(out_dir: Path, source_id: str, casenames, metadata_dir: Path,
 
     # ── copy the validated mask to reconstructions/tmp for easy access ─
     tmp_base.mkdir(parents=True, exist_ok=True)
-    dst = tmp_base / f"{Path(mask_path).stem.replace('.nii','')}_valid_step{step:02d}.nii.gz"
+    base_stem = Path(mask_path).stem.replace(".nii", "")
+    dst = tmp_base / f"{base_stem}_valid_step{step:02d}.nii.gz"
     shutil.copyfile(mask_path, dst)
     report["copied_to"] = str(dst)
     print(f"  copied native mask -> {dst}")
+
+    # ── ALSO write a clean nnUNet-scheme copy {0,1,2,3,4} ────────────
+    # The production native mask stays in the original scheme (labelfusion
+    # ±offset / nnunet) so compare_native native-Dice still matches the GT.
+    # This extra copy remaps by STRUCTURE NAME -> {ON:1,Recti:2,Globe:3,Fat:4},
+    # which is what nnUNet-C consumes as a prelabel channel.
+    try:
+        from nnunet.data_prep.resolve_gt import build_struct_to_value, NNUNET_LABELS
+        scheme = meta.get("input_label_scheme", "nnunet")
+        offset = int(arr.min()) if int(arr.min()) < 0 else 0
+        stv = build_struct_to_value(scheme, offset)  # name -> original value
+        remapped = np.zeros(arr.shape, dtype=np.uint8)
+        mapping = {}
+        for name, val in stv.items():
+            remapped[arr == val] = NNUNET_LABELS[name]
+            mapping[name] = {"from": int(val), "to": int(NNUNET_LABELS[name])}
+        nnu_path = tmp_base / f"{base_stem}_valid_step{step:02d}_nnunet.nii.gz"
+        nib.save(nib.Nifti1Image(remapped, img.affine), str(nnu_path))
+        ru = sorted(int(v) for v in np.unique(remapped))
+        report["nnunet_scheme_mask"] = str(nnu_path)
+        report["nnunet_scheme_mapping"] = mapping
+        report["nnunet_scheme_values"] = ru
+        print(f"  nnUNet-scheme copy ({scheme}, offset={offset}) -> {nnu_path}")
+        print(f"    label remap: " +
+              ", ".join(f"{n}:{m['from']}->{m['to']}" for n, m in mapping.items()))
+        hard("nnUNet-scheme mask values subset of 0..4", set(ru) <= {0, 1, 2, 3, 4},
+             f"values={ru}")
+    except Exception as e:  # noqa: BLE001
+        warn(f"could not write nnUNet-scheme copy: {e}")
+
     return report
 
 
