@@ -78,8 +78,12 @@ def merge_finetune_plan(
         )
     rc = ref_cfgs[configuration]
     mc = merged["configurations"][configuration]
+    # NOTE: do NOT copy per-channel lists (use_mask_for_norm / normalization_schemes)
+    # from the reference -- 835 is 1-channel so they have a single entry and would
+    # break the 5-channel preprocessor (_normalize loops over all channels and
+    # indexes use_mask_for_norm[c] -> IndexError). Keep the target's 5-entry lists.
     for key in ("spacing", "patch_size", "architecture",
-                "median_image_size_in_voxels", "use_mask_for_norm"):
+                "median_image_size_in_voxels"):
         if key in rc:
             mc[key] = copy.deepcopy(rc[key])
             overrides.append(f"configurations.{configuration}.{key}")
