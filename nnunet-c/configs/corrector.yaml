@@ -1,0 +1,86 @@
+# ── nnUNet-C "corrector" experiment configuration ────────────────────
+# Drives build_dataset / adapt_checkpoint / build_finetune_plan / predict for
+# the three controls A/B/C. ONE codebase; controls differ only by the entries
+# under `controls:` (prelabel source + dataset id + channel count).
+
+# Reuse the nnUNet-vs-CNISP comparison config for shared paths: work_dir,
+# cnisp_paths_yaml, Dataset835 identity, atlas/pivot CT discovery, etc.
+# Path is relative to the repo root (resolved by lib/config.py).
+nnunet_config_yaml: nnunet/configs_v7.yaml
+
+# ── Experiment / degradation mode ────────────────────────────────────
+# Must match the sparse sweep + CNISP run the prelabels were produced under.
+experiment: thick
+
+# ── CNISP retrain (Stage 2, GT observations) ─────────────────────────
+# The GT-obs CNISP whose test-optimization produces control-C prelabels.
+cnisp_model_name: orbital_ad_v6_5_gt
+cnisp_train_yaml: train_v6_5_gt.yaml      # obs_sources: [gt]  (architecture -t)
+cnisp_test_yaml: test_corrector.yaml      # shared test-opt settings (-c), Stage 3
+# CNISP inference run_tag: runs/<experiment>/<run_tag>/ holds the prelabels.
+run_tag: corrector_gt
+
+# ── Single nnUNet prediction feeding BOTH B and C (Detail 2) ─────────
+# Resolved under work_dir when null. Predictions live at:
+#   {nnunet_pred_root}/{experiment}/sparse_step_{XX}/{sid}.nii.gz          (raw; CNISP/C fits to its canonical form)
+#   {nnunet_pred_root}/{experiment}/sparse_step_{XX}_native/{sid}.nii.gz   (B prelabel, native grid)
+nnunet_pred_root: null            # null -> "{work_dir}/prediction"
+
+# Degraded CT (ch0) input root; null -> "{work_dir}/input".
+degraded_ct_root: null            # null -> "{work_dir}/input"
+
+# ── Reference (Dataset835) for finetune weight transfer + plan merge ──
+# Confirm the ACTUAL plan folder name on the GPU box (nnUNetPlans vs
+# nnUNetPlans_iso05) before running Stage 4.
+reference_dataset_id: 835
+reference_dataset_name: PHOTON_CT_QAfiltered
+reference_plan: nnUNetPlans
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+reference_fold: 2
+
+# Target spacing for the pothole-2 (a-ii) no-op resample. null -> read from the
+# 835 plan JSON (configurations.<configuration>.spacing) on the GPU box. Set an
+# explicit [sx, sy, sz] to resample locally without the plan JSON present.
+target_spacing: null
+
+# ── Label scheme (fixed channel order for ch1..ch4) ──────────────────
+# channel index 1..4 corresponds to structures[0..3].
+structures: [ON, Recti, Globe, Fat]
+labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4
+
+# ── Splits ───────────────────────────────────────────────────────────
+# corrector training set: source_ids, one per line (e.g. chk_14455).
+# Relative to repo root. CNISP train/val/test come from casefiles_dir
+# (orbital_shape_prior_st1 paths.yaml); the test set is unified to CNISP's
+# test_cases.txt for ALL controls.
+corrector_train_split: nnunet-c/splits/corrector_train.txt
+# Derived casenames file written under casefiles_dir for the CNISP/nnUNet
+# machinery (which is casename-based, not source_id-based).
+corrector_train_casefile: corrector_train_cases.txt
+
+# ── Controls ─────────────────────────────────────────────────────────
+controls:
+  A:
+    dataset_id: 835
+    dataset_name: PHOTON_CT_QAfiltered
+    prelabel_source: none          # single-channel degraded CT only
+    n_channels: 1
+    external: true                 # reuse existing Dataset835; no build/train
+  B:
+    dataset_id: 855
+    dataset_name: PHOTON_CT_CORR_B_stacked
+    prelabel_source: nnunet        # ch1..4 = nnUNet one-round prediction
+    n_channels: 5
+    external: false
+  C:
+    dataset_id: 845
+    dataset_name: PHOTON_CT_CORR_C_cnisp
+    prelabel_source: cnisp         # ch1..4 = CNISP prediction
+    n_channels: 5
+    external: false

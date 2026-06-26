@@ -27,5 +27,12 @@ results_when_model_learned_both_eyes
 nnUNet-master
 ECLARE-main
 docs
+nnunet-c/__pycache__
+nnunet-c/lib/__pycache__
+nnunet-c/engine/__pycache__
+nnunet-c/scripts/__pycache__
+nnunet-c/diagnostics/__pycache__
+review_checklist_part2.csv
+.cursor
 .DS_Store
 main.py

@@ -497,7 +497,8 @@ def flip_os_to_od(data, affine):
 # ── Single-case ───────────────────────────────────────────────────
 
 def align_single_case(seg_path, source_id, source="checklist",
-                      patch_size_mm=80.0, search_size_mm=None):
+                      patch_size_mm=80.0, search_size_mm=None,
+                      ignore_labels=None):
     """Crop one ``patch_size_mm`` cubic patch per eye, centred on the eye's
     single-eye LCC centroid.
 
@@ -538,6 +539,18 @@ def align_single_case(seg_path, source_id, source="checklist",
     # convention without doubling memory like int32 did.
     data = np.asarray(img.dataobj).astype(np.int16, copy=False)
     affine = img.affine.copy()
+
+    # Drop spurious / unwanted raw label values BEFORE scheme detection. This
+    # is needed e.g. for the T2 atlas, whose masks carry a mislabeled raw
+    # value 2 on top of the labelfusion {1,3,5,7} scheme. Without this strip,
+    # detect_label_scheme sees "2 in labels" and wrongly classifies the case
+    # as the nnUNet CT scheme. Setting the voxels to 0 is safe in both the
+    # plain and the -1000-offset conventions: 0 is excluded from the label set
+    # in detect_label_scheme and is mapped to canonical BG by remap_to_canonical.
+    if ignore_labels:
+        data = data.copy()
+        for lbl in ignore_labels:
+            data[data == int(lbl)] = 0
 
     scheme_name, label_map = detect_label_scheme(data)
     if not label_map:
@@ -673,9 +686,69 @@ def align_single_case(seg_path, source_id, source="checklist",
 
 # ── Dataset-level ─────────────────────────────────────────────────
 
-def _collect_scan_list(checklist_csv=None, atlas_label_dir=None):
-    """Build unified scan list from checklist + atlas."""
+def _parse_ignore_labels(raw):
+    """Parse an ``ignore_labels`` cell into a list[int].
+
+    Accepts None / NaN / "" -> [], a single int, or a separated string such
+    as "2", "2;5", "2,5", "2 5". Returns sorted unique ints.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (int, np.integer)):
+        return [int(raw)]
+    if isinstance(raw, float):
+        # NaN (missing cell from pandas) or a plain numeric float
+        if np.isnan(raw):
+            return []
+        return [int(raw)]
+    s = str(raw).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return []
+    parts = [p for chunk in s.replace(",", " ").replace(";", " ").split()
+             for p in [chunk.strip()] if p]
+    out = []
+    for p in parts:
+        try:
+            out.append(int(float(p)))
+        except ValueError:
+            continue
+    return sorted(set(out))
+
+
+def _collect_scan_list(checklist_csv=None, atlas_label_dir=None,
+                       manifest_csv=None):
+    """Build unified scan list from checklist + atlas (+ optional manifest).
+
+    ``manifest_csv`` is an explicit, pre-built "list" of scans to align with
+    columns: ``seg_path, source_id, source`` and an optional ``ignore_labels``
+    (raw label values to drop before scheme detection). It is the path used
+    when *adding* training data via scripts/05_build_addon_list.py +
+    scripts/06_add_training_data.py, so the caller controls source_id naming
+    and the T2-atlas label-2 strip explicitly rather than relying on the
+    checklist/atlas-dir auto-discovery below.
+    """
     scans = []
+
+    if manifest_csv and Path(manifest_csv).exists():
+        df = pd.read_csv(manifest_csv)
+        required = {"seg_path", "source_id", "source"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"manifest {manifest_csv} missing columns: {sorted(missing)}"
+            )
+        for _, row in df.iterrows():
+            scans.append({
+                "seg_path": str(row["seg_path"]),
+                "source_id": str(row["source_id"]),
+                "source": str(row["source"]),
+                "ignore_labels": _parse_ignore_labels(
+                    row["ignore_labels"] if "ignore_labels" in df.columns
+                    else None
+                ),
+            })
+        print(f"Manifest: {len(scans)} scans ({manifest_csv})")
+        return scans
 
     if checklist_csv and Path(checklist_csv).exists():
         df = pd.read_csv(checklist_csv)
@@ -726,13 +799,13 @@ def _collect_scan_list(checklist_csv=None, atlas_label_dir=None):
 
 def align_dataset(checklist_csv=None, atlas_label_dir=None,
                   output_dir="aligned_patches", patch_size_mm=80.0,
-                  search_size_mm=None):
+                  search_size_mm=None, manifest_csv=None):
     out_labels = Path(output_dir) / "labels"
     out_meta = Path(output_dir) / "metadata"
     out_labels.mkdir(parents=True, exist_ok=True)
     out_meta.mkdir(parents=True, exist_ok=True)
 
-    scans = _collect_scan_list(checklist_csv, atlas_label_dir)
+    scans = _collect_scan_list(checklist_csv, atlas_label_dir, manifest_csv)
     all_meta = []
     n_failed = 0
 
@@ -747,6 +820,7 @@ def align_dataset(checklist_csv=None, atlas_label_dir=None,
                 scan["seg_path"], scan["source_id"], scan["source"],
                 patch_size_mm=patch_size_mm,
                 search_size_mm=search_size_mm,
+                ignore_labels=scan.get("ignore_labels"),
             )
         except Exception as e:  # noqa: BLE001 — keep batch going on per-case failure
             n_failed += 1
@@ -766,3 +840,4 @@ def align_dataset(checklist_csv=None, atlas_label_dir=None,
                   f"structs={meta.num_structures_found}/4")
 
     print(f"\nTotal patches: {len(all_meta)} (failed scans: {n_failed})")
+    return all_meta

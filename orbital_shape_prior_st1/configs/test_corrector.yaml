@@ -1,0 +1,59 @@
+# ── CNISP test-optimization config for nnUNet-C corrector prelabels ──
+# Stage 3 of nnunet-c/run_full_pipeline.sh runs 03_infer.py with THIS config
+# for BOTH the corrector_train caselist and the CNISP test caselist, changing
+# ONLY --test-casefile. Keeping every other setting identical (latent init/iters,
+# hard target, decode/sweep grid, checkpoint) is the train/test consistency
+# contract for the prelabels (plan section VI). DO NOT diverge per-split.
+#
+# Deployment curve: CNISP fits its latent to the nnUNet prediction on the
+# degraded image (no GT at test). Outputs land at
+#   ${output_basedir}/<model>/runs/<experiment>/<run_tag>/native_space_step_XX/.
+
+test_label_source: nnunet_pred
+run_tag: corrector_gt
+
+realpair_reg_kind: rigid
+
+# Which cases to test on. OVERRIDDEN per-invocation via --test-casefile
+# (corrector_train_cases.txt vs test_cases.txt); value here is a safe default.
+test_casefile: test_cases.txt
+
+# ── Adaptive resolution sweep (single start, deployment) ─────────────
+adaptive_step_sweep:
+  target_eff_res_increment_mm: 1.0
+  max_num_steps_per_case: 5
+  max_eff_resolution_mm: 12.0
+  primary_eff_res_mm: 3.0
+  summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+  # start=0 only (matches thick deployment); no start-offset fan-out so the
+  # prelabel for each (source, step) is unambiguous.
+  start_offset_eff_res_min_mm: 999.0
+  start_offsets: [0]
+
+slice_step_axis: auto
+use_thick_slices: false
+
+# ── Checkpoint selection (repro contract) ────────────────────────────
+# Pin to best for the final prelabels (overridable via --checkpoint).
+checkpoint: best
+
+# ── Test-time latent optimization (repro contract) ───────────────────
+latent_num_iters: 3000
+latent_lr: 1.0e-2
+max_num_const_train_dsc: 10
+
+# Hard-label fit (plan VI): do NOT label-smooth, so train and test prelabels
+# are produced under identical observation handling.
+latent_fit_soft: false
+latent_fit_label_smoothing: 0.1
+
+# ── Output ────────────────────────────────────────────────────────────
+export_predictions: true
+evaluate_predictions: true
+
+# Save masks for ALL sources -- the corrector needs a prelabel for every
+# (source, step), so the default 12-source whitelist must NOT be used here.
+save_mask_source_ids: null
+
+incremental_native_remap: true
+batch_size_val: 1

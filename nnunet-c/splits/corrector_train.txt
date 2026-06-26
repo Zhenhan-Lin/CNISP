@@ -1,0 +1,13 @@
+# nnUNet-C corrector training split.
+#
+# One source_id per line, e.g.:
+#   chk_14455
+#   chk_20871
+#
+# Rules (enforced by lib/caselist.py at startup; violations abort):
+#   * source_ids here must be DISJOINT from CNISP train_cases.txt sources.
+#   * source_ids here must be DISJOINT from CNISP test_cases.txt sources.
+#   * disjointness is checked at the patient (source_id) level.
+#
+# Lines starting with '#' and blank lines are ignored.
+# The test set for ALL controls is CNISP's test_cases.txt (do NOT list it here).
