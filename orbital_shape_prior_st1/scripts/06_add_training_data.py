@@ -23,7 +23,13 @@ Usage:
 """
 
 import argparse
+import sys
 from pathlib import Path
+
+# Make the project root importable so `data_prep` resolves even when this
+# script is invoked directly (python scripts/06_add_training_data.py) without
+# PYTHONPATH set (the run_*.sh wrappers export it; this is a fallback).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml
 

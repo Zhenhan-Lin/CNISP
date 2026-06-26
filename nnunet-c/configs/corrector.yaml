@@ -64,6 +64,33 @@ corrector_train_split: nnunet-c/splits/corrector_train.txt
 # machinery (which is casename-based, not source_id-based).
 corrector_train_casefile: corrector_train_cases.txt
 
+# ── Corrector training data generation (CSV-driven, self-contained) ──
+# Replaces the source_id split for the corrector TRAINING set: select images
+# from a QA checklist, degrade them (thick) at several step sizes, predict with
+# the 835 nnUNet, and (later) CNISP. All artifacts live under data_root so the
+# corrector reads from one place.
+corrector_data:
+  # QA checklist CSV (relative to repo root or absolute).
+  checklist_csv: review_checklist_part2.csv
+  # Selection: keep == False AND qa_status == "yes"; take the first `n` images
+  # (in file order) whose source image actually exists on disk.
+  select:
+    keep: false
+    qa_status: yes
+  n: 200
+  # Thick degradation step sizes. For steps listed in thick_threshold_steps,
+  # drop that (case, step) variant if resulting slice thickness
+  # (= through-plane spacing * step) exceeds thick_threshold_mm.
+  steps: [3, 6, 9]
+  thick_threshold_mm: 7.0
+  thick_threshold_steps: [9]
+  modality: ct
+  # Output tree (relative to repo root): degraded CTs, 835 preds, CNISP preds.
+  data_root: nnunet-c/data
+  images_dirname: images          # {case}_step{XX}_0000.nii.gz
+  nnunet_pred_dirname: nnunet_pred
+  cnisp_pred_dirname: cnisp_pred
+
 # ── Controls ─────────────────────────────────────────────────────────
 controls:
   A:

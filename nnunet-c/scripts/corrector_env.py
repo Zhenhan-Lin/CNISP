@@ -82,6 +82,16 @@ def main() -> int:
             (res["repo_root"] / cfg["nnunet_config_yaml"]).resolve()
         ),
     }
+
+    cd = cfg.get("corrector_data")
+    if cd:
+        root = res["repo_root"]
+        data_root = Path(cd["data_root"])
+        data_root = data_root if data_root.is_absolute() else (root / data_root)
+        lines["DATA_ROOT"] = str(data_root)
+        lines["DATA_IMAGES"] = str(data_root / cd.get("images_dirname", "images"))
+        lines["DATA_NNUNET_PRED"] = str(data_root / cd.get("nnunet_pred_dirname", "nnunet_pred"))
+        lines["DATA_CNISP_PRED"] = str(data_root / cd.get("cnisp_pred_dirname", "cnisp_pred"))
     for k, v in lines.items():
         print(f"{k}={_q(v)}")
     return 0
