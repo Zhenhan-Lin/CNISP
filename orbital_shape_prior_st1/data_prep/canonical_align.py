@@ -722,8 +722,8 @@ def _collect_scan_list(checklist_csv=None, atlas_label_dir=None,
     ``manifest_csv`` is an explicit, pre-built "list" of scans to align with
     columns: ``seg_path, source_id, source`` and an optional ``ignore_labels``
     (raw label values to drop before scheme detection). It is the path used
-    when *adding* training data via scripts/05_build_addon_list.py +
-    scripts/06_add_training_data.py, so the caller controls source_id naming
+    when *adding* training data via scripts/011_build_addon_list.py +
+    scripts/012_add_training_data.py, so the caller controls source_id naming
     and the T2-atlas label-2 strip explicitly rather than relying on the
     checklist/atlas-dir auto-discovery below.
     """
