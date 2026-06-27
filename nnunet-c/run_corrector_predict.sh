@@ -22,7 +22,12 @@ CONTROL="${1:?usage: run_corrector_predict.sh <B|C> <fold>}"
 FOLD="${2:?usage: run_corrector_predict.sh <B|C> <fold>}"
 CONFIG="${CONFIG:-$HERE/configs/corrector.yaml}"
 PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
+# Two DIFFERENT checkpoints (do not conflate):
+#   CHK       = nnUNet-C predict checkpoint -> best (the finetuned corrector)
+#   CNISP_CHK = CNISP test-inference checkpoint -> latest, to MATCH the training
+#               prelabels (those were generated with CNISP 'latest').
 CHK="${CHK:-checkpoint_best.pth}"
+CNISP_CHK="${CNISP_CHK:-latest}"
 STEPS="${STEPS:-3,6,9,12}"
 CASEFILE="${CASEFILE:-test_cases.txt}"
 CNISP_TEST_DIR="${CNISP_TEST_DIR:-$HERE/data/cnisp_pred_test}"
@@ -31,7 +36,8 @@ GPUS="${GPUS:-0 1}"
 export nnUNet_compile="${nnUNet_compile:-f}"
 
 echo "================================================================"
-echo "[predict] control=$CONTROL fold=$FOLD chk=$CHK casefile=$CASEFILE"
+echo "[predict] control=$CONTROL fold=$FOLD casefile=$CASEFILE"
+echo "[predict] nnUNet-C ckpt=$CHK   CNISP ckpt=$CNISP_CHK"
 echo "================================================================"
 
 eval "$(python3 "$HERE/scripts/corrector_env.py" --config "$CONFIG" --control "$CONTROL")"
@@ -54,7 +60,7 @@ if [[ "$RUN_CNISP" == "1" ]]; then
     echo "[predict] (1) CNISP test inference -> $CNISP_TEST_DIR"
     OUT_DIR="$CNISP_TEST_DIR" ALIGNED_DIR="$ALIGNED_DIR" \
     CASEFILE="$CASEFILE" STEPS="$STEPS" MAX_SAMPLES=0 \
-    CHECKPOINT="${CHECKPOINT:-best}" GPUS="$GPUS" \
+    CHECKPOINT="$CNISP_CHK" GPUS="$GPUS" \
         bash "$HERE/run_corrector_cnisp.sh"
 else
     echo "[predict] (1) skip CNISP test inference (RUN_CNISP=0)"
