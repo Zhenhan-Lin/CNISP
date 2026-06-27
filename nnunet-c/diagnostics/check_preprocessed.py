@@ -43,7 +43,10 @@ def _resolve_paths(config: str, control: str, plan_name: str, configuration: Opt
     data_dir = ds_dir / f"{plan_name}_{configuration}"
     ref_dir = (Path(preproc)
                / f"Dataset{int(cfg['reference_dataset_id']):03d}_{cfg['reference_dataset_name']}")
-    ref_plan_json = ref_dir / f"{cfg['reference_plan']}.json"
+    # ch0 stats come from the MERGE-source plan (iso05), matching what
+    # build_finetune_plan injected -- not the results-folder plan name.
+    ref_plan_name = cfg.get("reference_plan_json", cfg["reference_plan"])
+    ref_plan_json = ref_dir / f"{ref_plan_name}.json"
     return cfg, ctrl, data_dir, ref_plan_json
 
 

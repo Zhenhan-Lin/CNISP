@@ -34,9 +34,15 @@ degraded_ct_root: null            # null -> "{work_dir}/input"
 # nnUNetPlans_iso05) before running Stage 4.
 reference_dataset_id: 835
 reference_dataset_name: PHOTON_CT_QAfiltered
-# 835 was trained ISO 0.5 with the iso05 plan -> follow THAT plan (NOT the
-# default anisotropic nnUNetPlans.json) for spacing/architecture/intensity stats.
-reference_plan: nnUNetPlans_iso05
+# reference_plan = the 835 RESULTS/checkpoint folder plan name
+# (nnUNetTrainer__<reference_plan>__3d_fullres/), used for nnUNetv2_predict -p and
+# to locate the pretrained checkpoint.
+reference_plan: nnUNetPlans
+# reference_plan_json = the preprocessed plan JSON we MERGE parameters from
+# (835 was trained ISO 0.5 -> use the iso05 plan for spacing/architecture/ch0
+# intensity stats). Only its PARAMETERS are copied; its name is never used for
+# prediction/checkpoint lookup.
+reference_plan_json: nnUNetPlans_iso05
 configuration: 3d_fullres
 trainer: nnUNetTrainer
 reference_fold: 2

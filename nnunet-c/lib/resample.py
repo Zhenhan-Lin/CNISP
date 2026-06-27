@@ -58,7 +58,8 @@ def resolve_target_spacing(cfg: Dict) -> List[float]:
             "explicitly, or export nnUNet_preprocessed on the GPU box."
         )
     ds = f"Dataset{int(cfg['reference_dataset_id']):03d}_{cfg['reference_dataset_name']}"
-    plan_json = Path(preproc) / ds / f"{cfg['reference_plan']}.json"
+    ref_plan_name = cfg.get("reference_plan_json", cfg["reference_plan"])
+    plan_json = Path(preproc) / ds / f"{ref_plan_name}.json"
     if not plan_json.is_file():
         raise FileNotFoundError(
             f"835 plan JSON not found: {plan_json}. Confirm reference_plan "

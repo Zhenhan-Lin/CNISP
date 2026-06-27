@@ -70,13 +70,15 @@ def main() -> int:
     control = get_control(cfg, args.control)
     configuration = args.configuration or cfg["configuration"]
 
-    # ref (835) plan JSON
+    # ref (835) plan JSON to MERGE PARAMETERS from = reference_plan_json (iso05),
+    # NOT reference_plan (which names the results/checkpoint folder).
+    ref_plan_name = cfg.get("reference_plan_json", cfg["reference_plan"])
     if args.ref_plan:
         ref_plan_path = Path(args.ref_plan)
     else:
         ref_dir = _preproc_dataset_dir(cfg["reference_dataset_id"],
                                        cfg["reference_dataset_name"])
-        ref_plan_path = ref_dir / f"{cfg['reference_plan']}.json"
+        ref_plan_path = ref_dir / f"{ref_plan_name}.json"
 
     # target (855/845) plan JSON
     target_dir = _preproc_dataset_dir(control["dataset_id"], control["dataset_name"])
