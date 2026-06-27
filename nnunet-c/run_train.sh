@@ -45,18 +45,24 @@ if [[ -z "$REF_CKPT" || ! -f "$REF_CKPT" ]]; then
     exit 1
 fi
 
-echo "[run_train] (1) extract_fingerprint d=$CTRL_DATASET_ID"
-nnUNetv2_extract_fingerprint -d "$CTRL_DATASET_ID" --verify_dataset_integrity
+# SKIP_PREPROCESS=1: dataset/plan/preprocess already done -> jump straight to the
+# gate + surgery + train (e.g. to re-run training with nnUNet_compile=f without
+# wiping & regenerating the preprocessed data, which nnUNetv2_preprocess does).
+if [[ "${SKIP_PREPROCESS:-0}" == "1" ]]; then
+    echo "[run_train] SKIP_PREPROCESS=1 -> skipping fingerprint/plan/merge/preprocess"
+else
+    echo "[run_train] (1) extract_fingerprint d=$CTRL_DATASET_ID"
+    nnUNetv2_extract_fingerprint -d "$CTRL_DATASET_ID" --verify_dataset_integrity
 
-echo "[run_train] (2) plan_experiment d=$CTRL_DATASET_ID"
-nnUNetv2_plan_experiment -d "$CTRL_DATASET_ID"
+    echo "[run_train] (2) plan_experiment d=$CTRL_DATASET_ID"
+    nnUNetv2_plan_experiment -d "$CTRL_DATASET_ID"
 
-echo "[run_train] (3) build_finetune_plan (potholes 1 & 3 + per-channel resampler) -> $PLAN_NAME"
-python3 "$HERE/scripts/build_finetune_plan.py" \
-    --config "$CONFIG" --control "$CONTROL" --out-plan-name "$PLAN_NAME"
+    echo "[run_train] (3) build_finetune_plan (potholes 1 & 3 + per-channel resampler) -> $PLAN_NAME"
+    python3 "$HERE/scripts/build_finetune_plan.py" \
+        --config "$CONFIG" --control "$CONTROL" --out-plan-name "$PLAN_NAME"
 
-echo "[run_train] (3b) install per-channel resampler into nnunetv2 (ch0 order3, ch1-N order0)"
-python3 - "$HERE/engine/corrector_resampling.py" <<'PY'
+    echo "[run_train] (3b) install per-channel resampler into nnunetv2 (ch0 order3, ch1-N order0)"
+    python3 - "$HERE/engine/corrector_resampling.py" <<'PY'
 import sys, shutil, os
 import nnunetv2.preprocessing.resampling as r
 dst = os.path.join(os.path.dirname(r.__file__), "corrector_resampling.py")
@@ -64,8 +70,9 @@ shutil.copyfile(sys.argv[1], dst)
 print(f"[run_train] installed resampler -> {dst}")
 PY
 
-echo "[run_train] (4) preprocess with merged plan $PLAN_NAME"
-nnUNetv2_preprocess -d "$CTRL_DATASET_ID" -plans_name "$PLAN_NAME" -c "$CONFIGURATION"
+    echo "[run_train] (4) preprocess with merged plan $PLAN_NAME"
+    nnUNetv2_preprocess -d "$CTRL_DATASET_ID" -plans_name "$PLAN_NAME" -c "$CONFIGURATION"
+fi
 
 echo "[run_train] (5) POTHOLE-4 GATE: check_preprocessed"
 python3 "$HERE/diagnostics/check_preprocessed.py" \
