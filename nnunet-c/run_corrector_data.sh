@@ -28,7 +28,10 @@ do_predict() {
     # already exists in $DATA_NNUNET_PRED. FORCE=1 re-predicts everything.
     local resume_flag="--continue_prediction"
     [[ "${FORCE:-0}" == "1" ]] && resume_flag=""
-    echo "[run_corrector_data] (2) nnUNetv2_predict (Dataset$REF_DATASET_ID) -> $DATA_NNUNET_PRED ${resume_flag:+(resume)}"
+    # Worker counts: lower these if nnUNet reports "Background workers died /
+    # RAM was full" or a multiprocessing manager error. NPP=1 NPS=1 is safest.
+    local npp="${NPP:-2}" nps="${NPS:-2}"
+    echo "[run_corrector_data] (2) nnUNetv2_predict (Dataset$REF_DATASET_ID) -> $DATA_NNUNET_PRED ${resume_flag:+(resume)} (npp=$npp nps=$nps)"
     mkdir -p "$DATA_NNUNET_PRED"
     nnUNetv2_predict \
         -i "$DATA_IMAGES" \
@@ -38,6 +41,7 @@ do_predict() {
         -p "$REF_PLAN" \
         -tr "$TRAINER" \
         -f "$REF_FOLD" \
+        -npp "$npp" -nps "$nps" \
         $resume_flag
 }
 

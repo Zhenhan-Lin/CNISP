@@ -22,6 +22,10 @@ CONFIG="${CONFIG:-$HERE/configs/corrector.yaml}"
 PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
 MASK_INIT="${MASK_INIT:-zero}"
 WORK_TMP="${WORK_TMP:-$HERE/staging/_finetune}"
+# torch.compile (nnUNet default ON) can produce broken forward passes on some
+# torch/CUDA combos -> all-background preds -> pseudo-dice stuck at 0. Default OFF;
+# export nnUNet_compile=1 to re-enable once you've confirmed it's stable.
+export nnUNet_compile="${nnUNet_compile:-f}"
 
 echo "================================================================"
 echo "[run_train] control=$CONTROL fold=$FOLD config=$CONFIG"
