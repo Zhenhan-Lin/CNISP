@@ -73,6 +73,7 @@ def main() -> int:
         "CNISP_TRAIN_YAML": cfg["cnisp_train_yaml"],
         "CNISP_TEST_YAML": cfg.get("cnisp_test_yaml", "test_corrector.yaml"),
         "CASEFILES_DIR": str(res["casefiles_dir"]),
+        "ALIGNED_DIR": str(res["aligned_dir"]),
         "CORRECTOR_TRAIN_CASEFILE": cfg["corrector_train_casefile"],
         "WORK_DIR": str(res["work_dir"]),
         "CNISP_PATHS_YAML": str(res["cnisp_paths_yaml"]),

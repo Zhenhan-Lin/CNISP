@@ -48,6 +48,14 @@ EXPERIMENT="${EXPERIMENT:-thick}"
 CASEFILE="${CASEFILE:-corrector_train_cases.txt}"
 STEPS="${STEPS:-3,6,9,12}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"      # global cap on (source,step) samples (0=all)
+# Optional overrides so the SAME launcher can run on the TEST set, whose aligned
+# patches live in the CNISP aligned_dir (not data/aligned_patch) and whose CNISP
+# masks should go to a separate dir. Empty -> 032 defaults (the train setup).
+ALIGNED_DIR="${ALIGNED_DIR:-}"       # -> 032 --aligned-dir (e.g. the CNISP aligned_dir)
+OUT_DIR="${OUT_DIR:-}"               # -> 032 --out-dir   (e.g. data/cnisp_pred_test)
+EXTRA_ARGS=""
+[[ -n "$ALIGNED_DIR" ]] && EXTRA_ARGS+=" --aligned-dir $ALIGNED_DIR"
+[[ -n "$OUT_DIR" ]] && EXTRA_ARGS+=" --out-dir $OUT_DIR"
 GPU_THREADS="${GPU_THREADS:-4}"
 CPU_THREADS="${CPU_THREADS:-8}"
 RERUN_FAILED="${RERUN_FAILED:-0}"
@@ -61,7 +69,7 @@ SKIP_FLAG="--skip-existing"; [[ "$SKIP_EXISTING" == "0" ]] && SKIP_FLAG="--no-sk
 # Avoids launching N workers that each crash with the same FileNotFoundError.
 CASEFILES_DIR="$(python3 "$HERE/scripts/corrector_env.py" --control C 2>/dev/null \
     | sed -n 's/^CASEFILES_DIR="\(.*\)"$/\1/p')"
-if [[ -n "$CASEFILES_DIR" && ! -f "$CASEFILES_DIR/$CASEFILE" ]]; then
+if [[ "$CASEFILE" == "corrector_train_cases.txt" && -n "$CASEFILES_DIR" && ! -f "$CASEFILES_DIR/$CASEFILE" ]]; then
     echo "[run_corrector_cnisp] ERROR: casefile not found:" >&2
     echo "    $CASEFILES_DIR/$CASEFILE" >&2
     echo "  Run alignment first AND let it finish:" >&2
@@ -119,7 +127,7 @@ worker_cmd() {  # $1=dev $2=ids -> the exact python command (for review/rerun)
          "-m $MODEL -t $TRAIN_YAML -c $TEST_YAML --checkpoint $CHECKPOINT" \
          "--test-label-source $LABEL_SOURCE --experiment $EXPERIMENT" \
          "--test-casefile $CASEFILE --steps $STEPS --max-samples $MAX_SAMPLES" \
-         "--num-shards $NUM_SHARDS --shard-id $2 $SKIP_FLAG"
+         "--num-shards $NUM_SHARDS --shard-id $2 $SKIP_FLAG$EXTRA_ARGS"
 }
 
 # ── build the worker set ─────────────────────────────────────────────
@@ -155,7 +163,7 @@ for i in "${!w_name[@]}"; do
             --experiment "$EXPERIMENT" \
             --test-casefile "$CASEFILE" \
             --steps "$STEPS" --max-samples "$MAX_SAMPLES" \
-            --num-shards "$NUM_SHARDS" --shard-id "$ids" $SKIP_FLAG
+            --num-shards "$NUM_SHARDS" --shard-id "$ids" $SKIP_FLAG $EXTRA_ARGS
     ) >> "$log" 2>&1 &
     pids+=("$!")
 done
@@ -185,8 +193,9 @@ for i in "${!rcs[@]}"; do [[ "${rcs[$i]}" != "0" ]] && n_fail=$(( n_fail + 1 ));
         printf '%-8s %-5s %-10s %-5s %s\n' \
             "${w_name[$i]}" "${w_dev[$i]}" "${w_ids[$i]}" "${rcs[$i]}" "$status"
     done
-    masks=$(ls "$REPO_ROOT"/nnunet-c/data/cnisp_pred/*.nii.gz 2>/dev/null | wc -l | tr -d ' ')
-    echo "produced masks in data/cnisp_pred: $masks"
+    MASK_DIR="${OUT_DIR:-$REPO_ROOT/nnunet-c/data/cnisp_pred}"
+    masks=$(ls "$MASK_DIR"/*.nii.gz 2>/dev/null | wc -l | tr -d ' ')
+    echo "produced masks in $MASK_DIR: $masks"
     if [[ "$n_fail" -gt 0 ]]; then
         echo ""
         echo "FAILED workers -- re-run individually (resumable via --skip-existing):"

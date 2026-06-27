@@ -121,7 +121,7 @@ def _assemble_images(
 def assemble_inference_case(
     case_id: str,
     ct_path: Path,
-    target_spacing: List[float],
+    target_spacing: Optional[List[float]],
     n_channels: int,
     structures: List[str],
     images_dir: Path,
@@ -130,18 +130,24 @@ def assemble_inference_case(
     prelabel_struct_to_value: Optional[Dict[str, int]] = None,
     file_ending: str = ".nii.gz",
     degraded_marker: Optional[str] = None,
+    ref_grid: Optional[tuple] = None,
 ) -> Dict:
-    """Assemble inference channels only (no GT/label) into images_dir."""
+    """Assemble inference channels only (no GT/label) into images_dir.
+
+    ref_grid=(shape, affine) pins the grid exactly like the TRAINING build (the
+    GT/original native grid), so the test inputs match what the model saw; nnUNet
+    then resamples original -> iso 0.5 plan at predict time.
+    """
     target_shape, target_affine, written = _assemble_images(
         case_id, ct_path, target_spacing, n_channels, structures, images_dir,
         experiment, prelabel_path, prelabel_struct_to_value, file_ending,
-        degraded_marker=degraded_marker,
+        degraded_marker=degraded_marker, ref_grid=ref_grid,
     )
     _assert_geometry_images(images_dir, written, target_shape, target_affine)
     return {
         "case_id": case_id,
         "shape": [int(x) for x in target_shape],
-        "spacing": [float(x) for x in target_spacing],
+        "spacing": [float(x) for x in _rs.voxel_spacing(np.asarray(target_affine))],
         "n_channels": n_channels,
         "image_files": written,
     }

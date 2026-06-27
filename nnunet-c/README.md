@@ -150,6 +150,59 @@ changing **only** `--test-casefile`:
 - `lib/caselist.py` aborts if `corrector_train ∩ CNISP_train` or
   `corrector_train ∩ CNISP_test` is non-empty (patient/source_id level).
 
+## Test prediction & evaluation (A/B/C)
+
+The trained corrector is predicted on the **CNISP `test_cases.txt`** set (real GT),
+reusing the test cases' degraded CTs + 835 sparse preds + aligned patches from the
+earlier sweep.
+
+```bash
+# C (runs CNISP test inference, assembles 5ch, predicts, evals):
+GPUS="0 1" CHK=checkpoint_best.pth bash nnunet-c/run_corrector_predict.sh C 0
+# B (no CNISP step):
+RUN_CNISP=0 bash nnunet-c/run_corrector_predict.sh B 0
+```
+
+Stages: CNISP test inference (**existing `032`/`run_corrector_cnisp.sh`**, dense
+**native** output — same as training, no literal iso-0.5 decode) → `scripts/build_corrector_testset.py`
+assembles `test_input/<name>/imagesTs` → `nnUNetv2_predict -chk checkpoint_best.pth`
+→ `diagnostics/eval_corrector.py`.
+
+- **Test assembly = training assembly.** `build_corrector_testset.py` reuses the
+  exact same `channels.assemble_inference_case` → `split_mask_to_binaries`, with
+  channel order **pinned `[ON, Recti, Globe, Fat]`** identical to training. No
+  separate split logic; ch0 is upsampled to the mask grid; ch1..ch4 are binaries.
+
+### Eval grid & resample direction (correctness + fairness)
+
+- **Prediction grid:** `nnUNetv2_predict` exports in the **input `imagesTs`
+  geometry**, which we built on each source's **original/dense grid (= the native
+  GT grid)**. So predictions already land on the GT grid (for A, the stock 835
+  native pred is likewise on the native grid).
+- **Pinned resample direction:** eval resamples the **prediction → each source's
+  native GT grid with order 0** (nearest, stays discrete); the **GT is never
+  moved**. Dice is computed on the native GT grid. (For B/C this is a safety
+  no-op; the direction is pinned regardless so all controls are scored on
+  identical voxel grids.)
+- **One eval for A/B/C.** `diagnostics/eval_corrector.py` is the *single* code
+  path; only the prediction differs across controls. The `test_cases_map.json`
+  (written by the assembler) carries each case's `gt_label_path` +
+  `gt_struct_to_value`, so GT→`{1,2,3,4}` remap and the resample are byte-identical
+  across controls — this is what makes the **B-vs-C Dice gap trustworthy**.
+
+```bash
+# any control, same script:
+python nnunet-c/diagnostics/eval_corrector.py \
+    --map nnunet-c/test_input/PHOTON_CT_CORR_C_cnisp/test_cases_map.json \
+    --pred-dir nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/fold_0 \
+    --out-csv nnunet-c/predictions/eval_C.csv
+# A baseline: build its map (no image assembly), pred paths are absolute:
+python nnunet-c/scripts/build_corrector_testset.py --control A
+python nnunet-c/diagnostics/eval_corrector.py \
+    --map nnunet-c/test_input/PHOTON_CT_QAfiltered/test_cases_map.json \
+    --out-csv nnunet-c/predictions/eval_A.csv
+```
+
 ## Environment
 
 - `nnunetv2` (training/preprocess/predict) + `$nnUNet_raw`, `$nnUNet_preprocessed`,
@@ -170,5 +223,7 @@ changing **only** `--test-casefile`:
 | Preprocess gate | `python diagnostics/check_preprocessed.py --control B` |
 | Finetune one control | `bash run_train.sh B 0` |
 | CNISP prelabels | `bash scripts/gen_prelabels.sh both` |
-| Inference cascade | `bash run_predict.sh C /path/out` |
+| Test predict + eval (CNISP test set) | `bash run_corrector_predict.sh C 0` |
+| Assemble test 5ch inputs only | `python scripts/build_corrector_testset.py --control C` |
+| Eval predictions (A/B/C, shared) | `python diagnostics/eval_corrector.py --map ... --pred-dir ...` |
 | Raw smoke test | `python diagnostics/smoke_dataset.py --control B` |
