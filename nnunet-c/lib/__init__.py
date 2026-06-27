@@ -11,5 +11,4 @@ Modules (one job each, imported by engine/ and scripts/):
                     geometry-assert a case's channels; ch0 degraded-source pin.
   * caselist.py  -- read split txts, source_id<->casename, leakage asserts.
   * prelabel.py  -- resolve B/C prelabel masks from ONE nnUNet prediction.
-  * staging.py   -- softlink ct/prelabel/gt per case + staging_manifest.json.
 """

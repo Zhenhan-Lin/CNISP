@@ -35,12 +35,10 @@ add_repo_to_syspath(__file__)
 import numpy as np  # noqa: E402
 import nibabel as nib  # noqa: E402
 
-from lib import channels as _ch  # noqa: E402
-from lib.labels import NNUNET_LABELS  # noqa: E402
+from engine.convert import convert_case  # noqa: E402  (the SINGLE converter)
 from engine.build_dataset import _raw_root, _dataset_dir, _write_dataset_json  # noqa: E402
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
-_STRUCTS = ["ON", "Recti", "Globe", "Fat"]   # fixed nnUNet channel order
 
 
 def main() -> int:
@@ -115,14 +113,10 @@ def main() -> int:
                 skipped += 1
                 continue
             cid = f"corr_{case_id}_step{step:02d}"
-            summary = _ch.assemble_case(
-                case_id=cid, ct_path=ct, gt_path=Path(gt),
-                target_spacing=None, ref_grid=ref_grid,
-                n_channels=5, structures=_STRUCTS,
-                gt_struct_to_value=dict(NNUNET_LABELS),
-                images_dir=images_out, labels_dir=labels_out,
-                experiment=cfg["experiment"],
-                prelabel_path=pre, prelabel_struct_to_value=dict(NNUNET_LABELS),
+            summary = convert_case(
+                case_id=cid, ct_path=ct, prelabel_path=pre, ref_grid=ref_grid,
+                experiment=cfg["experiment"], images_dir=images_out,
+                gt_path=Path(gt), labels_dir=labels_out,
                 degraded_marker=f"/{images_dirname}/",
             )
             assembled.append(summary)

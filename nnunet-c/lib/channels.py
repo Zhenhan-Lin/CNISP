@@ -107,6 +107,22 @@ def _assemble_images(
         pre_img = nib.load(str(prelabel_path))
         pre_rs = _rs.resample_to_grid(pre_img, target_shape, target_affine, order=0)
         pre_arr = np.asanyarray(pre_rs.dataobj)
+        # Scheme gate (pothole VI): the binary split keys off the struct->value
+        # map (nnUNet {1,2,3,4} for the corrector). If the prelabel is in a
+        # DIFFERENT scheme (e.g. labelfusion {1,3,5,7} or a -1000-offset native
+        # mask), `== value` would split the WRONG voxels into a channel -- and
+        # do it SILENTLY. Fail loudly instead of corrupting the channels.
+        allowed = {0} | {int(v) for v in prelabel_struct_to_value.values()}
+        present = {int(v) for v in np.unique(pre_arr)}
+        extra = present - allowed
+        if extra:
+            raise AssertionError(
+                f"{case_id}: prelabel {prelabel_path} has values {sorted(present)} "
+                f"outside the expected scheme {sorted(allowed)} "
+                f"(struct->value={prelabel_struct_to_value}). Refusing to split "
+                f"into the wrong channels -- the mask is in a different label "
+                f"scheme than expected (needs remap to nnUNet {{1,2,3,4}})."
+            )
         binaries = split_mask_to_binaries(
             pre_arr, prelabel_struct_to_value, structures
         )

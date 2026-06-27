@@ -28,7 +28,10 @@ PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
 #               prelabels (those were generated with CNISP 'latest').
 CHK="${CHK:-checkpoint_best.pth}"
 CNISP_CHK="${CNISP_CHK:-latest}"
-STEPS="${STEPS:-3,6,9,12}"
+# TEST uses CNISP's established ADAPTIVE sweep (adaptive_step_sweep in the test
+# yaml) -- NOT the training grid 3/6/9/12 (that was the self-degraded train set).
+# The assembler then DISCOVERS whatever (source,step) CNISP produced.
+STEPS="${STEPS:-adaptive}"
 CASEFILE="${CASEFILE:-test_cases.txt}"
 CNISP_TEST_DIR="${CNISP_TEST_DIR:-$HERE/data/cnisp_pred_test}"
 RUN_CNISP="${RUN_CNISP:-auto}"        # auto: 1 for control C, 0 otherwise
@@ -37,7 +40,7 @@ export nnUNet_compile="${nnUNet_compile:-f}"
 
 echo "================================================================"
 echo "[predict] control=$CONTROL fold=$FOLD casefile=$CASEFILE"
-echo "[predict] nnUNet-C ckpt=$CHK   CNISP ckpt=$CNISP_CHK"
+echo "[predict] nnUNet-C ckpt=$CHK   CNISP ckpt=$CNISP_CHK   sweep=$STEPS"
 echo "================================================================"
 
 eval "$(python3 "$HERE/scripts/corrector_env.py" --config "$CONFIG" --control "$CONTROL")"
@@ -80,7 +83,7 @@ PY
 echo "[predict] (3) build_corrector_testset -> nnunet-c/test_input"
 python3 "$HERE/scripts/build_corrector_testset.py" \
     --config "$CONFIG" --control "$CONTROL" \
-    --casefile "$CASEFILE" --steps "$STEPS" \
+    --casefile "$CASEFILE" --steps "${BUILD_STEPS:-auto}" \
     --cnisp-test-dir "$CNISP_TEST_DIR"
 
 IMAGES_TS="$HERE/test_input/$CTRL_DATASET_NAME/imagesTs"

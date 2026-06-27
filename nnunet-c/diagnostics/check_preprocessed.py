@@ -10,7 +10,7 @@ case from ${nnUNet_preprocessed}/Dataset{ID}_.../<data_identifier>/ and asserts:
   3. all channels share one spatial shape (single array) == the seg shape.
   4. label values are a subset of {0,1,2,3,4}.
 
-Exits non-zero on any violation so run_full_pipeline.sh can block finetune.
+Exits non-zero on any violation so run_train.sh can block finetune.
 Heavy deps (blosc2 / numpy) imported lazily.
 
 Usage:

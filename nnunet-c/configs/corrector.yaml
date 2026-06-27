@@ -31,7 +31,7 @@ degraded_ct_root: null            # null -> "{work_dir}/input"
 
 # ── Reference (Dataset835) for finetune weight transfer + plan merge ──
 # Confirm the ACTUAL plan folder name on the GPU box (nnUNetPlans vs
-# nnUNetPlans_iso05) before running Stage 4.
+# nnUNetPlans_iso05) before running run_train.sh.
 reference_dataset_id: 835
 reference_dataset_name: PHOTON_CT_QAfiltered
 # reference_plan = the 835 RESULTS/checkpoint folder plan name

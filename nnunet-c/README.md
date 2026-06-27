@@ -25,36 +25,36 @@ channel adaptation. A is the existing 835 model (no build/train).
 - B's prelabel and C's CNISP input trace back to **one** nnUNet prediction per
   `(source, step)` (fair comparison).
 
-## 4-stage pipeline (`run_full_pipeline.sh`)
+## Pipeline (data/ flow)
+
+Train and test both build their nnUNet-C input through the **single** converter
+`engine/convert.py::convert_case` (train additionally writes a GT label). CNISP
+inference (`032`) is the only CNISP-layer step nnUNet-C invokes — it just consumes
+the produced masks.
 
 ```mermaid
 flowchart TD
-  s1["Stage 1: nnUNet(835) sparse predict on degraded CT
-  (corrector_train + CNISP test)"]
-  s2["Stage 2: retrain CNISP, GT obs -> orbital_ad_v6_5_gt
-  (cd CNISP, PYTHONPATH=., no conda)"]
-  s3["Stage 3: CNISP test-optimization -> prelabels
-  (corrector_train + test, identical settings)"]
-  s4["Stage 4: build 5ch Dataset + finetune corrector
-  (B=855, C=845; first-conv adaptation; pothole gates)"]
-  s1 --> s2 --> s3 --> s4
-  s1 -. "B prelabels (nnunet pred)" .-> s4
+  d["run_corrector_data.sh: select keep=False, degrade 3/6/9/12, 835 predict
+  -> data/images + data/nnunet_pred"]
+  a["align_corrector_data.py -> data/aligned_patch + corrector_train_cases.txt"]
+  c["run_corrector_cnisp.sh (032) -> data/cnisp_pred  (CNISP prelabels)"]
+  b["build_corrector_dataset.py --control C  (convert_case) -> Dataset845 raw"]
+  t["run_train.sh C 0: plan/preprocess/merge/GATE/surgery/finetune"]
+  d --> a --> c --> b --> t
+  d -. "B prelabels (nnunet pred)" .-> b
 ```
 
-| Stage | Action | Key products |
-|-------|--------|--------------|
-| 1 | `prepare_inputs` -> `synth_train_sweep` -> `sparsify_inputs` -> `predict_sparse_iso` -> `build_dataset835_sparse_patches` | degraded CTs; nnUNet sparse(+native) preds (= B prelabels); canonical patches (= Stage-3 input) |
-| 2 | cross-folder `run_02_train.sh train_v6_5_gt.yaml` | `${model_basedir}/orbital_ad_v6_5_gt/best_checkpoint.pth` |
-| 3 | `gen_prelabels.sh` = `03_infer.py` x2 (only `--test-casefile` differs) | `runs/{exp}/{run_tag}/native_space_step_XX/*_cnisp_stepXX.nii.gz` (= C prelabels) |
-| 4 | per control: `build_dataset` -> plan/preprocess -> `build_finetune_plan` -> preprocess -> **GATE** -> `adapt_checkpoint` -> `nnUNetv2_train` | finetuned `Dataset855/845` |
-
+**Train (control C):**
 ```bash
-# fill the corrector training split first (source_ids, one per line):
-#   nnunet-c/splits/corrector_train.txt
-bash nnunet-c/run_full_pipeline.sh            # all stages
-bash nnunet-c/run_full_pipeline.sh 4          # only Stage 4
-FORCE=1 CONTROLS="C" bash nnunet-c/run_full_pipeline.sh 3 4
+bash nnunet-c/run_corrector_data.sh                       # degrade + 835 predict
+python nnunet-c/scripts/align_corrector_data.py           # canonical-align
+MAX_SAMPLES=200 GPUS="0 1" bash nnunet-c/run_corrector_cnisp.sh   # CNISP prelabels (032)
+python nnunet-c/scripts/build_corrector_dataset.py --control C    # convert_case -> Dataset845
+CUDA_VISIBLE_DEVICES=0 bash nnunet-c/run_train.sh C 0     # finetune from 835
 ```
+
+**Test + eval (control C):** see "Test prediction & evaluation" below —
+`bash nnunet-c/run_corrector_predict.sh C 0`.
 
 ## Module dependency graph
 
@@ -71,18 +71,18 @@ flowchart TD
     LCH[channels.py]
     LCL[caselist.py]
     LP[prelabel.py]
-    LS[staging.py]
   end
   subgraph eng [engine/]
-    EB[build_dataset.py]
+    EB[build_dataset.py - dataset.json helpers]
+    EC[convert.py - THE converter]
     EF[finetune.py]
     EP[plan_merge.py]
   end
   subgraph scr [scripts/]
-    SBD[build_dataset.py]
+    SBD[build_corrector_dataset.py - TRAIN]
+    SBT[build_corrector_testset.py - TEST]
     SAC[adapt_checkpoint.py]
     SBF[build_finetune_plan.py]
-    SPC[predict_cascade.py]
     SCE[corrector_env.py]
     SDT[derive_train_casefile.py]
   end
@@ -92,21 +92,21 @@ flowchart TD
   end
   CY --> LC
   SP --> LCL
-  LC --> LR & LL & LCL & LP & LS & EB
-  LL --> LCH & EB
-  LR --> LCH & EB
-  LP --> LS & EB & SPC
-  LCH --> EB & SPC
-  LCL --> EB & SDT
-  LS --> EB
+  LC --> LR & LL & LCL & LP & EB
+  LL --> LCH & EC
+  LR --> LCH
+  LP --> SBD & SBT
+  LCH --> EC
+  LCL --> SDT
+  EC --> SBD & SBT
   EB --> SBD
   EF --> SAC
   EP --> SBF
-  reuse["nnunet/: resolve_gt, helpers/fs, sparsify/predict scripts"] --> LL & LS
+  reuse["nnunet/: resolve_gt, helpers/fs, sparsify/predict scripts"] --> LL
 ```
 
-Reused from the existing repo: `nnunet/data_prep/resolve_gt.py` (label schemes),
-`nnunet/helpers/fs.py` (softlinks), and the Stage-1 sparse-sweep scripts.
+Reused from the existing repo: `nnunet/data_prep/resolve_gt.py` (label schemes)
+and the sparse-sweep / CNISP scripts (degraded CTs, nnUNet preds, CNISP `032`).
 
 ## Potholes (GPU-box preprocess verification)
 
@@ -172,6 +172,14 @@ assembles `test_input/<name>/imagesTs` → `nnUNetv2_predict -chk checkpoint_bes
   exact same `channels.assemble_inference_case` → `split_mask_to_binaries`, with
   channel order **pinned `[ON, Recti, Globe, Fat]`** identical to training. No
   separate split logic; ch0 is upsampled to the mask grid; ch1..ch4 are binaries.
+- **Resolution scheme on the test set = CNISP's adaptive sweep**, NOT the training
+  grid `3/6/9/12` (that grid is only the self-degradation of the 200 keep=False
+  train images). The test CNISP run uses `--steps adaptive` (the test yaml's
+  `adaptive_step_sweep`, per-case effective-resolution steps), and the assembler
+  runs with `--steps auto`, **discovering** whichever `(source, step)` CNISP
+  actually produced (C) / has nnUNet preds for (A/B). The adaptive steps are a
+  deterministic function of each source's spacing, so A/B/C land on the same
+  `(source, step)` set.
 
 ### Eval grid & resample direction (correctness + fairness)
 
@@ -217,7 +225,7 @@ python nnunet-c/diagnostics/eval_corrector.py \
 
 | Need | Command |
 |------|---------|
-| Build a control's raw dataset | `bash run_build_dataset.sh B` |
+| Build TRAIN dataset (data/ tree) | `python scripts/build_corrector_dataset.py --control C` |
 | Adapt 835 ckpt 1ch->5ch | `python scripts/adapt_checkpoint.py --in ... --out ... --channels 5` |
 | Merge finetune plan | `python scripts/build_finetune_plan.py --control B` |
 | Preprocess gate | `python diagnostics/check_preprocessed.py --control B` |

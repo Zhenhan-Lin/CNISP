@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -43,12 +44,11 @@ add_repo_to_syspath(__file__)
 import numpy as np  # noqa: E402
 import nibabel as nib  # noqa: E402
 
-from lib import channels as _ch  # noqa: E402
+from engine.convert import convert_case, STRUCTS  # noqa: E402  (the SINGLE converter)
 from lib import prelabel as _pre  # noqa: E402
 from lib.labels import resolve_source_infos, NNUNET_LABELS  # noqa: E402
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
-_STRUCTS = ["ON", "Recti", "Globe", "Fat"]   # fixed nnUNet channel order
 
 
 def _read_source_ids(casefile: Path) -> list:
@@ -68,6 +68,34 @@ def _gt_stem(gt_label_path: Path) -> str:
     return gt_label_path.name.replace(".nii.gz", "").replace(".nii", "")
 
 
+_STEP_RE = re.compile(r"_step(\d+)\.nii\.gz$")
+_NATIVE_DIR_RE = re.compile(r"^sparse_step_(\d+)_native$")
+
+
+def _discover_steps_cnisp(cnisp_dir: Path, gstem: str) -> list:
+    """Steps CNISP actually produced for this source (adaptive-sweep aware)."""
+    steps = []
+    for p in sorted(cnisp_dir.glob(f"{gstem}_step*.nii.gz")):
+        m = _STEP_RE.search(p.name)
+        if m:
+            steps.append(int(m.group(1)))
+    return sorted(set(steps))
+
+
+def _discover_steps_nnunet(cfg, sid: str) -> list:
+    """Steps with a native-grid nnUNet pred on disk for this source."""
+    root = cfg["_resolved"]["nnunet_pred_root"]
+    exp_dir = root / cfg["experiment"]
+    if not exp_dir.is_dir():
+        return []
+    steps = []
+    for d in sorted(exp_dir.glob("sparse_step_*_native")):
+        m = _NATIVE_DIR_RE.match(d.name)
+        if m and (d / f"{sid}.nii.gz").exists():
+            steps.append(int(m.group(1)))
+    return sorted(set(steps))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -75,8 +103,11 @@ def main() -> int:
     ap.add_argument("--control", required=True, choices=["A", "B", "C", "a", "b", "c"])
     ap.add_argument("--casefile", default=None,
                     help="casefile under casefiles_dir (default: CNISP test_cases.txt)")
-    ap.add_argument("--steps", default="3,6,9,12",
-                    help="step sizes to assemble (default 3,6,9,12)")
+    ap.add_argument("--steps", default="auto",
+                    help="'auto' (default): DISCOVER per source whatever steps "
+                         "CNISP produced (control C) / nnUNet preds exist (A/B) "
+                         "-- this is what matches CNISP's adaptive sweep on the "
+                         "test set. Or an explicit list like '3,6,9,12'.")
     ap.add_argument("--cnisp-test-dir", default=None,
                     help="control C: dir of 032 test masks <gtstem>_step{XX}.nii.gz "
                          "(default: data/cnisp_pred_test)")
@@ -96,7 +127,9 @@ def main() -> int:
                            "use --control A only for the map/eval baseline.")
 
     res = cfg["_resolved"]
-    steps = [int(s) for s in args.steps.split(",") if s.strip()]
+    auto_steps = args.steps.strip().lower() == "auto"
+    explicit_steps = (None if auto_steps
+                      else [int(s) for s in args.steps.split(",") if s.strip()])
     casefile = (Path(args.casefile) if (args.casefile and Path(args.casefile).is_absolute())
                 else res["casefiles_dir"] / (args.casefile or "test_cases.txt"))
     if not casefile.is_file():
@@ -130,7 +163,9 @@ def main() -> int:
                  else ("CNISP " + str(cnisp_test_dir) if is_cnisp
                        else "nnUNet (work_dir)"))
     print(f"[testset] control={args.control.upper()} -> {ctl_dir}")
-    print(f"[testset] sources={len(source_ids)} steps={steps} casefile={casefile.name}")
+    print(f"[testset] sources={len(source_ids)} "
+          f"steps={'auto-discover' if auto_steps else explicit_steps} "
+          f"casefile={casefile.name}")
     print(f"[testset] prelabel/pred source={src_label}")
 
     infos = resolve_source_infos(cfg, source_ids)
@@ -150,7 +185,13 @@ def main() -> int:
         gt_img = nib.load(str(gt_path))
         ref_grid = (gt_img.shape[:3], np.asarray(gt_img.affine))
         gstem = _gt_stem(gt_path)
-        for step in steps:
+        if explicit_steps is not None:
+            src_steps = explicit_steps
+        elif is_cnisp:
+            src_steps = _discover_steps_cnisp(cnisp_test_dir, gstem)
+        else:                                   # A / B -> nnUNet native preds
+            src_steps = _discover_steps_nnunet(cfg, sid)
+        for step in src_steps:
             ct = _pre.degraded_ct_path(cfg, sid, step)
             if not ct.exists():
                 skipped += 1
@@ -177,12 +218,9 @@ def main() -> int:
             if not Path(pre).exists():
                 skipped += 1
                 continue
-            summary = _ch.assemble_inference_case(
-                case_id=cid, ct_path=ct, target_spacing=None, ref_grid=ref_grid,
-                n_channels=5, structures=_STRUCTS,
-                images_dir=images_out, experiment=cfg["experiment"],
-                prelabel_path=Path(pre),
-                prelabel_struct_to_value=dict(NNUNET_LABELS),
+            summary = convert_case(
+                case_id=cid, ct_path=ct, prelabel_path=Path(pre), ref_grid=ref_grid,
+                experiment=cfg["experiment"], images_dir=images_out,
             )
             assembled.append(summary)
             # pred_file is RELATIVE -> eval joins it with --pred-dir (nnUNet out).
@@ -194,7 +232,7 @@ def main() -> int:
 
     with open(ctl_dir / "test_cases_map.json", "w") as f:
         json.dump({"control": args.control.upper(), "casefile": casefile.name,
-                   "structures": _STRUCTS, "labels": dict(NNUNET_LABELS),
+                   "structures": STRUCTS, "labels": dict(NNUNET_LABELS),
                    "n": len(assembled), "cases": case_map}, f, indent=2)
     print(f"[testset] wrote {len(assembled)} case(s); skipped {skipped} (missing files).")
     if not is_A:
