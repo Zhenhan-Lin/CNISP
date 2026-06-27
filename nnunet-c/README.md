@@ -163,23 +163,27 @@ GPUS="0 1" CHK=checkpoint_best.pth bash nnunet-c/run_corrector_predict.sh C 0
 RUN_CNISP=0 bash nnunet-c/run_corrector_predict.sh B 0
 ```
 
-Stages: CNISP test inference (**existing `032`/`run_corrector_cnisp.sh`**, dense
-**native** output — same as training, no literal iso-0.5 decode) → `scripts/build_corrector_testset.py`
-assembles `test_input/<name>/imagesTs` → `nnUNetv2_predict -chk checkpoint_best.pth`
-→ `diagnostics/eval_corrector.py`.
+Stages: **CNISP's own thick `nnunet_pred` deployment run** (`03_infer.py`; test
+cases + adaptive sweep from the CNISP test yaml; output to
+`runs/<exp>/<run_tag>/native_space_step_XX/`) → `scripts/build_corrector_testset.py`
+**converts** that output to 5-ch `test_input/<name>/imagesTs` → `nnUNetv2_predict
+-chk checkpoint_best.pth` → `diagnostics/eval_corrector.py`.
 
-- **Test assembly = training assembly.** `build_corrector_testset.py` reuses the
-  exact same `channels.assemble_inference_case` → `split_mask_to_binaries`, with
-  channel order **pinned `[ON, Recti, Globe, Fat]`** identical to training. No
-  separate split logic; ch0 is upsampled to the mask grid; ch1..ch4 are binaries.
-- **Resolution scheme on the test set = CNISP's adaptive sweep**, NOT the training
-  grid `3/6/9/12` (that grid is only the self-degradation of the 200 keep=False
-  train images). The test CNISP run uses `--steps adaptive` (the test yaml's
-  `adaptive_step_sweep`, per-case effective-resolution steps), and the assembler
-  runs with `--steps auto`, **discovering** whichever `(source, step)` CNISP
-  actually produced (C) / has nnUNet preds for (A/B). The adaptive steps are a
-  deterministic function of each source's spacing, so A/B/C land on the same
-  `(source, step)` set.
+- **nnUNet-C does NOT run CNISP / a sweep for test.** It consumes CNISP's existing
+  deployment masks. `build_corrector_testset.py` reads `runs/.../native_space_step_XX/`
+  via the manifest, remaps each native mask **by name** to nnUNet `{1,2,3,4}`, then
+  calls the SAME `engine/convert.py::convert_case` the train builder uses (channel
+  order pinned `[ON, Recti, Globe, Fat]`; ch0 upsampled to the mask/GT grid; ch1..ch4
+  binaries). `--steps auto` discovers whichever `(source, step)` CNISP produced.
+- **Run CNISP first** (or let `run_corrector_predict.sh` do it):
+  ```bash
+  python orbital_shape_prior_st1/scripts/03_infer.py \
+    -p orbital_shape_prior_st1/configs/paths.yaml \
+    -t orbital_shape_prior_st1/configs/train_v6_5_gt.yaml \
+    -c orbital_shape_prior_st1/configs/test_corrector.yaml \
+    -m orbital_ad_v6_5_gt --checkpoint latest \
+    --test-label-source nnunet_pred --run-tag corrector_gt --experiment thick
+  ```
 
 ### Eval grid & resample direction (correctness + fairness)
 

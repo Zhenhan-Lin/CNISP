@@ -26,21 +26,17 @@ PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
 #   CHK       = nnUNet-C predict checkpoint -> best (the finetuned corrector)
 #   CNISP_CHK = CNISP test-inference checkpoint -> latest, to MATCH the training
 #               prelabels (those were generated with CNISP 'latest').
-CHK="${CHK:-checkpoint_best.pth}"
-CNISP_CHK="${CNISP_CHK:-latest}"
-# TEST uses CNISP's established ADAPTIVE sweep (adaptive_step_sweep in the test
-# yaml) -- NOT the training grid 3/6/9/12 (that was the self-degraded train set).
-# The assembler then DISCOVERS whatever (source,step) CNISP produced.
-STEPS="${STEPS:-adaptive}"
-CASEFILE="${CASEFILE:-test_cases.txt}"
-CNISP_TEST_DIR="${CNISP_TEST_DIR:-$HERE/data/cnisp_pred_test}"
+CHK="${CHK:-checkpoint_best.pth}"     # nnUNet-C predict checkpoint (best)
+CNISP_CHK="${CNISP_CHK:-latest}"      # CNISP test checkpoint (latest; matches train prelabels)
 RUN_CNISP="${RUN_CNISP:-auto}"        # auto: 1 for control C, 0 otherwise
 GPUS="${GPUS:-0 1}"
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+CNISP_DIR="$REPO_ROOT/orbital_shape_prior_st1"
 export nnUNet_compile="${nnUNet_compile:-f}"
 
 echo "================================================================"
-echo "[predict] control=$CONTROL fold=$FOLD casefile=$CASEFILE"
-echo "[predict] nnUNet-C ckpt=$CHK   CNISP ckpt=$CNISP_CHK   sweep=$STEPS"
+echo "[predict] control=$CONTROL fold=$FOLD"
+echo "[predict] nnUNet-C ckpt=$CHK   CNISP ckpt=$CNISP_CHK"
 echo "================================================================"
 
 eval "$(python3 "$HERE/scripts/corrector_env.py" --config "$CONFIG" --control "$CONTROL")"
@@ -58,15 +54,21 @@ if [[ "$RUN_CNISP" == "auto" ]]; then
     [[ "$PRELABEL_SOURCE" == "cnisp" ]] && RUN_CNISP=1 || RUN_CNISP=0
 fi
 
-# ── 1. CNISP test inference (control C) via the existing launcher ─────
+# ── 1. CNISP test inference = CNISP's OWN thick nnunet_pred deployment run ─
+# (03_infer.py: test_cases.txt + adaptive sweep from the test yaml; outputs to
+#  runs/$EXPERIMENT/$RUN_TAG/native_space_step_XX/.) nnUNet-C only consumes it.
 if [[ "$RUN_CNISP" == "1" ]]; then
-    echo "[predict] (1) CNISP test inference -> $CNISP_TEST_DIR"
-    OUT_DIR="$CNISP_TEST_DIR" ALIGNED_DIR="$ALIGNED_DIR" \
-    CASEFILE="$CASEFILE" STEPS="$STEPS" MAX_SAMPLES=0 \
-    CHECKPOINT="$CNISP_CHK" GPUS="$GPUS" \
-        bash "$HERE/run_corrector_cnisp.sh"
+    echo "[predict] (1) CNISP thick nnunet_pred test (03_infer) -> runs/$EXPERIMENT/$RUN_TAG"
+    PYTHONPATH="$CNISP_DIR:$REPO_ROOT:${PYTHONPATH:-}" \
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${GPUS%% *}}" \
+    python3 "$CNISP_DIR/scripts/03_infer.py" \
+        -p "$CNISP_DIR/configs/paths.yaml" \
+        -t "$CNISP_DIR/configs/$CNISP_TRAIN_YAML" \
+        -c "$CNISP_DIR/configs/$CNISP_TEST_YAML" \
+        -m "$CNISP_MODEL_NAME" --checkpoint "$CNISP_CHK" \
+        --test-label-source nnunet_pred --run-tag "$RUN_TAG" --experiment "$EXPERIMENT"
 else
-    echo "[predict] (1) skip CNISP test inference (RUN_CNISP=0)"
+    echo "[predict] (1) skip CNISP test inference (RUN_CNISP=0; using existing runs/$EXPERIMENT/$RUN_TAG)"
 fi
 
 # ── 2. install per-channel resampler (predict-time preprocess needs it) ─
@@ -80,11 +82,9 @@ print(f"[predict] installed resampler -> {dst}")
 PY
 
 # ── 3. assemble 5-channel test inputs ────────────────────────────────
-echo "[predict] (3) build_corrector_testset -> nnunet-c/test_input"
+echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -> nnunet-c/test_input"
 python3 "$HERE/scripts/build_corrector_testset.py" \
-    --config "$CONFIG" --control "$CONTROL" \
-    --casefile "$CASEFILE" --steps "${BUILD_STEPS:-auto}" \
-    --cnisp-test-dir "$CNISP_TEST_DIR"
+    --config "$CONFIG" --control "$CONTROL" --steps "${BUILD_STEPS:-auto}"
 
 IMAGES_TS="$HERE/test_input/$CTRL_DATASET_NAME/imagesTs"
 OUT_DIR_PRED="${OUT_DIR_PRED:-$HERE/predictions/$CTRL_DATASET_NAME/fold_${FOLD}}"
