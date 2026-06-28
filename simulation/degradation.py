@@ -131,10 +131,28 @@ def _convolve_image(
     axis: int,
     kernel: np.ndarray,
 ) -> torch.Tensor:
-    """Direct centered 1D conv on float image."""
+    """Centered 1D conv on a float image, renormalized at the FOV boundary.
+
+    BUG FIX (CT thick degradation): ``_conv1d_along_axis`` zero-pads. For a CT
+    image the out-of-FOV value is AIR (~ -1000 HU), not 0, so a plain zero-padded
+    box average at the first/last ``step//2`` through-plane slices blends real
+    air (-1000) with 0 and lifts those whole slices toward gray. For LABELS this
+    is fine (background class == 0); for IMAGES it corrupts the boundary slices.
+
+    Fix: average ONLY the slices that actually exist (the physical thick-slice
+    integrates the in-FOV extent), by dividing the zero-padded numerator by the
+    zero-padded sum of kernel weights over valid (in-FOV) taps. Interior voxels
+    see the full kernel (weights sum to 1) so they are UNCHANGED; only boundary
+    slices are corrected (true partial average instead of a gray blend).
+    """
     k_t = torch.from_numpy(kernel).float()
     vol = volume.float().unsqueeze(0)  # [1,D1,D2,D3]
-    return _conv1d_along_axis(vol, axis, k_t).squeeze(0)
+    num = _conv1d_along_axis(vol, axis, k_t)
+    # Per-position valid kernel weight: conv of an all-ones volume with the same
+    # zero-padding. == 1.0 in the interior (kernel normalized), < 1.0 at edges.
+    den = _conv1d_along_axis(torch.ones_like(vol), axis, k_t)
+    out = num / den.clamp_min(1e-6)
+    return out.squeeze(0)
 
 
 def _conv1d_along_axis(
