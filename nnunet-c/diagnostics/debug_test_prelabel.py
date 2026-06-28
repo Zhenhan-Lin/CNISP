@@ -38,7 +38,9 @@ import numpy as np  # noqa: E402
 import nibabel as nib  # noqa: E402
 
 from lib import prelabel as _pre  # noqa: E402
-from lib.labels import resolve_source_infos, remap_to_nnunet  # noqa: E402
+from lib.labels import (  # noqa: E402
+    resolve_source_infos, remap_to_nnunet, remap_native_to_nnunet,
+)
 from lib.resample import build_reference_grid, resample_to_grid, voxel_spacing  # noqa: E402
 
 STRUCTS = ["ON", "Recti", "Globe", "Fat"]
@@ -118,6 +120,15 @@ def main() -> int:
     nn2 = remap_to_nnunet(arr, canon, STRUCTS)
     for i, name in enumerate(STRUCTS, start=1):
         print(f"      ch{i} {name:6s}: nonzero={int((nn2 == i).sum())}")
+
+    # 3c) what the FIXED builder now does: auto-detect scheme + remap BY NAME.
+    print("\n[3c] FIXED builder path: remap_native_to_nnunet(scheme='auto')")
+    nn3, det_scheme, det_off = remap_native_to_nnunet(arr, STRUCTS, scheme="auto")
+    print(f"    detected scheme={det_scheme!r} offset={det_off}")
+    for i, name in enumerate(STRUCTS, start=1):
+        print(f"      ch{i} {name:6s}: nonzero={int((nn3 == i).sum())}")
+    print("    >>> this is what _nn_prelabel produces after the fix; all four "
+          "should be non-zero.")
 
     # 4) resample remapped mask onto the assembly ref grid
     print("\n[4] resample remapped mask onto the assembly ref grid (order 0)")
