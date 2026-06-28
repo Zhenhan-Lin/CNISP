@@ -44,7 +44,9 @@ import nibabel as nib  # noqa: E402
 
 from engine.convert import convert_case, STRUCTS  # noqa: E402  (the SINGLE converter)
 from lib import prelabel as _pre  # noqa: E402
-from lib.labels import resolve_source_infos, remap_to_nnunet, NNUNET_LABELS  # noqa: E402
+from lib.labels import (  # noqa: E402
+    resolve_source_infos, remap_native_to_nnunet, NNUNET_LABELS,
+)
 from lib.resample import build_reference_grid  # noqa: E402
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
@@ -129,16 +131,20 @@ def _discover_steps_nnunet(cfg, sid: str) -> list:
 def _nn_prelabel(pre_info: dict, cid: str, stage_dir: Path) -> Path:
     """Return a path to the prelabel in nnUNet {1,2,3,4} scheme.
 
-    B's work_dir pred is already {1,2,3,4} -> use as-is. C's CNISP native mask is
-    in the source's ORIGINAL scheme -> remap BY NAME (struct_to_value) to {1,2,3,4}
-    and stage it (so the single converter always receives {1,2,3,4}).
+    B's work_dir pred is already {1,2,3,4} -> use as-is. C's CNISP mask (iso head
+    or native_space) is written by ``map_*_to_native`` in the ALIGNMENT meta's
+    ``input_label_scheme`` -- which for the corrector is the Dataset835 (nnUNet)
+    meta, so its values are NOT the source's ORIGINAL GT scheme. Trusting
+    ``info.gt_struct_to_value`` here (e.g. labelfusion {-999,-997,-995,-993} for
+    atlas sources) silently zeros every channel. Detect the mask's actual scheme
+    and remap BY NAME (canonical orderings differ across schemes) to {1,2,3,4}.
     """
     src = Path(pre_info["path"])
     if pre_info.get("scheme") == "nnunet":
         return src
     img = nib.load(str(src))
     arr = np.asanyarray(img.dataobj)
-    nn = remap_to_nnunet(arr, dict(pre_info["struct_to_value"]), STRUCTS)
+    nn, _scheme, _offset = remap_native_to_nnunet(arr, STRUCTS, scheme="auto")
     stage_dir.mkdir(parents=True, exist_ok=True)
     out = stage_dir / f"{cid}.nii.gz"
     nib.save(nib.Nifti1Image(nn.astype(np.uint8), img.affine), str(out))
