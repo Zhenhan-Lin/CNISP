@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Probe: why are the TEST prelabel channels (ch1..ch4) empty?
+
+Reproduces build_corrector_testset.py's prelabel resolution for ONE (sid, step)
+and prints every intermediate, so we can see EXACTLY where the mask goes to zero:
+
+  1) info.gt_struct_to_value / gt_scheme  (the map _nn_prelabel remaps FROM)
+  2) the CNISP prelabel SOURCE file (iso or native): unique values + counts
+     -> is the source itself empty? what scheme/values does it actually carry?
+  3) remap_to_nnunet(source, gt_struct_to_value): per-structure nonzero
+     -> does the remap drop structures because the source scheme != gt scheme?
+  4) resample the remapped mask onto the assembly ref grid (order 0)
+     -> does world misalignment between the prelabel grid and the ref grid
+        (degraded-CT 0.5 FOV in iso mode) zero it out?
+
+Hypothesis under test: the CNISP decode emits CANONICAL {1,2,3,4} but the iso
+branch interprets it with the source's labelfusion scheme {1,3,5,7}, so the
+remap finds nothing (esp. Globe=5 / Fat=7) and the channels go empty.
+
+Usage:
+    python nnunet-c/diagnostics/debug_test_prelabel.py \
+        --control C --grid iso --sid atlas_orbit0001_ubMask_al2_fill --step 3
+    # also try --grid gt to compare the native-mask path
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.config import load_corrector_config, get_control, add_repo_to_syspath  # noqa: E402
+
+add_repo_to_syspath(__file__)
+
+import numpy as np  # noqa: E402
+import nibabel as nib  # noqa: E402
+
+from lib import prelabel as _pre  # noqa: E402
+from lib.labels import resolve_source_infos, remap_to_nnunet  # noqa: E402
+from lib.resample import build_reference_grid, resample_to_grid, voxel_spacing  # noqa: E402
+
+STRUCTS = ["ON", "Recti", "Globe", "Fat"]
+_DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
+
+
+def _uniq(arr) -> str:
+    v, c = np.unique(arr, return_counts=True)
+    pairs = [f"{int(vv)}:{int(cc)}" for vv, cc in zip(v, c)]
+    return "{" + ", ".join(pairs[:12]) + ("" if len(pairs) <= 12 else " ...") + "}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default=str(_DEFAULT_CONFIG))
+    ap.add_argument("--control", default="C")
+    ap.add_argument("--grid", choices=["iso", "gt"], default="iso")
+    ap.add_argument("--sid", required=True)
+    ap.add_argument("--step", type=int, required=True)
+    ap.add_argument("--iso-mm", type=float, default=0.5)
+    args = ap.parse_args()
+
+    cfg = load_corrector_config(args.config, caller_file=__file__)
+    control = get_control(cfg, args.control)
+    grid_iso = (args.grid == "iso")
+    sid, step = args.sid, args.step
+
+    print("=" * 72)
+    print(f"control={args.control} grid={args.grid} sid={sid} step={step}")
+    print("=" * 72)
+
+    # 1) source info / GT scheme (what _nn_prelabel remaps FROM)
+    info = resolve_source_infos(cfg, [sid])[sid]
+    print("\n[1] source GT scheme")
+    print(f"    gt_scheme           = {getattr(info, 'gt_scheme', '?')}")
+    print(f"    gt_struct_to_value  = {dict(info.gt_struct_to_value)}")
+    print(f"    gt_label_path       = {info.gt_label_path}")
+    print("    >>> these are the (name->value) keys remap_to_nnunet will search "
+          "for in the CNISP mask. If the CNISP mask uses DIFFERENT values, the "
+          "matching voxels are 0 -> empty channels.")
+
+    # 2) CNISP prelabel SOURCE file
+    print("\n[2] CNISP prelabel source")
+    if grid_iso:
+        src = _pre._c_iso_prelabel_path(cfg, sid, step)
+    else:
+        src = _pre._c_prelabel_path(cfg, sid, step)
+    print(f"    path = {src}")
+    if not Path(src).exists():
+        print("    [!] source file does not exist.")
+        return 1
+    img = nib.load(str(src))
+    arr = np.asanyarray(img.dataobj)
+    print(f"    shape={arr.shape} dtype={arr.dtype} "
+          f"spacing={np.round(voxel_spacing(img.affine),3).tolist()}")
+    print(f"    UNIQUE values:counts = {_uniq(arr)}")
+    print(f"    nonzero = {int((arr != 0).sum())}")
+    print("    >>> if this is all 0, the CNISP decode/emit itself is empty. "
+          "If it carries {1,2,3,4} but [1] expects {1,3,5,7}, that's the scheme "
+          "mismatch.")
+
+    # 3) remap exactly like _nn_prelabel does (FROM gt scheme TO {1,2,3,4})
+    print("\n[3] remap_to_nnunet(source, gt_struct_to_value) -- as the builder does")
+    nn = remap_to_nnunet(arr, dict(info.gt_struct_to_value), STRUCTS)
+    print(f"    remapped UNIQUE = {_uniq(nn)}")
+    for i, name in enumerate(STRUCTS, start=1):
+        print(f"      ch{i} {name:6s}: nonzero={int((nn == i).sum())}")
+    print("    >>> per-structure nonzero AFTER remap. Any 0 here that was present "
+          "in [2] => the remap key (gt value) missed the CNISP value (by-name vs "
+          "by-value bug).")
+
+    # 3b) what a BY-NAME (canonical) remap would give, for contrast
+    print("\n[3b] for contrast: remap assuming CNISP canonical {ON:1,Recti:2,"
+          "Globe:3,Fat:4}")
+    canon = {"ON": 1, "Recti": 2, "Globe": 3, "Fat": 4}
+    nn2 = remap_to_nnunet(arr, canon, STRUCTS)
+    for i, name in enumerate(STRUCTS, start=1):
+        print(f"      ch{i} {name:6s}: nonzero={int((nn2 == i).sum())}")
+
+    # 4) resample remapped mask onto the assembly ref grid
+    print("\n[4] resample remapped mask onto the assembly ref grid (order 0)")
+    ct = _pre.degraded_ct_path(cfg, sid, step)
+    print(f"    degraded CT (ch0) = {ct}  exists={Path(ct).exists()}")
+    if grid_iso:
+        ref_shape, ref_aff = build_reference_grid(nib.load(str(ct)),
+                                                  [args.iso_mm] * 3)
+    else:
+        gt_img = nib.load(str(info.gt_label_path))
+        ref_shape, ref_aff = gt_img.shape[:3], np.asarray(gt_img.affine)
+    print(f"    ref grid shape={tuple(int(s) for s in ref_shape)} "
+          f"spacing={np.round(voxel_spacing(ref_aff),3).tolist()}")
+    print(f"    src  grid origin={np.round(img.affine[:3,3],1).tolist()}  "
+          f"ref grid origin={np.round(np.asarray(ref_aff)[:3,3],1).tolist()}")
+    nn_img = nib.Nifti1Image(nn.astype(np.uint8), img.affine)
+    rs = resample_to_grid(nn_img, ref_shape, ref_aff, order=0)
+    rs_arr = np.asanyarray(rs.dataobj)
+    for i, name in enumerate(STRUCTS, start=1):
+        print(f"      ch{i} {name:6s}: nonzero AFTER regrid = {int((rs_arr == i).sum())}")
+    print("    >>> if [3] had content but this is 0, the prelabel grid and the "
+          "ref grid don't overlap in world space (geometry bug).")
+
+    print("\n[done] Walk 2 -> 3 -> 4: the first place a structure becomes 0 is the "
+          "bug site.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
