@@ -506,6 +506,39 @@ def _meta_path_for_case(layout: RunLayout) -> Callable[[str], Path]:
     return _resolve
 
 
+def _sub_crop_sidecar_dict(result: dict) -> dict:
+    """Build the sub-patch sidecar dict for one sweep result.
+
+    Single source of truth shared by the incremental per-case save (crash
+    safety) and the end-of-run export loop, so both write byte-identical
+    sidecars. Records where the 64 mm prediction sits inside the 80 mm disk
+    patch -- mandatory for cache reload AND for re-decoding/inverting a saved
+    latent later (e.g. to query an iso-0.5 corrector input from the .npy).
+    """
+    return {
+        "casename": result["casename"],
+        "step_size": int(result["step_size"]),
+        "slice_start_id": int(result.get("slice_start_id", 0)),
+        "step_axis": int(result["step_axis"]),
+        "sub_crop_lo_vox_dense": list(map(int, result["sub_crop_lo_vox_dense"])),
+        "sub_crop_shape_vox_dense": list(
+            map(int, result["sub_crop_shape_vox_dense"])
+        ),
+        "sub_origin_mm_in_disk": (
+            list(map(float, result["sub_origin_mm_in_disk"]))
+            if result.get("sub_origin_mm_in_disk") is not None
+            else None
+        ),
+        "disk_patch_dense_shape": (
+            list(map(int, result["disk_patch_dense_shape"]))
+            if result.get("disk_patch_dense_shape") is not None
+            else None
+        ),
+        "visible_lcc_voxel_count": int(result.get("visible_lcc_voxel_count", 0)),
+        "visible_total_fg_count": int(result.get("visible_total_fg_count", 0)),
+    }
+
+
 def infer_test_set(params):
     """
     Run controlled reconstruction on the test set with a per-case adaptive
@@ -762,6 +795,41 @@ def infer_test_set(params):
             _flush_source_native(source_id, _pending_results.pop(source_id))
             _seen_eyes.pop(source_id, None)
 
+    # ── Incremental (crash-safe) per-case latent + sidecar save ───
+    # Write each finished (case, step)'s latent + sub_crop sidecar the MOMENT
+    # the case completes, not only after the WHOLE sweep. The latent is the
+    # expensive, irreproducible artifact (test-time optimisation); a crash
+    # mid-sweep used to lose every latent computed so far. The sidecar is cheap
+    # and is what lets the latent be re-decoded (e.g. at iso-0.5) + inverted to
+    # native later. The end-of-run export loop below still rewrites these
+    # (idempotent), so this only ADDS durability -- it never changes outputs.
+    def _save_case_artifacts_incremental(casename: str,
+                                         case_results: List[dict]) -> None:
+        if not export_preds:
+            return
+        for result in case_results:
+            step = int(result["step_size"])
+            start = int(result.get("slice_start_id", 0))
+            step_dir = output_dir / step_dir_name(step, start)
+            pred_dir = step_dir / "pred"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            with open(pred_dir / f"{result['casename']}_sub_crop.json", "w") as f:
+                json.dump(_sub_crop_sidecar_dict(result), f, indent=2)
+            # Skip cache hits without a real latent (placeholder size<=1).
+            if result.get("latent_missing", False) or result["latent"].size <= 1:
+                continue
+            lat_dir = step_dir / "latents"
+            lat_dir.mkdir(parents=True, exist_ok=True)
+            np.save(str(lat_dir / f"{result['casename']}.npy"),
+                    np.asarray(result["latent"], dtype=np.float32))
+
+    def _on_case_done(casename: str, case_results: List[dict]) -> None:
+        # Durable artifacts first (latent + sidecar), then the optional
+        # incremental native remap (masks are also written per-source there).
+        _save_case_artifacts_incremental(casename, case_results)
+        if incremental_remap:
+            _emit_case_native(casename, case_results)
+
     # ── Run sweep ─────────────────────────────────────────────────
     all_results = run_sweep(
         net=net,
@@ -776,7 +844,7 @@ def infer_test_set(params):
         output_dir=output_dir,
         label_obs_override_loader=label_obs_loader,
         real_pair=(layout.test_label_source == "real_pair"),
-        on_case_done=(_emit_case_native if incremental_remap else None),
+        on_case_done=_on_case_done,
     )
 
     # Flush any source whose eye set never completed (e.g. an eye produced
@@ -842,36 +910,8 @@ def infer_test_set(params):
             #   pred → disk → full volume
             # without re-running sparsify or LCC. Mandatory under the
             # inner-crop pipeline.
-            sub_crop_sidecar = {
-                "casename": casename,
-                "step_size": int(step),
-                "slice_start_id": start,
-                "step_axis": case_axis,
-                "sub_crop_lo_vox_dense": list(
-                    map(int, result["sub_crop_lo_vox_dense"])
-                ),
-                "sub_crop_shape_vox_dense": list(
-                    map(int, result["sub_crop_shape_vox_dense"])
-                ),
-                "sub_origin_mm_in_disk": (
-                    list(map(float, result["sub_origin_mm_in_disk"]))
-                    if result.get("sub_origin_mm_in_disk") is not None
-                    else None
-                ),
-                "disk_patch_dense_shape": (
-                    list(map(int, result["disk_patch_dense_shape"]))
-                    if result.get("disk_patch_dense_shape") is not None
-                    else None
-                ),
-                "visible_lcc_voxel_count": int(
-                    result.get("visible_lcc_voxel_count", 0)
-                ),
-                "visible_total_fg_count": int(
-                    result.get("visible_total_fg_count", 0)
-                ),
-            }
             with open(pred_dir / f"{casename}_sub_crop.json", "w") as f:
-                json.dump(sub_crop_sidecar, f, indent=2)
+                json.dump(_sub_crop_sidecar_dict(result), f, indent=2)
 
             # latents/  (sidecar so cache resume keeps iso reconstruction
             # working AND so any downstream replay -- native mapping,
@@ -1072,6 +1112,86 @@ def infer_test_set(params):
                 },
                 "steps": sweep_manifest,
             }, f, indent=2)
+
+    # ── Optional iso-0.5 prelabel emit (ADDITIVE; nnUNet-C corrector ch1..4) ──
+    # Decode each fitted latent on a FIXED iso grid (default 0.5 mm) and place it
+    # back into a full-head iso volume via the iso link map_iso_results_to_native
+    # (iso_sp pinned to iso_mm, head grid = FOV + iso_mm, NOT the GT/native grid).
+    # This is a PURE EXTRA output: native masks, CSVs, pickles and Dice above are
+    # byte-identical. Off unless params['emit_iso_prelabel']['enabled'] is set
+    # (03_infer.py --emit-iso-prelabel-dir). The fitted latent is already the
+    # Delta-corrected alpha_hat, so decoding it reproduces the prediction.
+    iso_cfg = params.get("emit_iso_prelabel") or {}
+    if (iso_cfg.get("enabled") and all_results
+            and params.get("export_predictions", True)):
+        from engine.native_mapping import map_iso_results_to_native
+        iso_mm = float(iso_cfg.get("iso_mm", 0.5))
+        iso_out = Path(iso_cfg["out_dir"])
+        iso_out.mkdir(parents=True, exist_ok=True)
+        print(f"\n[iso-prelabel] emit iso-{iso_mm}mm full-head masks -> {iso_out}")
+        by_step_iso: Dict[int, List[dict]] = defaultdict(list)
+        for r in all_results:
+            # corrector consumes the canonical start=0 pick only
+            if int(r.get("slice_start_id", 0)) != 0:
+                continue
+            if r.get("latent_missing", False) or r["latent"].size <= 1:
+                continue
+            lat = torch.from_numpy(
+                np.asarray(r["latent"], dtype=np.float32)
+            ).unsqueeze(0).to(device)
+            tgt = torch.round(
+                net.image_size.detach().cpu().float() / iso_mm
+            ).long()
+            with torch.no_grad():
+                iso_map = net.predict_dense(
+                    lat, tgt.to(device),
+                    torch.full((3,), iso_mm, dtype=torch.float32).to(device),
+                    autocast_dtype=_AUTOCAST_DTYPE,
+                )
+            r["pred_class_map_iso"] = iso_map.numpy().astype(np.int16)
+            by_step_iso[int(r["step_size"])].append(r)
+        n_iso = 0
+        for step, results_step in sorted(by_step_iso.items()):
+            # Mirror the native_space layout so nnUNet-C consumes it uniformly:
+            #   <iso_out>/native_space_step_XX/<stem>_cnisp_iso_stepXX.nii.gz
+            #   <iso_out>/native_space_step_XX/manifest.json {by_source_id}
+            step_dir = iso_out / f"native_space_step_{step:02d}"
+            suffix = f"_cnisp_iso_step{step:02d}"
+            paths = map_iso_results_to_native(
+                results_step, layout.metadata_dir, step_dir,
+                suffix=suffix, iso_mm=iso_mm,
+                meta_path_for_casename=meta_path_for,
+            )
+            n_iso += len(paths)
+            # by_source_id manifest (basename only; mirrors the native path).
+            per_step: Dict[str, str] = {}
+            seen: set = set()
+            for r in results_step:
+                mp = meta_path_for(r["casename"])
+                if not mp.exists():
+                    continue
+                with open(mp) as f:
+                    m = json.load(f)
+                sid = str(m["source_id"])
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                stem = (Path(m["original_nifti_path"]).name
+                        .replace(".nii.gz", "").replace(".nii", ""))
+                per_step[sid] = f"{stem}{suffix}.nii.gz"
+            with open(step_dir / "manifest.json", "w") as f:
+                json.dump({
+                    "iso_mm": iso_mm,
+                    "step_size": step,
+                    "suffix": suffix,
+                    "run_tag": layout.run_tag,
+                    "test_label_source": layout.test_label_source,
+                    "experiment": layout.experiment,
+                    "by_source_id": per_step,
+                }, f, indent=2)
+        print(f"[iso-prelabel] wrote {n_iso} iso-{iso_mm}mm head mask(s) under "
+              f"{iso_out}/native_space_step_XX/ (scheme=original; downstream "
+              f"remaps to {{1,2,3,4}} by name)")
 
     # ── Pickle layout ────────────────────────────────────────────
     # inference_results.pkl : per-case primary picks (one row per case),

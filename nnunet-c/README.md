@@ -135,7 +135,10 @@ corrector_train and test prelabels are produced by the **same** `03_infer.py`
 invocation settings (`orbital_shape_prior_st1/configs/test_corrector.yaml`),
 changing **only** `--test-casefile`:
 
-- checkpoint: `best` of `orbital_ad_v6_5_gt`
+- checkpoint: `latest` of `orbital_ad_v6_5_gt` (pinned to `latest` for BOTH the
+  corrector_train and test prelabels so the corrector's train/test ch1..ch4 come
+  from the same CNISP prior; `run_corrector_cnisp.sh`, `gen_prelabels.sh` and
+  `run_corrector_predict.sh` all default to `latest`)
 - `--test-label-source nnunet_pred` (test-time observation = nnUNet pred on the
   degraded image; no GT at test)
 - `--experiment thick`, `--run-tag corrector_gt`

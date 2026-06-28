@@ -58,6 +58,40 @@ def _cnisp_run_dir(cfg: Dict) -> Path:
     return base / cfg["cnisp_model_name"] / "runs" / cfg["experiment"] / cfg["run_tag"]
 
 
+def _cnisp_iso_root(cfg: Dict) -> Path:
+    """Root of the iso-0.5 prelabels CNISP emitted for the corrector.
+
+    These are written by ``03_infer.py --emit-iso-prelabel-dir`` (see
+    ``run_corrector_predict.sh`` EMIT_ISO). Layout mirrors native_space:
+        <root>/native_space_step_XX/<stem>_cnisp_iso_stepXX.nii.gz + manifest.json
+    Default: ``nnunet-c/data/cnisp_pred_test_iso``.
+    """
+    name = (cfg.get("corrector_data", {}) or {}).get(
+        "cnisp_iso_pred_dirname", "cnisp_pred_test_iso"
+    )
+    return cfg["_resolved"]["nnunet_c_root"] / "data" / name
+
+
+def _c_iso_prelabel_path(cfg: Dict, sid: str, step: int) -> Path:
+    """CNISP iso-0.5 head mask for this source/step, resolved via manifest.json."""
+    step_dir = _cnisp_iso_root(cfg) / f"native_space_step_{int(step):02d}"
+    manifest = step_dir / "manifest.json"
+    if not manifest.is_file():
+        raise FileNotFoundError(
+            f"CNISP iso manifest missing: {manifest}. Run the CNISP test with "
+            f"iso emit first (EMIT_ISO=1 run_corrector_predict.sh, or "
+            f"03_infer.py --emit-iso-prelabel-dir)."
+        )
+    with open(manifest) as f:
+        mf = json.load(f)
+    by_sid = mf.get("by_source_id", mf)
+    if sid not in by_sid:
+        raise KeyError(
+            f"source {sid!r} not in {manifest} (has {len(by_sid)} sources)"
+        )
+    return step_dir / by_sid[sid]
+
+
 def _c_prelabel_path(cfg: Dict, sid: str, step: int) -> Path:
     """CNISP native-space mask for this source/step, resolved via manifest.json."""
     native_dir = _cnisp_run_dir(cfg) / f"native_space_step_{int(step):02d}"

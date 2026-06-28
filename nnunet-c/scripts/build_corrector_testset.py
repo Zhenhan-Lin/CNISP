@@ -45,6 +45,7 @@ import nibabel as nib  # noqa: E402
 from engine.convert import convert_case, STRUCTS  # noqa: E402  (the SINGLE converter)
 from lib import prelabel as _pre  # noqa: E402
 from lib.labels import resolve_source_infos, remap_to_nnunet, NNUNET_LABELS  # noqa: E402
+from lib.resample import build_reference_grid  # noqa: E402
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
 _NATIVE_DIR_RE = re.compile(r"^sparse_step_(\d+)_native$")
@@ -74,6 +75,30 @@ def _discover_steps_cnisp_runs(cfg, sid: str) -> list:
         return []
     steps = []
     for d in sorted(run_dir.glob("native_space_step_*")):
+        m = _RUN_STEP_RE.match(d.name)
+        if not m:
+            continue
+        mf = d / "manifest.json"
+        if not mf.is_file():
+            continue
+        data = json.load(open(mf))
+        by_sid = data.get("by_source_id", data)
+        if sid in by_sid:
+            steps.append(int(m.group(1)))
+    return sorted(set(steps))
+
+
+def _discover_steps_cnisp_iso(cfg, sid: str) -> list:
+    """Steps where CNISP's ISO-0.5 deployment output produced this source.
+
+    Mirrors _discover_steps_cnisp_runs but reads the iso prelabel root
+    (nnunet-c/data/cnisp_pred_test_iso/native_space_step_XX/manifest.json).
+    """
+    root = _pre._cnisp_iso_root(cfg)
+    if not root.is_dir():
+        return []
+    steps = []
+    for d in sorted(root.glob("native_space_step_*")):
         m = _RUN_STEP_RE.match(d.name)
         if not m:
             continue
@@ -130,6 +155,14 @@ def main() -> int:
     ap.add_argument("--steps", default="auto",
                     help="'auto' (default): discover whichever (source,step) CNISP "
                          "produced (C) / has nnUNet preds (A/B). Or an explicit list.")
+    ap.add_argument("--prelabel-grid", choices=["iso", "gt"], default="iso",
+                    help="iso (default): assemble the 5ch case on the iso-0.5 head "
+                         "grid built from the DEGRADED image (ch0) FOV; control C's "
+                         "ch1..4 come from CNISP's iso-0.5 prelabels (no native "
+                         "round-trip, no GT grid). gt: legacy -- assemble on the GT "
+                         "native grid, ch1..4 from CNISP native_space masks.")
+    ap.add_argument("--iso-mm", type=float, default=0.5,
+                    help="iso spacing (mm) for --prelabel-grid iso (default 0.5).")
     ap.add_argument("--out", default=None, help="output root (default: nnunet-c/test_input)")
     args = ap.parse_args()
 
@@ -137,6 +170,7 @@ def main() -> int:
     control = get_control(cfg, args.control)
     is_A = control["prelabel_source"] == "none"
     is_cnisp = control["prelabel_source"] == "cnisp"
+    grid_iso = (args.prelabel_grid == "iso")
     if not is_A and int(control["n_channels"]) != 5:
         raise RuntimeError("this builder assembles the 5-channel controls (B/C); "
                            "use --control A only for the map/eval baseline.")
@@ -158,16 +192,19 @@ def main() -> int:
     stage_dir = ctl_dir / "_prelabel_nn"
     (images_out if not is_A else ctl_dir).mkdir(parents=True, exist_ok=True)
 
-    if is_cnisp and not _pre._cnisp_run_dir(cfg).is_dir():
-        print(f"[testset] CNISP deployment output missing: {_pre._cnisp_run_dir(cfg)}\n"
-              f"  Run CNISP's thick nnunet_pred test first (03_infer.py), e.g.:\n"
-              f"    python orbital_shape_prior_st1/scripts/03_infer.py \\\n"
-              f"      -p .../paths.yaml -t .../{cfg['cnisp_train_yaml']} "
-              f"-c .../{cfg['cnisp_test_yaml']} \\\n"
-              f"      -m {cfg['cnisp_model_name']} --checkpoint latest \\\n"
-              f"      --test-label-source nnunet_pred --run-tag {cfg['run_tag']} "
-              f"--experiment {cfg['experiment']}", file=sys.stderr)
-        return 2
+    if is_cnisp:
+        _need = _pre._cnisp_iso_root(cfg) if grid_iso else _pre._cnisp_run_dir(cfg)
+        if not _need.is_dir():
+            _hint = ("EMIT_ISO=1 bash nnunet-c/run_corrector_predict.sh C 0  "
+                     "(or 03_infer.py --emit-iso-prelabel-dir "
+                     "nnunet-c/data/cnisp_pred_test_iso)") if grid_iso else (
+                     "bash nnunet-c/run_corrector_predict.sh C 0  "
+                     "(or 03_infer.py --test-label-source nnunet_pred --run-tag "
+                     f"{cfg['run_tag']} --experiment {cfg['experiment']})")
+            print(f"[testset] CNISP {'iso' if grid_iso else 'native'} output "
+                  f"missing: {_need}\n  Run CNISP test first, e.g.:\n    {_hint}",
+                  file=sys.stderr)
+            return 2
 
     print(f"[testset] control={args.control.upper()} -> {ctl_dir}")
     print(f"[testset] sources={len(source_ids)} "
@@ -188,13 +225,20 @@ def main() -> int:
             skipped += 1
             continue
         gt_stv = {k: int(v) for k, v in info.gt_struct_to_value.items()}
-        gt_img = nib.load(str(gt_path))
-        ref_grid = (gt_img.shape[:3], np.asarray(gt_img.affine))
+        # GT is used ONLY for the eval map (resample pred->GT grid at eval) and,
+        # in legacy gt mode, as the assembly ref grid. In iso mode the case is
+        # assembled on the degraded-image 0.5 head grid (built per step below),
+        # so the source's original resolution never touches the corrector input.
+        ref_grid_gt = None
+        if not grid_iso:
+            gt_img = nib.load(str(gt_path))
+            ref_grid_gt = (gt_img.shape[:3], np.asarray(gt_img.affine))
 
         if explicit_steps is not None:
             src_steps = explicit_steps
         elif is_cnisp:
-            src_steps = _discover_steps_cnisp_runs(cfg, sid)
+            src_steps = (_discover_steps_cnisp_iso(cfg, sid) if grid_iso
+                         else _discover_steps_cnisp_runs(cfg, sid))
         else:                                   # A / B -> nnUNet native preds
             src_steps = _discover_steps_nnunet(cfg, sid)
 
@@ -218,11 +262,36 @@ def main() -> int:
                 print(f"  {cid}: pred={Path(pred).name}")
                 continue
 
-            try:
-                pre_info = _pre.resolve_prelabel(cfg, control, sid, step, info)
-            except (FileNotFoundError, KeyError):
-                skipped += 1
-                continue
+            # Reference grid for the 5ch case:
+            #   iso -> iso-mm head grid from the DEGRADED image (ch0) FOV; B and
+            #          C share it for the same (sid, step) so they stay
+            #          structurally identical (fair B-vs-C). No GT grid.
+            #   gt  -> legacy GT native grid.
+            if grid_iso:
+                ref_grid = build_reference_grid(nib.load(str(ct)),
+                                                [args.iso_mm] * 3)
+            else:
+                ref_grid = ref_grid_gt
+
+            # Resolve ch1..4 prelabel.
+            #   C + iso -> CNISP iso-0.5 head mask (original scheme; _nn_prelabel
+            #              remaps to {1,2,3,4} by name -- no native round-trip).
+            #   C + gt / B -> resolve_prelabel (native_space C / nnUNet pred B).
+            if is_cnisp and grid_iso:
+                try:
+                    _iso_path = _pre._c_iso_prelabel_path(cfg, sid, step)
+                except (FileNotFoundError, KeyError):
+                    skipped += 1
+                    continue
+                pre_info = {"path": _iso_path,
+                            "struct_to_value": dict(info.gt_struct_to_value),
+                            "scheme": info.gt_scheme}
+            else:
+                try:
+                    pre_info = _pre.resolve_prelabel(cfg, control, sid, step, info)
+                except (FileNotFoundError, KeyError):
+                    skipped += 1
+                    continue
             if pre_info is None or not Path(pre_info["path"]).exists():
                 skipped += 1
                 continue

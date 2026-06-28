@@ -421,6 +421,8 @@ def map_iso_results_to_native(
     meta_dir: Path,
     output_dir: Path,
     suffix: str = "_cnisp_iso",
+    iso_mm: Optional[float] = None,
+    meta_path_for_casename: Optional[Callable[[str], Path]] = None,
 ) -> List[Path]:
     """Save isotropic predictions merged into a full-volume at isotropic spacing.
 
@@ -433,14 +435,30 @@ def map_iso_results_to_native(
     OD/OS are merged with the same "foreground union" rule as the
     non-iso path. Remap to the original label scheme runs once on the
     merged iso volume.
+
+    Args:
+        iso_mm: FIXED isotropic spacing (mm) for the output head grid. When
+            None, falls back to ``min(original per-axis spacing)`` (legacy).
+            The nnUNet-C corrector passes ``0.5`` so the iso head grid is
+            defined by the head FOV + 0.5 spacing and does NOT depend on the
+            source's original resolution.
+        meta_path_for_casename: optional ``(casename) -> Path`` resolver so
+            Option C (atlas in ``metadata/``, chk_* in ``metadata_dataset835/``)
+            resolves each case's metadata correctly. Falls back to
+            ``meta_dir/<casename>.json`` when None (mirrors map_results_to_native).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _meta_path(casename: str) -> Path:
+        if meta_path_for_casename is not None:
+            return Path(meta_path_for_casename(casename))
+        return Path(meta_dir) / f"{casename}.json"
+
     source_groups: Dict[str, List[Tuple[dict, dict]]] = defaultdict(list)
     for r in results:
         casename = r["casename"]
-        meta_path = Path(meta_dir) / f"{casename}.json"
+        meta_path = _meta_path(casename)
         if not meta_path.exists():
             continue
         with open(meta_path) as f:
@@ -453,9 +471,11 @@ def map_iso_results_to_native(
         original_affine = np.array(ref_meta["original_affine"])
         original_shape = ref_meta["original_shape"]
 
-        # Iso spacing = min over original (in-plane) spacing.
+        # Iso spacing: FIXED iso_mm when provided (corrector: 0.5 -> head grid
+        # defined by FOV + 0.5, independent of the source's native resolution),
+        # else min over original (in-plane) spacing (legacy).
         orig_spacing = np.sqrt(np.sum(original_affine[:3, :3] ** 2, axis=0))
-        iso_sp = float(orig_spacing.min())
+        iso_sp = float(iso_mm) if iso_mm is not None else float(orig_spacing.min())
         iso_shape = [int(round(original_shape[ax] * orig_spacing[ax] / iso_sp))
                      for ax in range(3)]
         direction = original_affine[:3, :3] / orig_spacing  # unit dirs

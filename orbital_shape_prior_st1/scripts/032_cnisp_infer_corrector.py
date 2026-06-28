@@ -417,6 +417,16 @@ def main() -> int:
                 )
                 r["casename"] = cn
                 src_results.append(r)
+                # Crash-safe: persist THIS (case, step) latent immediately, not
+                # only after the whole source finishes in _save_final_masks. The
+                # latent is the expensive test-optimization artifact; a crash
+                # mid-source used to lose every eye/step computed so far.
+                _lat = r.get("latent")
+                if _lat is not None and np.asarray(_lat).size > 1:
+                    _ld = out_dir / "latent"
+                    _ld.mkdir(parents=True, exist_ok=True)
+                    np.save(str(_ld / f"{cn}_step{step:02d}.npy"),
+                            np.asarray(_lat))
                 print(f"  [{si}/{n_src}] {cn} step={step:02d}: "
                       f"dense={r['dice']['mean']:.3f} obs={r['dice_observed']['mean']:.3f}")
         if src_results:

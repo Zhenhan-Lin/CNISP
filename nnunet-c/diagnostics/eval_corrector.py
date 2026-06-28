@@ -67,6 +67,14 @@ def main() -> int:
                          "(nnUNetv2_predict output for B/C). Not needed when the "
                          "map's pred_file paths are absolute (control A).")
     ap.add_argument("--out-csv", default=None, help="per-case Dice CSV")
+    ap.add_argument("--intersect-with", action="append", default=None,
+                    help="One or more OTHER test_cases_map.json files. Restrict "
+                         "scoring to the (source_id, step) present in THIS map AND "
+                         "all of them. Use it for B vs C so both controls are "
+                         "scored on the IDENTICAL (source, step) population -- "
+                         "otherwise their independent --steps auto discovery can "
+                         "yield different case sets and the aggregate mean Dice is "
+                         "not comparable. Repeatable.")
     args = ap.parse_args()
 
     mp = json.load(open(args.map))
@@ -74,6 +82,23 @@ def main() -> int:
     cases = mp["cases"]
     control = mp.get("control", "?")
     pred_dir = Path(args.pred_dir) if args.pred_dir else None
+
+    # ── B∩C fairness gate: keep only (source_id, step) common to every map ──
+    if args.intersect_with:
+        def _keys(m: dict) -> set:
+            return {(c.get("source_id"), c.get("step"))
+                    for c in m["cases"].values()}
+        common = _keys(mp)
+        for other in args.intersect_with:
+            common &= _keys(json.load(open(other)))
+        before = len(cases)
+        cases = {cid: c for cid, c in cases.items()
+                 if (c.get("source_id"), c.get("step")) in common}
+        print(f"[eval] intersect-with {len(args.intersect_with)} map(s): "
+              f"{before} -> {len(cases)} case(s) on the common (source,step) set")
+        if not cases:
+            print("[eval] empty intersection -- nothing to score.", file=sys.stderr)
+            return 1
 
     print("=" * 64)
     print(f"[eval] control={control}  cases={len(cases)}  structures={structures}")

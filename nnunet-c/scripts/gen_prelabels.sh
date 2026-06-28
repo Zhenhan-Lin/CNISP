@@ -23,7 +23,11 @@ NNC_ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="$(cd "$NNC_ROOT/.." && pwd)"
 CONFIG="${CONFIG:-$NNC_ROOT/configs/corrector.yaml}"
 WHICH="${1:-both}"           # both | train | test
-CHECKPOINT="${CHECKPOINT:-best}"
+# CNISP test-optimization checkpoint. Pinned to 'latest' so train and test
+# prelabels (and the deployment run in run_corrector_predict.sh, which also
+# defaults to latest) are produced by the SAME checkpoint -- mixing best/latest
+# would make the corrector's train and test ch1..ch4 come from different priors.
+CHECKPOINT="${CHECKPOINT:-latest}"
 
 # Resolve identities/paths from corrector.yaml (uses control C identity here).
 eval "$(python3 "$HERE/corrector_env.py" --config "$CONFIG" --control C)"

@@ -81,6 +81,19 @@ def main():
               "Downstream compare/viz only see the sources this run produced, "
               "so the head-to-head plots are restricted to the same subset."),
     )
+    parser.add_argument(
+        "--emit-iso-prelabel-dir", default=None,
+        help=("ADDITIVE extra output for the nnUNet-C corrector: also decode "
+              "each fitted latent on a FIXED iso grid (see --emit-iso-mm) and "
+              "write a full-head iso mask per (source, step) to this dir "
+              "(<stem>_cnisp_iso_step{XX}.nii.gz, original label scheme). Does "
+              "NOT change any existing output (native masks / CSV / Dice). Off "
+              "when unset."),
+    )
+    parser.add_argument(
+        "--emit-iso-mm", type=float, default=0.5,
+        help="Isotropic spacing (mm) for --emit-iso-prelabel-dir (default 0.5).",
+    )
     args = parser.parse_args()
 
     # Merge configs: paths → train (architecture) → test (overrides runtime settings)
@@ -101,6 +114,12 @@ def main():
         params["experiment"] = args.experiment
     if args.test_casefile is not None:
         params["test_casefile"] = args.test_casefile
+    if args.emit_iso_prelabel_dir is not None:
+        params["emit_iso_prelabel"] = {
+            "enabled": True,
+            "iso_mm": float(args.emit_iso_mm),
+            "out_dir": args.emit_iso_prelabel_dir,
+        }
 
     # infer_test_set writes inference_results.pkl + sweep_results.pkl itself
     infer_test_set(params)

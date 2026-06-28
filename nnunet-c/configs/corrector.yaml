@@ -100,6 +100,11 @@ corrector_data:
   images_dirname: images          # {case}_step{XX}_0000.nii.gz
   nnunet_pred_dirname: nnunet_pred
   cnisp_pred_dirname: cnisp_pred
+  # CNISP iso-0.5 TEST prelabels (control C test ch1..4 source under --prelabel-grid
+  # iso). Layout: <data_root>/<cnisp_iso_pred_dirname>/native_space_step_XX/
+  #   <stem>_cnisp_iso_stepXX.nii.gz + manifest.json. Written by the CNISP test run
+  #   (03_infer.py --emit-iso-prelabel-dir / run_corrector_predict.sh EMIT_ISO).
+  cnisp_iso_pred_dirname: cnisp_pred_test_iso
   # Corrector CNISP aligned patches live HERE (not the shared CNISP aligned_dir),
   # so the corrector run never touches the CNISP training patch tree. Holds
   # labels_dataset835/, metadata_dataset835/, labels_dataset835_<exp>_step_XX/.
