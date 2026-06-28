@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# NOTE: originally created under nnunet-c/diagnostics/ ; moved to nnunet-c/debugger/.
+# Imports resolve via parents[1] == nnunet-c, so it runs from either location.
 """Decide the TRUE label scheme of the CNISP iso prelabel by cross-tabulating it
 against the source GT.
 
@@ -14,7 +16,7 @@ Output: for each iso value v in {1,2,3,4}, the GT structure it overlaps most
     v=1 -> ON, v=2 -> ?, v=3 -> ?, v=4 -> ?
 
 Usage:
-    python nnunet-c/diagnostics/debug_iso_scheme.py \
+    python nnunet-c/debugger/debug_iso_scheme.py \
         --control C --grid iso --sid atlas_orbit0001_ubMask_al2_fill --step 3
 """
 

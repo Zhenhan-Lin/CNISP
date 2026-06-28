@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# NOTE: originally created under nnunet-c/diagnostics/ ; moved to nnunet-c/debugger/.
+# Imports resolve via parents[1] == nnunet-c, so it runs from either location.
 """Probe: why are the TEST prelabel channels (ch1..ch4) empty?
 
 Reproduces build_corrector_testset.py's prelabel resolution for ONE (sid, step)
@@ -18,7 +20,7 @@ branch interprets it with the source's labelfusion scheme {1,3,5,7}, so the
 remap finds nothing (esp. Globe=5 / Fat=7) and the channels go empty.
 
 Usage:
-    python nnunet-c/diagnostics/debug_test_prelabel.py \
+    python nnunet-c/debugger/debug_test_prelabel.py \
         --control C --grid iso --sid atlas_orbit0001_ubMask_al2_fill --step 3
     # also try --grid gt to compare the native-mask path
 """

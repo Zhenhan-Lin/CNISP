@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# NOTE: originally created under nnunet-c/diagnostics/ ; moved to nnunet-c/debugger/.
+# Imports resolve via parents[1] == nnunet-c, so it runs from either location.
 """Toy diagnostic: dump every intermediate variable that decides whether the
 corrector actually USES its prelabel channels (ch1..ch4) at test time.
 
@@ -30,7 +32,7 @@ Nothing here mutates state; it only reads. Run on the GPU box where nnUNet env
 
 Example
 -------
-    python nnunet-c/diagnostics/debug_corrector_io.py \
+    python nnunet-c/debugger/debug_corrector_io.py \
         --dataset-id 845 --dataset-name PHOTON_CT_CORR_C_cnisp \
         --plans nnUNetPlansFinetune --config 3d_fullres \
         --trainer nnUNetTrainer --fold 0 --chk checkpoint_best.pth \
