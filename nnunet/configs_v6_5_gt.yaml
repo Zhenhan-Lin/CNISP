@@ -22,9 +22,17 @@ cnisp_paths_yaml: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st
 cnisp_model_name: orbital_ad_v6_5_gt
 cnisp_train_yaml: train_v6_5_gt.yaml
 
-# ── Which CNISP run to compare against nnUNet ─────────────────────
+# ── Which CNISP runs to compare against nnUNet ────────────────────
+# atlas_gt     = ceiling curve (CNISP optimized against the atlas manual GT).
 # corrector_gt = the GT-obs CNISP test run that fed control C's prelabels.
+# NOTE: each run_tag MUST already have runs/thick/<run_tag>/native_space_step_*/
+# masks on disk, or the compare phase pre-flight fails for ALL run_tags. If the
+# atlas_gt thick run was never inferred for orbital_ad_v6_5_gt, infer it first
+# (03_infer.py --test-label-source atlas_gt --run-tag atlas_gt --experiment thick)
+# or drop this entry.
 cnisp_runs_to_compare:
+  - run_tag: atlas_gt
+    method_label: CNISP-v6.5-gt-atlasGT
   - run_tag: corrector_gt
     method_label: CNISP-v6.5-gt
 
