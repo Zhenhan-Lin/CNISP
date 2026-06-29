@@ -498,10 +498,17 @@ def draw_paired_overall(
             continue
         c = method_color(m, idx)
         ax.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color=c, label=m)
+        # Stagger the per-point labels by method index so the (up to 4)
+        # near-coincident markers at each eff_res bucket don't pile their
+        # annotations on top of each other: alternate above/below the marker
+        # with growing offset; the per-method color keeps them readable.
+        sign = 1 if (idx % 2 == 0) else -1
+        dy = sign * (11 + (idx // 2) * 22)
+        va = "bottom" if sign > 0 else "top"
         for x, y, n in zip(xs, ys, ns):
             ax.annotate(f"{y:.3f}\nn={n}", (x, y),
-                        textcoords="offset points", xytext=(0, 8),
-                        ha="center", fontsize=7, color=c)
+                        textcoords="offset points", xytext=(0, dy),
+                        ha="center", va=va, fontsize=7, color=c)
     ax.set_xlabel("effective resolution (mm, through-plane)")
     ax.set_ylabel("mean Dice (4 foreground classes)")
     ax.set_title("Overall mean Dice vs effective resolution")
