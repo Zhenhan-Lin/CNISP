@@ -1,0 +1,77 @@
+# ── nnUNet vs CNISP(v6.5-gt) vs nnUNet-C comparison config (THICK) ──
+# Drives the `compare` phase of run_pipeline.sh for the THREE-way thick-mode
+# comparison:
+#   * nnUNet-sparse   (Dataset835 sparse-CT thick sweep)
+#   * CNISP-v6.5-gt   (orbital_ad_v6_5_gt, run_tag corrector_gt — the GT-obs
+#                      CNISP whose test-opt produces the control-C prelabels)
+#   * nnUNet-C        (control C corrector; Dice read from its eval CSV)
+# EXP = sweep_degrade_mode = thick. This config only Dices artefacts that
+# already exist on disk; it does not regenerate predictions.
+
+# ── nnUNet inference identity ─────────────────────────────────────
+dataset_id: 835
+dataset_name: PHOTON_CT_QAfiltered
+plan: nnUNetPlans
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+folds: [2]
+gpu_id: 0
+
+# ── CNISP-side artefacts (v6.5-gt) ────────────────────────────────
+cnisp_paths_yaml: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st1/configs/paths.yaml
+cnisp_model_name: orbital_ad_v6_5_gt
+cnisp_train_yaml: train_v6_5_gt.yaml
+
+# ── Which CNISP run to compare against nnUNet ─────────────────────
+# corrector_gt = the GT-obs CNISP test run that fed control C's prelabels.
+cnisp_runs_to_compare:
+  - run_tag: corrector_gt
+    method_label: CNISP-v6.5-gt
+
+deployment_gt_dirname_for_chk: prediction/native
+
+# ── nnUNet-C corrector: third method in the comparison ────────────
+# control C eval CSV (eval_corrector.py output). Path is relative to repo root.
+nnunet_c_method_label: nnUNet-C
+nnunet_c_eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv
+
+# ── Source CT discovery ───────────────────────────────────────────
+atlas_image_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_images
+pivot_csv: /fs5/p_masi/linz18/QA_record/table_collection/PHOTON_CP_QA_pivot_table.csv
+pivot_image_path_columns: [ct_image_path, image_path, image, ct, t1]
+pivot_subject_column: subject_label
+
+# ── Working directories ───────────────────────────────────────────
+work_dir: /fs5/p_masi/linz18/local_projects/CNISP/nnunet
+smore_out_root: /fs5/p_masi/linz18/data/smore_resolved_images
+smore_suffix: _smore
+
+# ── Sparse-CT sweep ───────────────────────────────────────────────
+cnisp_slice_step_axis: 2
+sparse_axis_alignment_min: 0.95
+sparse_eff_res_tolerance: 0.05
+sparse_eff_res_max_drift: 0.30
+
+# ── High-eff_res start-offset fan-out — start=0 only for thick ─────
+start_offset_eff_res_min_mm: 3.5
+start_offsets: [0]
+
+# ── Degradation type for the nnUNet sparse sweep ──────────────────
+# THICK physical partial-volume degradation (matches the v6.5-gt thick run).
+sweep_degrade_mode: thick
+sweep_modality: ct
+
+# ── Aggregation ───────────────────────────────────────────────────
+summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+
+# ── Viz source filter ─────────────────────────────────────────────
+viz_include_source_prefixes: []
+viz_exclude_source_prefixes: ["chk_"]
+
+# ── nnUNet label-scheme assertion ─────────────────────────────────
+expected_nnunet_labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4
