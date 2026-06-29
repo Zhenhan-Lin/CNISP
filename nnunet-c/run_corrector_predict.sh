@@ -69,6 +69,27 @@ ISO_ARGS=""
 [[ "$EMIT_ISO" == "1" ]] && ISO_ARGS="--emit-iso-prelabel-dir $ISO_PRELABEL_DIR --emit-iso-mm 0.5"
 echo "[predict] GRID=$GRID EMIT_ISO=$EMIT_ISO  (iso dir: $ISO_PRELABEL_DIR)"
 
+# ── single-image debug mode ──────────────────────────────────────────
+# SOURCE=<source_id> (or BUILD_CASEFILE=<path>) restricts the test build to ONE
+# image (all its steps via --steps auto, or BUILD_STEPS), writing to ISOLATED
+# test_input_single/ + predictions_single/ so the full build is never clobbered.
+# Pair it with RUN_CNISP=0 (reuse the existing CNISP/native preds; a single image
+# does not warrant re-running a full CNISP test sweep).
+SOURCE="${SOURCE:-}"
+BUILD_CASEFILE="${BUILD_CASEFILE:-}"
+TEST_ROOT="$HERE/test_input"
+PRED_ROOT="$HERE/predictions"
+if [[ -n "$SOURCE" || -n "$BUILD_CASEFILE" ]]; then
+    TEST_ROOT="$HERE/test_input_single"
+    PRED_ROOT="$HERE/predictions_single"
+    if [[ -z "$BUILD_CASEFILE" ]]; then
+        BUILD_CASEFILE="$(mktemp "${TMPDIR:-/tmp}/corr_one_XXXXXX.txt")"
+        printf '%s\n' "$SOURCE" > "$BUILD_CASEFILE"
+    fi
+    echo "[predict] SINGLE-IMAGE mode: casefile=$BUILD_CASEFILE"
+    echo "          -> isolated outputs under $TEST_ROOT and $PRED_ROOT"
+fi
+
 # ── 1. CNISP test inference = CNISP's OWN thick nnunet_pred deployment run ─
 # (03_infer.py: test_cases.txt + adaptive sweep from the test yaml; outputs to
 #  runs/$EXPERIMENT/$RUN_TAG/native_space_step_XX/.) nnUNet-C only consumes it.
@@ -98,13 +119,14 @@ print(f"[predict] installed resampler -> {dst}")
 PY
 
 # ── 3. assemble 5-channel test inputs ────────────────────────────────
-echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -> nnunet-c/test_input"
+echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -> $TEST_ROOT"
 python3 "$HERE/scripts/build_corrector_testset.py" \
     --config "$CONFIG" --control "$CONTROL" --steps "${BUILD_STEPS:-auto}" \
-    --prelabel-grid "$GRID"
+    --prelabel-grid "$GRID" --out "$TEST_ROOT" \
+    ${BUILD_CASEFILE:+--casefile "$BUILD_CASEFILE"}
 
-IMAGES_TS="$HERE/test_input/$CTRL_DATASET_NAME/imagesTs"
-OUT_DIR_PRED="${OUT_DIR_PRED:-$HERE/predictions/$CTRL_DATASET_NAME/fold_${FOLD}}"
+IMAGES_TS="$TEST_ROOT/$CTRL_DATASET_NAME/imagesTs"
+OUT_DIR_PRED="${OUT_DIR_PRED:-$PRED_ROOT/$CTRL_DATASET_NAME/fold_${FOLD}}"
 mkdir -p "$OUT_DIR_PRED"
 
 # ── 4. nnUNetv2_predict with the finetuned corrector ─────────────────
@@ -119,8 +141,8 @@ nnUNetv2_predict \
 echo "[predict] done: predictions -> $OUT_DIR_PRED"
 
 # ── 5. shared eval (same code/resample for A/B/C) ────────────────────
-MAP_JSON="$HERE/test_input/$CTRL_DATASET_NAME/test_cases_map.json"
-EVAL_CSV="${EVAL_CSV:-$HERE/predictions/$CTRL_DATASET_NAME/eval_${CONTROL}_fold${FOLD}.csv}"
+MAP_JSON="$TEST_ROOT/$CTRL_DATASET_NAME/test_cases_map.json"
+EVAL_CSV="${EVAL_CSV:-$PRED_ROOT/$CTRL_DATASET_NAME/eval_${CONTROL}_fold${FOLD}.csv}"
 if [[ "${RUN_EVAL:-1}" == "1" ]]; then
     echo "[predict] (5) eval (prediction -> native GT grid, order 0; Dice on GT grid)"
     python3 "$HERE/diagnostics/eval_corrector.py" \
