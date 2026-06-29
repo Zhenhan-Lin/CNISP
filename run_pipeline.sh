@@ -1209,6 +1209,15 @@ phase_compare() {
     python3 "$REPO_ROOT/simulation/comparison/experiment_summary.py" \
             --config "$CONFIG" \
             --comparison-dir "$COMPARISON_DIR"
+
+    # ── Combined single-figure overlay (ALL methods on one plot) ─────────
+    # nnUNet-sparse + every CNISP run + nnUNet-C on one figure for this
+    # experiment, with a (nnUNet-C - nnUNet-sparse) delta panel.
+    echo "  ─── combined overlay figure (experiment=$EXP) ───"
+    python3 "$REPO_ROOT/simulation/comparison/combined_summary.py" \
+            --config "$CONFIG" \
+            --comparison-dir "$COMPARISON_DIR" \
+            --experiment "$EXP"
 }
 
 phase_nnunet_interp() {
@@ -1311,6 +1320,9 @@ for i in "${!CNISP_RUN_TAGS[@]}"; do
     echo "         + paired_summary_by_eff_res.csv -- the head-to-head view,"
     echo "         nnUNet-sparse vs CNISP plus the nnUNet-C overlay when set)"
 done
+echo "  Combined overlay (ALL methods on one figure; per experiment):"
+echo "    $COMPARISON_DIR/viz/combined__${EXP}/combined_dice_vs_eff_res.png"
+echo "      (nnUNet-sparse + every CNISP run + nnUNet-C; delta = nnUNet-C - nnUNet-sparse)"
 echo "  nnUNet-sparse standalone bundle (run-tag-agnostic; per experiment):"
 echo "    $COMPARISON_DIR/viz/nnUNet-sparse__${EXP}/nnUNet-sparse_recon_summary.png"
 if [[ -n "$(read_yaml_field "$CONFIG" "nnunet_c_eval_csv")" ]]; then

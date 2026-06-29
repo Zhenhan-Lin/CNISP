@@ -50,14 +50,30 @@ METHOD_COLORS = {
     "nnUNet-sparse":   "#d62728",   # red    - image-conditioned baseline
     "CNISP-atlasGT":   "#1f77b4",   # blue   - GT-conditioned ceiling curve
     "CNISP-nnUNetPred": "#2ca02c",  # green  - deployment-mode CNISP
+    "CNISP-v6.5-gt-atlasGT": "#1f77b4",  # blue  - v6.5-gt ceiling curve
+    "CNISP-v6.5-gt":   "#2ca02c",   # green  - v6.5-gt corrector_gt run
     "nnUNet-C":        "#ff7f0e",   # orange - CNISP-prelabel corrector
 }
 DEFAULT_CNISP_COLOR = "#1f77b4"
 DEFAULT_NNUNET_COLOR = "#d62728"
 
+# Deterministic fallback palette for method labels not in METHOD_COLORS, so a
+# multi-method overlay (e.g. two CNISP run_tags on one figure) still gets
+# distinct colors instead of all collapsing onto one default.
+_FALLBACK_PALETTE = [
+    "#1f77b4", "#2ca02c", "#9467bd", "#8c564b", "#17becf", "#bcbd22",
+]
+
 
 def color_for(method: str, fallback: str) -> str:
     return METHOD_COLORS.get(method, fallback)
+
+
+def method_color(method: str, idx: int) -> str:
+    """Stable per-method color: the registered one, else a palette slot."""
+    if method in METHOD_COLORS:
+        return METHOD_COLORS[method]
+    return _FALLBACK_PALETTE[idx % len(_FALLBACK_PALETTE)]
 
 
 def fmt(v: float, nd: int = 6) -> str:
@@ -474,24 +490,18 @@ def draw_paired_overall(
     by_method_bucket,
     eff_by_bucket,
 ) -> None:
-    for m in methods:
+    for idx, m in enumerate(methods):
         xs, ys, es, ns = series_for(
             m, "mean", bucket_order, by_method_bucket, eff_by_bucket,
         )
         if not xs:
             continue
-        ax.errorbar(
-            xs, ys, yerr=es, fmt="o-", capsize=4,
-            color=color_for(m, DEFAULT_NNUNET_COLOR
-                            if m == NNUNET_METHOD_LABEL else DEFAULT_CNISP_COLOR),
-            label=m,
-        )
+        c = method_color(m, idx)
+        ax.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color=c, label=m)
         for x, y, n in zip(xs, ys, ns):
             ax.annotate(f"{y:.3f}\nn={n}", (x, y),
                         textcoords="offset points", xytext=(0, 8),
-                        ha="center", fontsize=7, color=color_for(
-                            m, DEFAULT_NNUNET_COLOR if m == NNUNET_METHOD_LABEL
-                            else DEFAULT_CNISP_COLOR))
+                        ha="center", fontsize=7, color=c)
     ax.set_xlabel("effective resolution (mm, through-plane)")
     ax.set_ylabel("mean Dice (4 foreground classes)")
     ax.set_title("Overall mean Dice vs effective resolution")
@@ -510,7 +520,7 @@ def draw_paired_per_class(
     """Fill a 2x2 grid of axes (one per foreground class) with paired curves."""
     for i, c in enumerate(STRUCT_ORDER):
         ax = axes[i // 2][i % 2]
-        for m in methods:
+        for idx, m in enumerate(methods):
             xs, ys, es, _ = series_for(
                 m, c, bucket_order, by_method_bucket, eff_by_bucket,
             )
@@ -518,10 +528,7 @@ def draw_paired_per_class(
                 continue
             ax.errorbar(
                 xs, ys, yerr=es, fmt="o-", capsize=3,
-                color=color_for(m, DEFAULT_NNUNET_COLOR
-                                if m == NNUNET_METHOD_LABEL
-                                else DEFAULT_CNISP_COLOR),
-                label=m,
+                color=method_color(m, idx), label=m,
             )
         ax.set_title(c)
         ax.set_xlabel("effective resolution (mm)")
