@@ -25,13 +25,16 @@ primitives), so there is nothing left to factor out.
 
 Remaining modules:
 
-  * ``compare_native.py``         - head-to-head native-space Dice between
-                                    CNISP and nnUNet for one CNISP run;
-                                    writes ``paired_per_source__<tag>.csv``.
-                                    CLI: ``nnunet/compare_native.py``.
   * ``build_smore_test_images.py``- run SMORE on the 31 source CTs
                                     (writes ``${smore_out_root}``).
                                     CLI: ``nnunet/build_smore_test_images.py``.
+
+The cross-method COMPARISON subsystem (``compare_native`` plus the
+``*_summary`` drivers) now lives under ``simulation/comparison/`` -- it was
+moved out of ``nnunet/`` so the comparison/visualization layer sits in the
+shared ``simulation`` package next to the degradation operators it evaluates.
+It still imports the numeric/rendering primitives from ``nnunet.lib`` /
+``nnunet.helpers`` (which the non-comparison phases share).
 
 Self-contained top-level scripts (no ``engine/`` counterpart):
 
@@ -40,9 +43,6 @@ Self-contained top-level scripts (no ``engine/`` counterpart):
   * ``nnunet/build_dataset835_canonical_patches.py``
   * ``nnunet/build_dataset835_sparse_patches.py``
   * ``nnunet/build_realpair_patches.py``
-  * ``nnunet/build_method_summary.py``
-  * ``nnunet/build_paired_summary.py``
-  * ``nnunet/build_experiment_summary.py``
   * ``nnunet/build_nnunet_native_summary.py``
   * ``nnunet/build_cnisp_native_sweep.py``
 """

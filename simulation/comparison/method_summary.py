@@ -51,20 +51,20 @@ Usage
     # and run_pipeline.sh picks paired_per_source__nnunet_pred.csv as
     # the canonical source because it is a strict superset of the
     # atlas_gt CSV's nnUNet-sparse rows).
-    python nnunet/build_method_summary.py \\
+    python simulation/comparison/method_summary.py \\
         --config nnunet/configs.yaml \\
         --method nnUNet-sparse \\
-        --paired-csv work_dir/comparison/paired_per_source__nnunet_pred.csv \\
-        --out-dir    work_dir/comparison/viz/nnUNet-sparse
+        --paired-csv comparison/paired_per_source__nnunet_pred__thin.csv \\
+        --out-dir    comparison/viz/nnUNet-sparse__thin
 
     # CNISP-atlasGT (one CNISP bundle per run_tag, since each CNISP
     # run uses a different latent-opt input and so has a different
     # Dice curve).
-    python nnunet/build_method_summary.py \\
+    python simulation/comparison/method_summary.py \\
         --config nnunet/configs.yaml \\
         --method CNISP-atlasGT \\
-        --paired-csv work_dir/comparison/paired_per_source__atlas_gt.csv \\
-        --out-dir    cnisp_output_basedir/<model>/viz/atlas_gt
+        --paired-csv comparison/paired_per_source__atlas_gt__thin.csv \\
+        --out-dir    comparison/viz/CNISP-atlasGT__atlas_gt__thin
 """
 
 from __future__ import annotations
@@ -73,8 +73,9 @@ import argparse
 import sys
 from pathlib import Path
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Make ``nnunet.*`` importable (repo root is two levels up from
+# simulation/comparison/).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.buckets import DEFAULT_BUCKET_EDGES_MM  # noqa: E402
 from nnunet.helpers.config import load_yaml  # noqa: E402

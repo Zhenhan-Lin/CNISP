@@ -30,6 +30,21 @@ cnisp_runs_to_compare:
 
 deployment_gt_dirname_for_chk: prediction/native
 
+# ── nnUNet-C corrector: add as a third method in the comparison ───
+# nnUNet-C (control C) refines a CNISP prelabel with a finetuned 5-channel
+# nnUNet. Its per-case Dice is produced by
+# ``nnunet-c/diagnostics/eval_corrector.py`` (prediction resampled onto each
+# source's native GT grid, order 0; Dice on that grid -- the SAME convention
+# compare_native uses for nnUNet-sparse). When this path is set, the compare
+# phase folds nnUNet-C into the paired CSV/summary as a third method, joining
+# its eff_res from the shared per-(source, step) index so it shares buckets.
+# Path is relative to the repo root. Only set this on the THICK config: the
+# corrector is a thick-mode experiment, so the eff_res join is only valid for
+# the thick sweep. Leave unset (or point at the right fold/control file) as
+# your run dictates.
+nnunet_c_method_label: nnUNet-C
+nnunet_c_eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv
+
 # ── Source CT discovery ───────────────────────────────────────────
 atlas_image_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_images
 pivot_csv: /fs5/p_masi/linz18/QA_record/table_collection/PHOTON_CP_QA_pivot_table.csv

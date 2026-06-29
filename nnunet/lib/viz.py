@@ -47,9 +47,10 @@ CLASS_COLORS = {
 # Per-method colours kept consistent across all paired panels so the legend
 # never has to be re-keyed when scanning between subplots.
 METHOD_COLORS = {
-    "nnUNet-sparse":   "#d62728",   # red  - image-conditioned baseline
-    "CNISP-atlasGT":   "#1f77b4",   # blue - GT-conditioned ceiling curve
-    "CNISP-nnUNetPred": "#2ca02c",  # green - deployment-mode CNISP
+    "nnUNet-sparse":   "#d62728",   # red    - image-conditioned baseline
+    "CNISP-atlasGT":   "#1f77b4",   # blue   - GT-conditioned ceiling curve
+    "CNISP-nnUNetPred": "#2ca02c",  # green  - deployment-mode CNISP
+    "nnUNet-C":        "#ff7f0e",   # orange - CNISP-prelabel corrector
 }
 DEFAULT_CNISP_COLOR = "#1f77b4"
 DEFAULT_NNUNET_COLOR = "#d62728"
@@ -618,8 +619,12 @@ def plot_paired(
     by_method_bucket,
     eff_by_bucket,
     out_dir: Path,
+    extra_methods: Optional[List[str]] = None,
 ) -> Dict[str, Path]:
-    methods = [NNUNET_METHOD_LABEL, cnisp_method]
+    # nnUNet-sparse + the CNISP run + any extra methods (e.g. nnUNet-C) are
+    # overlaid on the overall + per-class panels. The delta panel stays the
+    # head-to-head (CNISP - nnUNet-sparse) so its semantics are unchanged.
+    methods = [NNUNET_METHOD_LABEL, cnisp_method] + list(extra_methods or [])
 
     # Stand-alone: overall
     overall_path = out_dir / "paired_overall_dice_vs_eff_res.png"

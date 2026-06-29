@@ -45,6 +45,18 @@ the native GT. It is reported both as a standalone summary
 """
 
 
+NNUNET_C_METHOD_LABEL: str = "nnUNet-C"
+"""Method label for the nnUNet-C "corrector" (control C) rows.
+
+nnUNet-C refines a CNISP prelabel with a finetuned 5-channel nnUNet. Its
+per-case Dice is produced by ``nnunet-c/diagnostics/eval_corrector.py`` (the
+prediction is resampled onto each source's native GT grid, order 0, and
+Dice is computed there -- the SAME convention compare_native uses), then
+merged into the paired CSV by ``simulation.comparison.nnunet_c`` so it sits
+on the shared eff_res buckets next to nnUNet-sparse and CNISP.
+"""
+
+
 DEFAULT_BUCKET_EDGES_MM: Tuple[float, ...] = (
     1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0,
 )
@@ -97,6 +109,7 @@ __all__ = [
     "STRUCT_ORDER",
     "NNUNET_METHOD_LABEL",
     "NNUNET_INTERP_METHOD_LABEL",
+    "NNUNET_C_METHOD_LABEL",
     "DEFAULT_BUCKET_EDGES_MM",
     "assign_bucket",
     "bucket_sort_key",

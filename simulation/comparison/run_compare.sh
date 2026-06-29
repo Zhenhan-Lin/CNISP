@@ -18,14 +18,15 @@
 # separately, ideally in parallel with this driver.
 #
 # Usage:
-#   bash nnunet/run_compare.sh                    # run_tag=atlas_gt
-#   bash nnunet/run_compare.sh nnunet_pred        # deployment-curve run
+#   bash simulation/comparison/run_compare.sh                # run_tag=atlas_gt
+#   bash simulation/comparison/run_compare.sh nnunet_pred    # deployment-curve run
 # ============================================================
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONFIG="${CONFIG:-nnunet/configs.yaml}"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+export REPO_ROOT CONFIG
 RUN_TAG="${1:-atlas_gt}"
 
 cd "$REPO_ROOT"
@@ -41,16 +42,19 @@ echo "[run_compare] step 3/4: build_cnisp_native_sweep.py (idempotent backfill)"
 python3 nnunet/build_cnisp_native_sweep.py --config "$CONFIG" --run-tag "$RUN_TAG"
 
 echo "[run_compare] step 4/4: compare_native.py"
-python3 nnunet/compare_native.py --config "$CONFIG" --cnisp-run-tag "$RUN_TAG"
+python3 "$REPO_ROOT/simulation/comparison/compare_native.py" \
+    --config "$CONFIG" --cnisp-run-tag "$RUN_TAG"
 
 echo ""
 echo "[run_compare] done. Outputs:"
-WORK_DIR="$(python3 - <<'PY'
+COMPARISON_DIR="$(python3 - <<'PY'
 import yaml, os
 with open(os.environ.get("CONFIG", "nnunet/configs.yaml")) as f:
-    print((yaml.safe_load(f) or {}).get("work_dir", ""))
+    cfg = yaml.safe_load(f) or {}
+print(cfg.get("comparison_out_dir") or os.path.join(
+    os.environ.get("REPO_ROOT", ""), "comparison"))
 PY
 )"
-echo "  ${WORK_DIR}/comparison/paired_per_source__${RUN_TAG}.csv"
-echo "  ${WORK_DIR}/comparison/paired_summary__${RUN_TAG}.csv"
-echo "  ${WORK_DIR}/comparison/paired_summary__${RUN_TAG}.txt"
+echo "  ${COMPARISON_DIR}/paired_per_source__${RUN_TAG}.csv"
+echo "  ${COMPARISON_DIR}/paired_summary__${RUN_TAG}.csv"
+echo "  ${COMPARISON_DIR}/paired_summary__${RUN_TAG}.txt"

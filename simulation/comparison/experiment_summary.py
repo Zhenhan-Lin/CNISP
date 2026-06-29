@@ -45,9 +45,9 @@ The discovery / aggregation / table writer / per-method drawing live in
 
 Usage
 -----
-    python nnunet/build_experiment_summary.py \\
+    python simulation/comparison/experiment_summary.py \\
         --config nnunet/configs.yaml \\
-        --comparison-dir ${work_dir}/comparison
+        --comparison-dir comparison
 """
 
 from __future__ import annotations
@@ -62,8 +62,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Make ``nnunet.*`` importable (repo root is two levels up from
+# simulation/comparison/).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.buckets import DEFAULT_BUCKET_EDGES_MM  # noqa: E402
 from nnunet.helpers.config import load_yaml  # noqa: E402
@@ -138,6 +139,16 @@ def run(args) -> int:
                     rows, include_pref, exclude_pref)
             except SystemExit:
                 pass
+            # nnUNet-C (control C) is also run-tag-independent: pull it once
+            # per experiment from the same canonical CSV when configured.
+            nnunet_c_label = cfg.get("nnunet_c_method_label")
+            if nnunet_c_label:
+                try:
+                    rows = read_paired_csv(csv_path, nnunet_c_label)
+                    data[nnunet_c_label][exp] = apply_source_filter(
+                        rows, include_pref, exclude_pref)
+                except SystemExit:
+                    pass
 
     if not data:
         print("[build_experiment_summary] no method rows matched; check "
@@ -200,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default="nnunet/configs.yaml")
     ap.add_argument("--comparison-dir", required=True,
-                    help="${work_dir}/comparison (holds paired_per_source"
+                    help="repo-level comparison/ dir (holds paired_per_source"
                          "__<run_tag>__<exp>.csv).")
     ap.add_argument("--out-dir", default=None,
                     help="Default: <comparison-dir>/viz/experiments")

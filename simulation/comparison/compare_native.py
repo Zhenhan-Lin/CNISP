@@ -52,28 +52,37 @@ Comparison
   unaffected (they always Dice against atlas manual GT).
 * Same effective-resolution bucket edges apply to both methods.
 
-Outputs (under ``{work_dir}/comparison/``)
-------------------------------------------
-For ``--cnisp-run-tag <T>``:
-* ``paired_per_source__<T>.csv`` -- long, one row per
-  (source, method, step_size, structure, dice).
-* ``paired_summary__<T>.csv``    -- aggregated by
-  (method, eff_res_bucket, structure).
-* ``paired_summary__<T>.txt``    -- human-readable wide table.
+Optionally a third method, nnUNet-C (control C corrector), is folded in
+when an ``--nnunet-c-eval-csv`` (or the ``nnunet_c_eval_csv`` config key) is
+provided: its per-case Dice (from ``nnunet-c/diagnostics/eval_corrector.py``)
+is read as-is and joined to the shared eff_res buckets.
 
-The companion driver ``nnunet/build_method_summary.py`` reads
+Outputs (under the repo-level ``comparison/`` dir by default; override with
+``--out-dir`` / the ``comparison_out_dir`` config key)
+------------------------------------------------------
+For ``--cnisp-run-tag <T>`` / ``--experiment <E>`` (suffix ``__<T>__<E>``):
+* ``paired_per_source__<T>__<E>.csv`` -- long, one row per
+  (source, method, step_size, structure, dice).
+* ``paired_summary__<T>__<E>.csv``    -- aggregated by
+  (method, eff_res_bucket, structure).
+* ``paired_summary__<T>__<E>.txt``    -- human-readable wide table.
+
+The companion driver ``simulation/comparison/method_summary.py`` reads
 the per-source CSV and renders the per-method PNG.
 
 Usage
 -----
-    python nnunet/compare_native.py --config nnunet/configs.yaml \\
-        --cnisp-run-tag atlas_gt
-    python nnunet/compare_native.py --config nnunet/configs.yaml \\
-        --cnisp-run-tag nnunet_pred
+    python simulation/comparison/compare_native.py \\
+        --config nnunet/configs.yaml --cnisp-run-tag atlas_gt
+    python simulation/comparison/compare_native.py \\
+        --config nnunet/configs_v7.yaml --cnisp-run-tag nnunet_pred \\
+        --experiment thick \\
+        --nnunet-c-eval-csv nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import math
@@ -85,10 +94,11 @@ from typing import Dict, List, Tuple
 import nibabel as nib
 import numpy as np
 
-# Make ``nnunet.*`` importable when this library is imported standalone.
+# Make ``nnunet.*`` and ``simulation.*`` importable when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.buckets import (  # noqa: E402
+    NNUNET_C_METHOD_LABEL,
     NNUNET_INTERP_METHOD_LABEL,
     NNUNET_METHOD_LABEL,
     STRUCT_ORDER,
@@ -112,6 +122,18 @@ from nnunet.lib.metrics import (  # noqa: E402
     resample_pred_onto_gt,
     resolve_test_sources,
 )
+try:
+    from simulation.comparison.nnunet_c import load_nnunet_c_rows  # noqa: E402
+except ModuleNotFoundError:
+    # Importing the ``simulation`` package runs simulation/__init__.py, which
+    # eagerly pulls in the degradation operators (torch/numpy). The comparison
+    # path only needs this one stdlib-only helper, so fall back to a sibling
+    # import when those heavy deps are unavailable.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from nnunet_c import load_nnunet_c_rows  # type: ignore  # noqa: E402
+
+# Repo root (parents: [0]=comparison, [1]=simulation, [2]=repo root).
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _parse_step_tag(step_tag: str) -> Tuple[int, int]:
@@ -145,6 +167,18 @@ def run(args) -> int:
     )
     out_suffix = (args.out_suffix if args.out_suffix is not None
                   else f"__{run_tag}__{experiment}")
+
+    # nnUNet-C corrector method (control C). Added as a third method when an
+    # eval CSV is provided (CLI or config). Resolved here so the banner prints
+    # whether it will participate before the heavy per-source loop runs.
+    nnunet_c_method_label = (
+        args.nnunet_c_method_label
+        or cfg.get("nnunet_c_method_label", NNUNET_C_METHOD_LABEL)
+    )
+    nnunet_c_eval_csv = args.nnunet_c_eval_csv or cfg.get("nnunet_c_eval_csv")
+    if nnunet_c_eval_csv and not Path(nnunet_c_eval_csv).is_absolute():
+        # Config paths are conventionally relative to the repo root.
+        nnunet_c_eval_csv = str(REPO_ROOT / nnunet_c_eval_csv)
 
     output_base = (
         Path(cnisp_paths["output_basedir"]) / model_name
@@ -193,6 +227,10 @@ def run(args) -> int:
     print(f"[compare_native] cnisp test_label_source  = {cnisp_test_label_source}")
     print(f"[compare_native] cnisp run dir            = {output_base}")
     print(f"[compare_native] output suffix            = {out_suffix}")
+    if nnunet_c_eval_csv:
+        print(f"[compare_native] nnUNet-C method label    = "
+              f"{nnunet_c_method_label}")
+        print(f"[compare_native] nnUNet-C eval csv        = {nnunet_c_eval_csv}")
 
     # ── Resolve the 31 sources ────────────────────────────────────
     # GT-only: Dice never reads the raw CT, so we explicitly opt out
@@ -561,8 +599,35 @@ def run(args) -> int:
               f"{n_interp_resampled} (source, step) row(s) (world-aware, "
               f"order=0; GT never resampled).")
 
+    # ── nnUNet-C corrector rows (optional third method) ───────────
+    # nnUNet-C Dice comes pre-computed from eval_corrector.py's per-case CSV
+    # (prediction resampled onto the native GT grid, order 0 -- the SAME
+    # convention used above for nnUNet-sparse). We only join the eff_res from
+    # the shared per-(source, step) index so the corrector lands on the exact
+    # same buckets as the other two methods.
+    nnunet_c_added = False
+    if nnunet_c_eval_csv:
+        gt_source_by_sid = {s.source_id: s.gt_source for s in sources}
+        nnunet_c_rows = load_nnunet_c_rows(
+            Path(nnunet_c_eval_csv),
+            nnunet_c_method_label,
+            eff_res_idx,
+            STRUCT_ORDER,
+            gt_source_by_sid=gt_source_by_sid,
+        )
+        if nnunet_c_rows:
+            per_source_rows.extend(nnunet_c_rows)
+            nnunet_c_added = True
+
     # ── Write per-source CSV ──────────────────────────────────────
-    out_dir = work_dir / "comparison"
+    # Outputs land in the repo-level ``comparison/`` dir by default (the
+    # shared deliverable location), overridable with --out-dir / the
+    # ``comparison_out_dir`` config key.
+    out_dir = Path(
+        args.out_dir
+        or cfg.get("comparison_out_dir")
+        or (REPO_ROOT / "comparison")
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     per_source_csv = out_dir / f"paired_per_source{out_suffix}.csv"
     with open(per_source_csv, "w", newline="") as f:
@@ -630,6 +695,8 @@ def run(args) -> int:
     if interp_step_paths:
         methods_in_order.append(NNUNET_INTERP_METHOD_LABEL)
     methods_in_order.append(cnisp_method_label)
+    if nnunet_c_added:
+        methods_in_order.append(nnunet_c_method_label)
     all_cols: List[str] = []
     for label in bucket_order:
         for m in methods_in_order:
@@ -745,3 +812,50 @@ def run(args) -> int:
     print(f"[compare_native] wrote {txt_path}")
 
     return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", default="nnunet/configs.yaml")
+    ap.add_argument("--model-name", default=None)
+    ap.add_argument("--work-dir", default=None)
+    ap.add_argument("--out-dir", default=None,
+                    help="Where to write the paired CSV/TXT bundle. Default: "
+                         "the ``comparison_out_dir`` config key, else the "
+                         "repo-level ``comparison/`` directory.")
+    ap.add_argument("--cnisp-run-tag", default="atlas_gt",
+                    help="Which CNISP run to compare against (subdir under "
+                         "output_basedir/<model>/runs/<experiment>/). Default "
+                         "atlas_gt preserves the ceiling-curve comparison.")
+    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+                    default="thin",
+                    help="Experiment directory layer (thin|thick|real). "
+                         "Reads CNISP masks from runs/<experiment>/<run-tag>/ "
+                         "and nnUNet sparse preds from prediction/<experiment>/"
+                         ", and exp-suffixes the output CSVs so thin/thick "
+                         "comparisons coexist.")
+    ap.add_argument("--cnisp-method-label", default=None,
+                    help="Override the CNISP method label. If unset, look up "
+                         "cnisp_runs_to_compare in the config.")
+    ap.add_argument("--nnunet-c-eval-csv", default=None,
+                    help="Path to an nnUNet-C eval CSV (eval_corrector.py "
+                         "output). When given (or via the ``nnunet_c_eval_csv``"
+                         " config key), nnUNet-C is added as a third method "
+                         "in the paired CSV/summary. Its Dice is read as-is "
+                         "and joined to the shared eff_res buckets.")
+    ap.add_argument("--nnunet-c-method-label", default=None,
+                    help="Override the nnUNet-C method label (default: the "
+                         "``nnunet_c_method_label`` config key, else "
+                         f"{NNUNET_C_METHOD_LABEL!r}).")
+    ap.add_argument("--out-suffix", default=None,
+                    help="Suffix for output filenames. Default is "
+                         "'__<cnisp_run_tag>__<experiment>' so multiple runs "
+                         "do not collide.")
+    ap.add_argument("--strict-shape", action="store_true",
+                    help="Fail if a prediction's shape differs from GT "
+                         "(default: skip the source with a warning).")
+    return ap
+
+
+if __name__ == "__main__":
+    sys.exit(run(build_parser().parse_args()))

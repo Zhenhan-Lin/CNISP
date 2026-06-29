@@ -68,7 +68,7 @@ bash run_pipeline.sh
 python nnunet/prepare_inputs.py                  --config nnunet/configs.yaml
 bash   nnunet/run_predict_native.sh              # honours $CONFIG
 python nnunet/build_cnisp_native_sweep.py        --config nnunet/configs.yaml --run-tag atlas_gt
-python nnunet/compare_native.py                  --config nnunet/configs.yaml --cnisp-run-tag atlas_gt
+python simulation/comparison/compare_native.py   --config nnunet/configs.yaml --cnisp-run-tag atlas_gt
 # Repeat the last two lines with --run-tag nnunet_pred / --cnisp-run-tag nnunet_pred
 # for the deployment-curve comparison (requires Option C prep below).
 ```
@@ -81,14 +81,21 @@ Inputs the scripts expect:
   - Legacy inferences only have `step_XX/`; `build_cnisp_native_sweep.py --run-tag <T>` reconstructs `runs/<T>/native_space_step_XX/` from `sweep_results.pkl`.
 - CT image discovery is driven by `atlas_image_dir` and `pivot_csv`; missing CTs fail loudly with a per-source list.
 
-Outputs (under `configs.yaml::work_dir`, one set per `cnisp_runs_to_compare` entry):
+Outputs:
+
+Staging/prediction artefacts live under `configs.yaml::work_dir`:
 
 - `input/native/<source_id>_0000.nii.gz` — symlink, channel-0 named for nnUNetv2.
 - `source_to_path.json` — for downstream traceability.
 - `prediction/native/<source_id>.nii.gz` — fold-0 prediction, native CT spacing (step=1 dense baseline).
-- `comparison/paired_per_source__<run_tag>.csv` — long: `(source_id, gt_source, method, step_size, eff_res_mm, structure, dice)`. `method` is `nnUNet-sparse` plus the CNISP method label for this run (e.g. `CNISP-atlasGT` or `CNISP-nnUNetPred`).
-- `comparison/paired_summary__<run_tag>.csv` — long aggregate: `(bucket, structure, mean_dice, std_dice, n_sources)` where `bucket` is `nnUNet-sparse (lo, hi]` or `<cnisp_method_label> (lo, hi]` per eff-res bucket. The two methods appear side-by-side per bucket.
-- `comparison/paired_summary__<run_tag>.txt` — pretty-printed table with the asymmetry / OOD / chk_* GT-mode caveats.
+
+Cross-method comparison artefacts (built by `simulation/comparison/`) land in the
+repo-level `comparison/` dir (override with the `comparison_out_dir` config key),
+one set per `cnisp_runs_to_compare` entry x experiment:
+
+- `comparison/paired_per_source__<run_tag>__<exp>.csv` — long: `(source_id, gt_source, method, step_size, slice_start_id, eff_res_mm, structure, dice)`. `method` is `nnUNet-sparse`, the CNISP method label for this run (e.g. `CNISP-atlasGT` / `CNISP-nnUNetPred`), and — when `nnunet_c_eval_csv` is set — `nnUNet-C` (control C corrector).
+- `comparison/paired_summary__<run_tag>__<exp>.csv` — long aggregate: `(bucket, structure, mean_dice, std_dice, n_sources)` where `bucket` is `<method> (lo, hi]` per eff-res bucket. Methods appear side-by-side per bucket.
+- `comparison/paired_summary__<run_tag>__<exp>.txt` — pretty-printed table with the asymmetry / OOD / chk_* GT-mode caveats.
 
 Outputs (CNISP side, under `cnisp_paths.output_basedir/<model_name>/runs/<run_tag>/`):
 
@@ -102,7 +109,7 @@ For `comparison/paired_per_source__atlas_gt.csv`, `chk_*` rows carry `gt_source=
 
 `compare` produces a matched set of viz directories that split cleanly along **what depends on the CNISP run_tag** and **what doesn't**:
 
-- `${cnisp_output_basedir}/<model>/viz/<run_tag>/<cnisp_method_label>_*` — **per-run-tag** CNISP bundle (per-source CSV / summary CSV / TXT / combined PNG + three stand-alone subplot PNGs). One directory per run_tag because the CNISP curve differs by latent-opt input.
+- `comparison/viz/<cnisp_method_label>__<run_tag>__<exp>/<cnisp_method_label>_*` — **per-run-tag** CNISP bundle (per-source CSV / summary CSV / TXT / combined PNG + three stand-alone subplot PNGs). One directory per run_tag because the CNISP curve differs by latent-opt input.
 - `${work_dir}/comparison/viz/paired__<run_tag>/paired_*` — **per-run-tag** head-to-head plots overlaying both methods on shared axes. Open these first if you want to actually SEE the comparison.
 - `${work_dir}/comparison/viz/nnUNet-sparse/nnUNet-sparse_*` — **single, run-tag-agnostic** nnUNet-sparse bundle. nnUNet's sparse predictions are independent of the CNISP run, so this used to be rendered twice (once per CNISP run_tag) under run-tag-suffixed dirs that turned out to be bit-identical for `atlas_*` sources. We now render it once from the `nnunet_pred` CSV (a strict superset that also includes `chk_*` rows when the source filter allows them) so chk-inclusive views stay informative without the duplicate render.
 

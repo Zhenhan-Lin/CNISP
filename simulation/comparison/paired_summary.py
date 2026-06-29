@@ -39,11 +39,11 @@ this script just reads the CSV, filters sources, and wires those together.
 
 Usage
 -----
-    python nnunet/build_paired_summary.py \\
+    python simulation/comparison/paired_summary.py \\
         --config nnunet/configs.yaml \\
-        --paired-csv work_dir/comparison/paired_per_source__atlas_gt.csv \\
+        --paired-csv comparison/paired_per_source__atlas_gt__thin.csv \\
         --cnisp-method CNISP-atlasGT \\
-        --out-dir    work_dir/comparison/viz/paired__atlas_gt
+        --out-dir    comparison/viz/paired__atlas_gt__thin
 """
 
 from __future__ import annotations
@@ -52,11 +52,13 @@ import argparse
 import sys
 from pathlib import Path
 
-# Make ``nnunet.*`` importable when run as ``python nnunet/...``.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Make ``nnunet.*`` importable (repo root is two levels up from
+# simulation/comparison/).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from nnunet.helpers.buckets import (  # noqa: E402
     DEFAULT_BUCKET_EDGES_MM,
+    NNUNET_C_METHOD_LABEL,
     NNUNET_METHOD_LABEL,
 )
 from nnunet.helpers.config import load_yaml  # noqa: E402
@@ -85,7 +87,13 @@ def run(args) -> int:
         args.include_source_prefixes, args.exclude_source_prefixes, cfg,
     )
 
-    methods = [args.nnunet_method, args.cnisp_method]
+    # nnUNet-C is an OPTIONAL third overlay; we always request it from the
+    # CSV (read_paired_csv only warns -- never fails -- when a requested
+    # method is absent), and only treat it as an extra plotted method when
+    # rows for it actually survive the source filter.
+    nnunet_c_method = (args.nnunet_c_method
+                       or cfg.get("nnunet_c_method_label", NNUNET_C_METHOD_LABEL))
+    methods = [args.nnunet_method, args.cnisp_method, nnunet_c_method]
     rows = read_paired_csv(Path(args.paired_csv), methods)
     n_before = len(rows)
     rows = apply_source_filter(rows, include_prefixes, exclude_prefixes)
@@ -106,9 +114,14 @@ def run(args) -> int:
         rows, bucket_edges,
     )
 
+    # Only overlay nnUNet-C if it actually produced rows in this CSV.
+    extra_methods = [nnunet_c_method] if any(
+        m == nnunet_c_method for (m, _b) in by_method_bucket
+    ) else []
+
     paths = plot_paired(
         args.cnisp_method, bucket_order, by_method_bucket,
-        eff_by_bucket, out_dir,
+        eff_by_bucket, out_dir, extra_methods=extra_methods,
     )
     csv_path = out_dir / "paired_summary_by_eff_res.csv"
     write_paired_csv(
@@ -116,7 +129,8 @@ def run(args) -> int:
         eff_by_bucket, csv_path,
     )
 
-    print(f"[build_paired_summary] {args.cnisp_method} vs {args.nnunet_method}: "
+    overlaid = " + ".join([args.nnunet_method, args.cnisp_method] + extra_methods)
+    print(f"[build_paired_summary] overlaid methods: {overlaid}: "
           f"{len(rows)} rows -> {out_dir}/")
     for k, p in paths.items():
         print(f"  [{k}] {p}")
@@ -141,6 +155,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--nnunet-method", default=NNUNET_METHOD_LABEL,
         help=f"Override the nnUNet method label (default: {NNUNET_METHOD_LABEL}).",
+    )
+    ap.add_argument(
+        "--nnunet-c-method", default=None,
+        help="nnUNet-C method label to overlay as an optional third curve "
+             "(default: the 'nnunet_c_method_label' config key, else "
+             f"{NNUNET_C_METHOD_LABEL!r}). Silently skipped when the paired "
+             "CSV has no rows for it.",
     )
     ap.add_argument(
         "--out-dir", required=True,
