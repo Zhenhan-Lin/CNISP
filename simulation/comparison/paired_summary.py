@@ -60,6 +60,7 @@ from nnunet.helpers.buckets import (  # noqa: E402
     DEFAULT_BUCKET_EDGES_MM,
     NNUNET_C_METHOD_LABEL,
     NNUNET_METHOD_LABEL,
+    resolve_nnunet_c_runs,
 )
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.helpers.paired_csv import (  # noqa: E402
@@ -87,13 +88,18 @@ def run(args) -> int:
         args.include_source_prefixes, args.exclude_source_prefixes, cfg,
     )
 
-    # nnUNet-C is an OPTIONAL third overlay; we always request it from the
-    # CSV (read_paired_csv only warns -- never fails -- when a requested
-    # method is absent), and only treat it as an extra plotted method when
-    # rows for it actually survive the source filter.
-    nnunet_c_method = (args.nnunet_c_method
-                       or cfg.get("nnunet_c_method_label", NNUNET_C_METHOD_LABEL))
-    methods = [args.nnunet_method, args.cnisp_method, nnunet_c_method]
+    # nnUNet-C arms (controls C and/or B) are OPTIONAL overlays; we always
+    # request them from the CSV (read_paired_csv only warns -- never fails --
+    # when a requested method is absent), and only treat each as an extra
+    # plotted method when rows for it actually survive the source filter.
+    if args.nnunet_c_method:
+        nnunet_c_methods = [args.nnunet_c_method]
+    else:
+        nnunet_c_methods = [lbl for lbl, _csv in resolve_nnunet_c_runs(cfg)]
+        if not nnunet_c_methods:
+            nnunet_c_methods = [cfg.get("nnunet_c_method_label",
+                                        NNUNET_C_METHOD_LABEL)]
+    methods = [args.nnunet_method, args.cnisp_method, *nnunet_c_methods]
     rows = read_paired_csv(Path(args.paired_csv), methods)
     n_before = len(rows)
     rows = apply_source_filter(rows, include_prefixes, exclude_prefixes)
@@ -114,10 +120,9 @@ def run(args) -> int:
         rows, bucket_edges,
     )
 
-    # Only overlay nnUNet-C if it actually produced rows in this CSV.
-    extra_methods = [nnunet_c_method] if any(
-        m == nnunet_c_method for (m, _b) in by_method_bucket
-    ) else []
+    # Only overlay an nnUNet-C arm if it actually produced rows in this CSV.
+    present = {m for (m, _b) in by_method_bucket}
+    extra_methods = [m for m in nnunet_c_methods if m in present]
 
     paths = plot_paired(
         args.cnisp_method, bucket_order, by_method_bucket,

@@ -118,6 +118,18 @@ shutil.copyfile(sys.argv[1], dst)
 print(f"[predict] installed resampler -> {dst}")
 PY
 
+# The B/C model was trained with the corrector trainer, so its results dir is
+# named <CORRECTOR_TRAINER>__nnUNetPlansFinetune__3d_fullres/. Install the
+# trainer class so nnUNetv2_predict can rebuild the network from it.
+echo "[predict] (2b) install corrector trainer into nnunetv2 ($CORRECTOR_TRAINER)"
+python3 - "$HERE/engine/nnUNetTrainer_corrector.py" <<'PY'
+import sys, shutil, os
+import nnunetv2.training.nnUNetTrainer.nnUNetTrainer as m
+dst = os.path.join(os.path.dirname(m.__file__), "nnUNetTrainer_corrector.py")
+shutil.copyfile(sys.argv[1], dst)
+print(f"[predict] installed trainer -> {dst}")
+PY
+
 # ── 3. assemble 5-channel test inputs ────────────────────────────────
 echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -> $TEST_ROOT"
 python3 "$HERE/scripts/build_corrector_testset.py" \
@@ -135,7 +147,7 @@ echo "          in=$IMAGES_TS"
 echo "          out=$OUT_DIR_PRED"
 nnUNetv2_predict \
     -i "$IMAGES_TS" -o "$OUT_DIR_PRED" \
-    -d "$CTRL_DATASET_ID" -c "$CONFIGURATION" -tr "$TRAINER" \
+    -d "$CTRL_DATASET_ID" -c "$CONFIGURATION" -tr "$CORRECTOR_TRAINER" \
     -p "$PLAN_NAME" -f "$FOLD" -chk "$CHK"
 
 echo "[predict] done: predictions -> $OUT_DIR_PRED"

@@ -44,8 +44,22 @@ reference_plan: nnUNetPlans
 # prediction/checkpoint lookup.
 reference_plan_json: nnUNetPlans_iso05
 configuration: 3d_fullres
+# Reference (Dataset835) trainer -- used ONLY to locate the pretrained 835
+# checkpoint and to predict control A. The corrector's OWN finetune trainer is
+# `finetune.trainer` below (do NOT change this to the corrector trainer or the
+# 835 checkpoint path lookup in corrector_env.py breaks).
 trainer: nnUNetTrainer
 reference_fold: 2
+
+# ── Corrector finetune schedule (controls B/C) ───────────────────────
+# A custom nnUNet trainer (engine/nnUNetTrainer_corrector.py, installed into
+# nnunetv2 by run_train.sh) reads epochs + initial_lr from here via the
+# CORRECTOR_EPOCHS / CORRECTOR_LR env vars. We finetune each fold for a short
+# schedule from the 835 weights, with a gentler-than-default LR (stock is 1e-2).
+finetune:
+  trainer: nnUNetTrainer_corrector
+  epochs: 200
+  initial_lr: 0.005      # slightly below the stock 1e-2; tune here as needed
 
 # Build everything on each image's ORIGINAL native grid (label = GT shared across
 # step 3/6/9; ch1-4 = CNISP native mask; ch0 upsampled to it). nnUNet then
@@ -87,7 +101,16 @@ corrector_data:
   select:
     keep: false
     qa_status: yes
-  n: 200
+  # Generation target: STOP once this many kept (case, step) SAMPLES
+  # (image + prelabel units) have been selected, scanning the checklist in
+  # order. Use this (not `n`) to hit an exact training-set size when the pool
+  # is larger than needed. Folder-aware: existing degraded images are reused
+  # and still count toward the target, so re-running tops up to it then stops.
+  target_samples: 320
+  # Legacy cap on the number of SOURCE IMAGES (cases). Ignored when
+  # target_samples is set (each case fans out into multiple (case,step)
+  # samples, so a case count can't hit an exact sample count).
+  n: 320
   # Thick degradation step sizes. For steps listed in thick_threshold_steps,
   # drop that (case, step) variant if resulting slice thickness
   # (= through-plane spacing * step) exceeds thick_threshold_mm.

@@ -42,7 +42,13 @@ deployment_gt_dirname_for_chk: prediction/native
 # corrector is a thick-mode experiment, so the eff_res join is only valid for
 # the thick sweep. Leave unset (or point at the right fold/control file) as
 # your run dictates.
-nnunet_c_method_label: nnUNet-C
+# Multiple corrector arms (controls C and B) are folded in + overlaid via the
+# ``nnunet_c_runs`` list; the legacy single keys below stay for the standalone
+# nnUNet-C bundle in run_pipeline.sh (control C only).
+nnunet_c_runs:
+  - {method_label: "nnUNet-C (C)", eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv}
+  - {method_label: "nnUNet-C (B)", eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_B_stacked/eval_B_fold0.csv}
+nnunet_c_method_label: "nnUNet-C (C)"
 nnunet_c_eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv
 
 # ── Source CT discovery ───────────────────────────────────────────

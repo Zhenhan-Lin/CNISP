@@ -43,6 +43,13 @@ def main() -> int:
     trainer = cfg["trainer"]
     ref_fold = cfg["reference_fold"]
 
+    # Corrector finetune trainer + schedule (controls B/C). Kept SEPARATE from
+    # `trainer` (which must stay nnUNetTrainer for the 835 checkpoint lookup).
+    ft = cfg.get("finetune", {}) or {}
+    corrector_trainer = ft.get("trainer", "nnUNetTrainer_corrector")
+    corrector_epochs = int(ft.get("epochs", 200))
+    corrector_lr = float(ft.get("initial_lr", 0.005))
+
     ref_ckpt = ""
     results = os.environ.get("nnUNet_results")
     if results:
@@ -65,6 +72,9 @@ def main() -> int:
         "REF_PLAN": ref_plan,
         "CONFIGURATION": configuration,
         "TRAINER": trainer,
+        "CORRECTOR_TRAINER": corrector_trainer,
+        "CORRECTOR_EPOCHS": corrector_epochs,
+        "CORRECTOR_LR": corrector_lr,
         "REF_FOLD": ref_fold,
         "REF_CKPT": ref_ckpt,
         "EXPERIMENT": cfg["experiment"],

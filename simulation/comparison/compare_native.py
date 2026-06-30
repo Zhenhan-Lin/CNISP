@@ -101,6 +101,7 @@ from nnunet.helpers.buckets import (  # noqa: E402
     NNUNET_C_METHOD_LABEL,
     NNUNET_INTERP_METHOD_LABEL,
     NNUNET_METHOD_LABEL,
+    resolve_nnunet_c_runs,
     STRUCT_ORDER,
     assign_bucket,
     bucket_sort_key,
@@ -168,17 +169,23 @@ def run(args) -> int:
     out_suffix = (args.out_suffix if args.out_suffix is not None
                   else f"__{run_tag}__{experiment}")
 
-    # nnUNet-C corrector method (control C). Added as a third method when an
-    # eval CSV is provided (CLI or config). Resolved here so the banner prints
-    # whether it will participate before the heavy per-source loop runs.
-    nnunet_c_method_label = (
-        args.nnunet_c_method_label
-        or cfg.get("nnunet_c_method_label", NNUNET_C_METHOD_LABEL)
-    )
-    nnunet_c_eval_csv = args.nnunet_c_eval_csv or cfg.get("nnunet_c_eval_csv")
-    if nnunet_c_eval_csv and not Path(nnunet_c_eval_csv).is_absolute():
-        # Config paths are conventionally relative to the repo root.
-        nnunet_c_eval_csv = str(REPO_ROOT / nnunet_c_eval_csv)
+    # nnUNet-C corrector arms (controls C and/or B). Each arm = (method_label,
+    # eval_csv) and is folded into the paired CSV as its own method when its
+    # eval CSV exists. Multiple arms come from the ``nnunet_c_runs`` config list
+    # (preferred) or the legacy single ``nnunet_c_eval_csv`` key; a CLI
+    # ``--nnunet-c-eval-csv`` overrides to a single arm. Resolved here so the
+    # banner lists which corrector arms will participate.
+    if args.nnunet_c_eval_csv:
+        _cli_label = (args.nnunet_c_method_label
+                      or cfg.get("nnunet_c_method_label", NNUNET_C_METHOD_LABEL))
+        nnunet_c_runs = [(_cli_label, args.nnunet_c_eval_csv)]
+    else:
+        nnunet_c_runs = resolve_nnunet_c_runs(cfg)
+    # Config paths are conventionally relative to the repo root.
+    nnunet_c_runs = [
+        (lbl, csv if Path(csv).is_absolute() else str(REPO_ROOT / csv))
+        for lbl, csv in nnunet_c_runs
+    ]
 
     output_base = (
         Path(cnisp_paths["output_basedir"]) / model_name
@@ -227,10 +234,8 @@ def run(args) -> int:
     print(f"[compare_native] cnisp test_label_source  = {cnisp_test_label_source}")
     print(f"[compare_native] cnisp run dir            = {output_base}")
     print(f"[compare_native] output suffix            = {out_suffix}")
-    if nnunet_c_eval_csv:
-        print(f"[compare_native] nnUNet-C method label    = "
-              f"{nnunet_c_method_label}")
-        print(f"[compare_native] nnUNet-C eval csv        = {nnunet_c_eval_csv}")
+    for _lbl, _csv in nnunet_c_runs:
+        print(f"[compare_native] nnUNet-C arm             = {_lbl}  <-  {_csv}")
 
     # ── Resolve the 31 sources ────────────────────────────────────
     # GT-only: Dice never reads the raw CT, so we explicitly opt out
@@ -605,19 +610,24 @@ def run(args) -> int:
     # convention used above for nnUNet-sparse). We only join the eff_res from
     # the shared per-(source, step) index so the corrector lands on the exact
     # same buckets as the other two methods.
-    nnunet_c_added = False
-    if nnunet_c_eval_csv:
+    nnunet_c_methods_added: List[str] = []
+    if nnunet_c_runs:
         gt_source_by_sid = {s.source_id: s.gt_source for s in sources}
-        nnunet_c_rows = load_nnunet_c_rows(
-            Path(nnunet_c_eval_csv),
-            nnunet_c_method_label,
-            eff_res_idx,
-            STRUCT_ORDER,
-            gt_source_by_sid=gt_source_by_sid,
-        )
-        if nnunet_c_rows:
-            per_source_rows.extend(nnunet_c_rows)
-            nnunet_c_added = True
+        for nnc_label, nnc_csv in nnunet_c_runs:
+            if not Path(nnc_csv).exists():
+                print(f"[compare_native] nnUNet-C arm {nnc_label!r}: eval CSV "
+                      f"not found ({nnc_csv}); skipping this arm.")
+                continue
+            nnunet_c_rows = load_nnunet_c_rows(
+                Path(nnc_csv),
+                nnc_label,
+                eff_res_idx,
+                STRUCT_ORDER,
+                gt_source_by_sid=gt_source_by_sid,
+            )
+            if nnunet_c_rows and nnc_label not in nnunet_c_methods_added:
+                per_source_rows.extend(nnunet_c_rows)
+                nnunet_c_methods_added.append(nnc_label)
 
     # ── Write per-source CSV ──────────────────────────────────────
     # Outputs land in the repo-level ``comparison/`` dir by default (the
@@ -695,8 +705,9 @@ def run(args) -> int:
     if interp_step_paths:
         methods_in_order.append(NNUNET_INTERP_METHOD_LABEL)
     methods_in_order.append(cnisp_method_label)
-    if nnunet_c_added:
-        methods_in_order.append(nnunet_c_method_label)
+    for nnc_label in nnunet_c_methods_added:
+        if nnc_label not in methods_in_order:
+            methods_in_order.append(nnc_label)
     all_cols: List[str] = []
     for label in bucket_order:
         for m in methods_in_order:

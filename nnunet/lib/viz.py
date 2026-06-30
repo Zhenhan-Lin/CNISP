@@ -53,6 +53,8 @@ METHOD_COLORS = {
     "CNISP-v6.5-gt-atlasGT": "#1f77b4",  # blue  - v6.5-gt ceiling curve
     "CNISP-v6.5-gt":   "#2ca02c",   # green  - v6.5-gt corrector_gt run
     "nnUNet-C":        "#ff7f0e",   # orange - CNISP-prelabel corrector
+    "nnUNet-C (C)":    "#ff7f0e",   # orange - control C: CNISP-prelabel corrector
+    "nnUNet-C (B)":    "#9467bd",   # purple - control B: nnUNet-prelabel corrector (stacked)
 }
 DEFAULT_CNISP_COLOR = "#1f77b4"
 DEFAULT_NNUNET_COLOR = "#d62728"

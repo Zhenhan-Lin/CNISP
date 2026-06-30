@@ -66,7 +66,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 # simulation/comparison/).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from nnunet.helpers.buckets import DEFAULT_BUCKET_EDGES_MM  # noqa: E402
+from nnunet.helpers.buckets import (  # noqa: E402
+    DEFAULT_BUCKET_EDGES_MM,
+    resolve_nnunet_c_runs,
+)
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.helpers.paired_csv import (  # noqa: E402
     apply_source_filter,
@@ -139,10 +142,9 @@ def run(args) -> int:
                     rows, include_pref, exclude_pref)
             except SystemExit:
                 pass
-            # nnUNet-C (control C) is also run-tag-independent: pull it once
-            # per experiment from the same canonical CSV when configured.
-            nnunet_c_label = cfg.get("nnunet_c_method_label")
-            if nnunet_c_label:
+            # nnUNet-C arms (controls C and/or B) are also run-tag-independent:
+            # pull each once per experiment from the same canonical CSV.
+            for nnunet_c_label, _csv in resolve_nnunet_c_runs(cfg):
                 try:
                     rows = read_paired_csv(csv_path, nnunet_c_label)
                     data[nnunet_c_label][exp] = apply_source_filter(

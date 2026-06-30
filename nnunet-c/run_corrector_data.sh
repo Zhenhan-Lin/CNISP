@@ -43,6 +43,18 @@ do_predict() {
         -f "$REF_FOLD" \
         -npp "$npp" -nps "$nps" \
         $resume_flag
+
+    # Folder check: how many samples have BOTH a degraded image and a prelabel.
+    local n_img n_pre n_pair
+    n_img=$(find "$DATA_IMAGES" -name '*_step*_0000.nii.gz' 2>/dev/null | wc -l | tr -d ' ')
+    n_pre=$(find "$DATA_NNUNET_PRED" -name '*_step*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')
+    n_pair=0
+    for f in "$DATA_IMAGES"/*_step*_0000.nii.gz; do
+        [[ -e "$f" ]] || continue
+        local b; b=$(basename "$f" _0000.nii.gz)
+        [[ -e "$DATA_NNUNET_PRED/$b.nii.gz" ]] && n_pair=$((n_pair+1))
+    done
+    echo "[run_corrector_data] folder check: images=$n_img prelabels=$n_pre complete(image+prelabel)=$n_pair"
 }
 
 case "$WHICH" in

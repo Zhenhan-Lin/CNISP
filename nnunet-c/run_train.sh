@@ -86,8 +86,22 @@ python3 "$HERE/scripts/adapt_checkpoint.py" \
     --channels "$N_CHANNELS" --mask-init "$MASK_INIT" \
     --report-json "$WORK_TMP/adapt_report_${CONTROL}.json"
 
+# Install the corrector finetune trainer into nnunetv2 so `-tr` can discover it.
+echo "[run_train] (6b) install corrector trainer -> nnunetv2 ($CORRECTOR_TRAINER)"
+python3 - "$HERE/engine/nnUNetTrainer_corrector.py" <<'PY'
+import sys, shutil, os
+import nnunetv2.training.nnUNetTrainer.nnUNetTrainer as m
+dst = os.path.join(os.path.dirname(m.__file__), "nnUNetTrainer_corrector.py")
+shutil.copyfile(sys.argv[1], dst)
+print(f"[run_train] installed trainer -> {dst}")
+PY
+
+# The corrector trainer reads its schedule from these (corrector.yaml::finetune).
+export CORRECTOR_EPOCHS CORRECTOR_LR
+
 echo "[run_train] (7) nnUNetv2_train $CTRL_DATASET_ID $CONFIGURATION $FOLD -p $PLAN_NAME"
+echo "          trainer=$CORRECTOR_TRAINER  epochs=$CORRECTOR_EPOCHS  initial_lr=$CORRECTOR_LR"
 nnUNetv2_train "$CTRL_DATASET_ID" "$CONFIGURATION" "$FOLD" \
-    -p "$PLAN_NAME" -tr "$TRAINER" -pretrained_weights "$ADAPTED"
+    -p "$PLAN_NAME" -tr "$CORRECTOR_TRAINER" -pretrained_weights "$ADAPTED"
 
 echo "[run_train] done: Dataset${CTRL_DATASET_ID} fold $FOLD finetuned from $REF_CKPT"

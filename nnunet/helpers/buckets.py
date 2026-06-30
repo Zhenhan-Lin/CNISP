@@ -105,6 +105,52 @@ def bucket_sort_key(label: str) -> float:
         return 1e9
 
 
+def resolve_nnunet_c_runs(cfg: dict) -> List[Tuple[str, str]]:
+    """Return ``[(method_label, eval_csv), ...]`` for every nnUNet-C arm.
+
+    Supports BOTH:
+
+    * the multi-arm key (preferred), one corrector per list entry::
+
+          nnunet_c_runs:
+            - {method_label: "nnUNet-C (C)", eval_csv: nnunet-c/predictions/.../eval_C_fold0.csv}
+            - {method_label: "nnUNet-C (B)", eval_csv: nnunet-c/predictions/.../eval_B_fold0.csv}
+
+    * the legacy single-arm keys (back-compat)::
+
+          nnunet_c_method_label: nnUNet-C
+          nnunet_c_eval_csv:     nnunet-c/predictions/.../eval_C_fold0.csv
+
+    The returned order is the config order (so plot overlay order is stable).
+    Paths are returned verbatim; callers resolve them relative to the repo root.
+    Entries missing a label or csv are skipped. Duplicate labels are dropped
+    (first wins) so a method never appears twice in the paired CSV.
+    """
+    runs: List[Tuple[str, str]] = []
+    seen = set()
+
+    def _add(label, csv) -> None:
+        label = str(label or "").strip()
+        csv = str(csv or "").strip()
+        if not (label and csv) or label in seen:
+            return
+        seen.add(label)
+        runs.append((label, csv))
+
+    raw = cfg.get("nnunet_c_runs")
+    if isinstance(raw, list) and raw:
+        for entry in raw:
+            if isinstance(entry, dict):
+                _add(entry.get("method_label"), entry.get("eval_csv"))
+        if runs:
+            return runs
+
+    # Legacy single-arm fallback.
+    _add(cfg.get("nnunet_c_method_label") or NNUNET_C_METHOD_LABEL,
+         cfg.get("nnunet_c_eval_csv"))
+    return runs
+
+
 __all__ = [
     "STRUCT_ORDER",
     "NNUNET_METHOD_LABEL",
@@ -113,4 +159,5 @@ __all__ = [
     "DEFAULT_BUCKET_EDGES_MM",
     "assign_bucket",
     "bucket_sort_key",
+    "resolve_nnunet_c_runs",
 ]

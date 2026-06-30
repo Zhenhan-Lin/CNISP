@@ -56,6 +56,7 @@ from nnunet.helpers.buckets import (  # noqa: E402
     DEFAULT_BUCKET_EDGES_MM,
     NNUNET_C_METHOD_LABEL,
     NNUNET_METHOD_LABEL,
+    resolve_nnunet_c_runs,
 )
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.helpers.paired_csv import (  # noqa: E402
@@ -79,11 +80,11 @@ def _collect_rows(
     exp: str,
     run_tags: List[str],
     run_to_method: Dict[str, str],
-    nnunet_c_label: str,
+    nnunet_c_labels: List[str],
     include_pref: List[str],
     exclude_pref: List[str],
 ) -> List[Dict]:
-    """Merge nnUNet-sparse (once) + each CNISP run + nnUNet-C (once).
+    """Merge nnUNet-sparse (once) + each CNISP run + each nnUNet-C arm (once).
 
     The shared (run-tag-independent) nnUNet-sparse / nnUNet-C rows are read
     from a canonical CSV chosen ONLY among the run_tags passed here (i.e. the
@@ -96,8 +97,8 @@ def _collect_rows(
         return rows
     canon_csv = comparison_dir / f"paired_per_source__{canon}__{exp}.csv"
 
-    # nnUNet-sparse + nnUNet-C: run-tag-independent, read once.
-    for shared_method in (NNUNET_METHOD_LABEL, nnunet_c_label):
+    # nnUNet-sparse + every nnUNet-C arm: run-tag-independent, read once.
+    for shared_method in [NNUNET_METHOD_LABEL, *nnunet_c_labels]:
         try:
             r = read_paired_csv(canon_csv, shared_method)
         except SystemExit:
@@ -129,8 +130,14 @@ def run(args) -> int:
     include_pref, exclude_pref = resolve_source_prefix_filters(
         args.include_source_prefixes, args.exclude_source_prefixes, cfg)
 
-    nnunet_c_label = (args.delta_method
-                      or cfg.get("nnunet_c_method_label", NNUNET_C_METHOD_LABEL))
+    # Every nnUNet-C corrector arm (controls C and/or B), in config order.
+    nnunet_c_labels = [lbl for lbl, _csv in resolve_nnunet_c_runs(cfg)]
+    if not nnunet_c_labels:
+        nnunet_c_labels = [cfg.get("nnunet_c_method_label",
+                                   NNUNET_C_METHOD_LABEL)]
+    # Delta panel deltas a single method vs nnUNet-sparse: CLI override, else
+    # the first corrector arm.
+    delta_label = args.delta_method or nnunet_c_labels[0]
 
     # run_tag -> CNISP method label (from config), ordered as configured.
     run_to_method: Dict[str, str] = {}
@@ -159,7 +166,7 @@ def run(args) -> int:
         return 2
 
     rows = _collect_rows(comparison_dir, exp, ordered_run_tags, run_to_method,
-                         nnunet_c_label, include_pref, exclude_pref)
+                         nnunet_c_labels, include_pref, exclude_pref)
     if not rows:
         print(f"[combined_summary] no rows after filtering for experiment="
               f"{exp}.", file=sys.stderr)
@@ -167,8 +174,8 @@ def run(args) -> int:
 
     bucket_order, by_method_bucket, eff_by_bucket = aggregate_paired(rows, edges)
 
-    # Overlay order: nnUNet-sparse, each CNISP curve (config order), nnUNet-C
-    # last. Only methods that actually produced rows are kept.
+    # Overlay order: nnUNet-sparse, each CNISP curve (config order), then every
+    # nnUNet-C arm (config order) last. Only methods that produced rows survive.
     present = {m for (m, _b) in by_method_bucket}
     methods: List[str] = []
     if NNUNET_METHOD_LABEL in present:
@@ -177,11 +184,12 @@ def run(args) -> int:
         m = run_to_method.get(rt)
         if m and m in present and m not in methods:
             methods.append(m)
-    if nnunet_c_label in present:
-        methods.append(nnunet_c_label)
+    for lbl in nnunet_c_labels:
+        if lbl in present and lbl not in methods:
+            methods.append(lbl)
 
     print(f"[combined_summary] experiment={exp}  methods overlaid: {methods}")
-    print(f"[combined_summary] delta panel: {nnunet_c_label} - "
+    print(f"[combined_summary] delta panel: {delta_label} - "
           f"{NNUNET_METHOD_LABEL}")
 
     # ── Stand-alone panels ───────────────────────────────────────
@@ -201,7 +209,7 @@ def run(args) -> int:
 
     delta_path = out_dir / "combined_delta_dice_vs_eff_res.png"
     save_standalone(delta_path, (11, 5), lambda ax: draw_delta(
-        ax, nnunet_c_label, bucket_order, by_method_bucket, eff_by_bucket))
+        ax, delta_label, bucket_order, by_method_bucket, eff_by_bucket))
 
     # ── Combined 3-row figure (the requested single image) ───────
     combined_path = out_dir / "combined_dice_vs_eff_res.png"
@@ -221,13 +229,13 @@ def run(args) -> int:
                           eff_by_bucket)
 
     ax2 = fig.add_subplot(gs[2])
-    draw_delta(ax2, nnunet_c_label, bucket_order, by_method_bucket,
+    draw_delta(ax2, delta_label, bucket_order, by_method_bucket,
                eff_by_bucket)
 
     fig.suptitle(
         f"{exp}: Dice vs effective resolution -- "
         + " / ".join(methods)
-        + f"  (delta = {nnunet_c_label} - {NNUNET_METHOD_LABEL})",
+        + f"  (delta = {delta_label} - {NNUNET_METHOD_LABEL})",
         fontsize=12, fontweight="bold", y=0.92,
     )
     fig.savefig(str(combined_path), dpi=150, bbox_inches="tight")

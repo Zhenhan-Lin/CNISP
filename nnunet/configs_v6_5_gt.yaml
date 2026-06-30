@@ -38,9 +38,20 @@ cnisp_runs_to_compare:
 
 deployment_gt_dirname_for_chk: prediction/native
 
-# ── nnUNet-C corrector: third method in the comparison ────────────
-# control C eval CSV (eval_corrector.py output). Path is relative to repo root.
-nnunet_c_method_label: nnUNet-C
+# ── nnUNet-C corrector arms (extra methods in the comparison) ─────
+# Each arm = (method_label, eval_csv from eval_corrector.py). Paths are
+# relative to the repo root. List ALL corrector arms here; compare_native folds
+# each into the paired CSV and combined_summary overlays them, so the experiment
+# figure shows nnUNet-sparse + the CNISP curves + every corrector arm together.
+#   C = CNISP-prelabel corrector (Dataset845)
+#   B = nnUNet-prelabel "stacked" corrector (Dataset855)
+nnunet_c_runs:
+  - {method_label: "nnUNet-C (C)", eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv}
+  - {method_label: "nnUNet-C (B)", eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_B_stacked/eval_B_fold0.csv}
+
+# Legacy single-arm keys: still consumed by the standalone nnUNet-C bundle in
+# run_pipeline.sh (control C only). Keep pointed at control C.
+nnunet_c_method_label: "nnUNet-C (C)"
 nnunet_c_eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv
 
 # ── Source CT discovery ───────────────────────────────────────────
