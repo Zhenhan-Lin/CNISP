@@ -131,10 +131,16 @@ print(f"[predict] installed trainer -> {dst}")
 PY
 
 # ── 3. assemble 5-channel test inputs ────────────────────────────────
+# Cache by default: a (source,step) whose 5ch imagesTs already exist is reused
+# (the assembly is a deterministic resample, so re-running yields the same files).
+# REBUILD_TESTSET=1 forces a full re-assembly (e.g. after the prelabels changed).
+SKIP_EXISTING_ARG="--skip-existing"
+[[ "${REBUILD_TESTSET:-0}" == "1" ]] && SKIP_EXISTING_ARG=""
 echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -> $TEST_ROOT"
+echo "          cache: ${SKIP_EXISTING_ARG:-off (REBUILD_TESTSET=1)}"
 python3 "$HERE/scripts/build_corrector_testset.py" \
     --config "$CONFIG" --control "$CONTROL" --steps "${BUILD_STEPS:-auto}" \
-    --prelabel-grid "$GRID" --out "$TEST_ROOT" \
+    --prelabel-grid "$GRID" --out "$TEST_ROOT" $SKIP_EXISTING_ARG \
     ${BUILD_CASEFILE:+--casefile "$BUILD_CASEFILE"}
 
 IMAGES_TS="$TEST_ROOT/$CTRL_DATASET_NAME/imagesTs"

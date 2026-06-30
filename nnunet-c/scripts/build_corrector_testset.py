@@ -42,7 +42,7 @@ add_repo_to_syspath(__file__)
 import numpy as np  # noqa: E402
 import nibabel as nib  # noqa: E402
 
-from engine.convert import convert_case, STRUCTS  # noqa: E402  (the SINGLE converter)
+from engine.convert import convert_case, STRUCTS, N_CHANNELS  # noqa: E402  (the SINGLE converter)
 from lib import prelabel as _pre  # noqa: E402
 from lib.labels import (  # noqa: E402
     resolve_source_infos, remap_native_to_nnunet, NNUNET_LABELS,
@@ -170,6 +170,13 @@ def main() -> int:
     ap.add_argument("--iso-mm", type=float, default=0.5,
                     help="iso spacing (mm) for --prelabel-grid iso (default 0.5).")
     ap.add_argument("--out", default=None, help="output root (default: nnunet-c/test_input)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="cache: skip the 5ch resample/convert for a (source,step) "
+                         "whose imagesTs channels (_0000.._000N) already exist, but "
+                         "STILL record it in test_cases_map.json so eval is complete. "
+                         "Re-running predict then only rebuilds missing cases. A "
+                         "partial channel set (e.g. a crashed write) is treated as a "
+                         "miss and rebuilt. Does not apply to control A (no imagesTs).")
     args = ap.parse_args()
 
     cfg = load_corrector_config(args.config, caller_file=__file__)
@@ -221,7 +228,7 @@ def main() -> int:
 
     infos = resolve_source_infos(cfg, source_ids)
 
-    assembled, skipped = [], 0
+    assembled, skipped, cached = [], 0, 0
     case_map = {}
     for sid in source_ids:
         info = infos[sid]
@@ -266,6 +273,22 @@ def main() -> int:
                                  "pred_file": str(pred)}
                 assembled.append(cid)
                 print(f"  {cid}: pred={Path(pred).name}")
+                continue
+
+            # ── cache (B/C): if all N channels are already on disk, skip the
+            # resample/convert but still record the case so eval is complete. A
+            # partial channel set is treated as a miss and rebuilt below.
+            if args.skip_existing and all(
+                (images_out / f"{cid}_{c:04d}.nii.gz").exists()
+                for c in range(N_CHANNELS)
+            ):
+                case_map[cid] = {"source_id": sid, "step": step,
+                                 "gt_label_path": str(gt_path),
+                                 "gt_struct_to_value": gt_stv,
+                                 "pred_file": f"{cid}.nii.gz"}
+                assembled.append(cid)
+                cached += 1
+                print(f"  {cid}: CACHED ({N_CHANNELS}ch exist; skip rebuild)")
                 continue
 
             # Reference grid for the 5ch case:
@@ -317,7 +340,9 @@ def main() -> int:
         json.dump({"control": args.control.upper(), "casefile": casefile.name,
                    "structures": STRUCTS, "labels": dict(NNUNET_LABELS),
                    "n": len(assembled), "cases": case_map}, f, indent=2)
-    print(f"[testset] wrote {len(assembled)} case(s); skipped {skipped} (missing files).")
+    print(f"[testset] wrote {len(assembled)} case(s) "
+          f"({cached} cached, {len(assembled) - cached} (re)built); "
+          f"skipped {skipped} (missing files).")
     if not is_A:
         print(f"[testset] imagesTs -> {images_out}")
     print(f"[testset] map     -> {ctl_dir / 'test_cases_map.json'}")
