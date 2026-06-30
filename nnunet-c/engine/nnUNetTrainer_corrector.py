@@ -11,9 +11,23 @@ Identical to stock ``nnUNetTrainer`` except for the finetune schedule:
 Both are overridable at runtime via the ``CORRECTOR_EPOCHS`` / ``CORRECTOR_LR``
 environment variables (``run_train.sh`` exports them from
 ``corrector.yaml::finetune``), so the schedule is tunable without editing this
-installed copy. Setting them in ``__init__`` is enough: nnUNet builds the SGD
-optimizer + PolyLR schedule from ``self.initial_lr`` / ``self.num_epochs`` in
-``configure_optimizers`` (called after ``__init__``).
+installed copy.
+
+Why we override ``initialize()`` and NOT ``__init__``
+----------------------------------------------------
+Stock ``nnUNetTrainer.__init__`` records its constructor arguments with
+``inspect.signature(self.__init__).parameters`` + ``locals()[k]``. Because
+``self`` is the subclass instance, ``self.__init__`` resolves to OUR signature;
+if we override ``__init__`` as ``(*args, **kwargs)`` the parameter names become
+``args``/``kwargs`` and the parent's ``locals()['args']`` raises
+``KeyError: 'args'``. Mirroring the exact parent signature is brittle (it
+differs across nnUNet versions), so instead we leave ``__init__`` untouched and
+set the schedule in ``initialize()`` -- which runs ``configure_optimizers()``
+(it reads ``self.initial_lr`` / ``self.num_epochs`` and builds the PolyLR
+horizon from ``self.num_epochs``). ``initialize()`` is called before the
+training loop for both fresh runs and ``--c`` (continue), so the schedule is in
+effect in time, and the checkpoint only restores ``current_epoch`` / weights /
+optimizer state (never ``num_epochs``).
 
 This file is COPIED into the installed ``nnunetv2/training/nnUNetTrainer/``
 package by ``run_train.sh`` / ``run_corrector_predict.sh`` so that
@@ -28,7 +42,7 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class nnUNetTrainer_corrector(nnUNetTrainer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def initialize(self):
         self.num_epochs = int(os.environ.get("CORRECTOR_EPOCHS", "200"))
         self.initial_lr = float(os.environ.get("CORRECTOR_LR", "0.005"))
+        super().initialize()

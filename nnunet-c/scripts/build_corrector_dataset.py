@@ -49,6 +49,13 @@ def main() -> int:
     ap.add_argument("--require-cnisp", action="store_true",
                     help="also require data/cnisp_pred to exist for each sample "
                          "(use for control B so it matches C's capped case set).")
+    ap.add_argument("--max-samples", type=int, default=0,
+                    help="cap the built dataset to the first N (case,step) in "
+                         "sorted (case_id, step) order (0=all). When >0, candidacy "
+                         "requires BOTH nnunet_pred AND cnisp_pred (a control-"
+                         "INDEPENDENT basis) so --control B and --control C select "
+                         "the IDENTICAL N samples -- the only difference being which "
+                         "prelabel fills ch1..4.")
     ap.add_argument("--raw-root", default=None, help="override $nnUNet_raw")
     args = ap.parse_args()
 
@@ -89,38 +96,73 @@ def main() -> int:
     print(f"[build] ch0={images_dir}  prelabel={prelabel_dir}  grid=GT original (per source)")
     print(f"[build]   (nnUNet resamples this original grid -> iso 0.5 plan at preprocess)")
 
-    assembled, skipped = [], 0
+    # ── Phase 1: deterministic candidate selection ───────────────────
+    # Build the ordered list of buildable (case_id, step) FIRST, then optionally
+    # cap it, then assemble only the selected ones (so a capped run never does
+    # convert_case work for samples it will not keep). When --max-samples is set
+    # we use a control-INDEPENDENT candidacy (ct + nnunet_pred + cnisp_pred + gt)
+    # so --control B and --control C pick the IDENTICAL first-N set; otherwise we
+    # keep the per-control predicate (ct + this control's prelabel [+ cnisp when
+    # --require-cnisp] + gt).
+    nnunet_dir = data_root / cd.get("nnunet_pred_dirname", "nnunet_pred")
+    cap = max(0, int(args.max_samples))
+    need_cnisp = bool(args.require_cnisp) or cap > 0
+    need_nnunet = cap > 0
+
+    candidates, skipped = [], 0   # candidates: list of (case_id, step, gt_path)
     for case_id, entry in sorted(manifest["cases"].items()):
         gt = entry.get("gt_candidate_pred", "")
         if not gt or not Path(gt).exists():
             skipped += 1
             continue
-        # Common grid = the GT's ORIGINAL native grid: label = GT (shared across
-        # steps), ch1-4 = CNISP native mask (already on this grid), ch0 = degraded
-        # upsampled to it. nnUNet then resamples original -> iso 0.5 at preprocess.
-        gt_img = nib.load(str(gt))
-        ref_grid = (gt_img.shape[:3], np.asarray(gt_img.affine))
-        for step_s, sinfo in entry.get("steps", {}).items():
+        for step in sorted(int(s) for s in entry.get("steps", {})):
+            sinfo = entry["steps"][str(step)]
             if not sinfo.get("kept"):
                 continue
-            step = int(step_s)
-            ct = images_dir / f"{case_id}_step{step:02d}_0000.nii.gz"
-            pre = prelabel_dir / f"{case_id}_step{step:02d}.nii.gz"
+            stem = f"{case_id}_step{step:02d}"
+            ct = images_dir / f"{stem}_0000.nii.gz"
+            pre = prelabel_dir / f"{stem}.nii.gz"
             if not ct.exists() or not pre.exists():
                 skipped += 1
                 continue
-            if args.require_cnisp and not (cnisp_dir / f"{case_id}_step{step:02d}.nii.gz").exists():
+            if need_cnisp and not (cnisp_dir / f"{stem}.nii.gz").exists():
                 skipped += 1
                 continue
-            cid = f"corr_{case_id}_step{step:02d}"
-            summary = convert_case(
-                case_id=cid, ct_path=ct, prelabel_path=pre, ref_grid=ref_grid,
-                experiment=cfg["experiment"], images_dir=images_out,
-                gt_path=Path(gt), labels_dir=labels_out,
-                degraded_marker=f"/{images_dirname}/",
-            )
-            assembled.append(summary)
-            print(f"  {cid}: shape={summary['shape']} labels={summary['label_values']}")
+            if need_nnunet and not (nnunet_dir / f"{stem}.nii.gz").exists():
+                skipped += 1
+                continue
+            candidates.append((case_id, step, Path(gt)))
+
+    # candidates are already globally sorted by (case_id, step): the outer loop
+    # iterates cases in sorted order and the inner loop iterates steps ascending.
+    if cap > 0:
+        if len(candidates) < cap:
+            print(f"[build] WARNING: only {len(candidates)} candidate(s) available "
+                  f"< --max-samples {cap}; building all of them.", file=sys.stderr)
+        candidates = candidates[:cap]
+
+    # ── Phase 2: assemble only the selected (case, step) ─────────────
+    # Common grid = the GT's ORIGINAL native grid: label = GT (shared across
+    # steps), ch1-4 = prelabel mask (already on this grid), ch0 = degraded
+    # upsampled to it. nnUNet then resamples original -> iso 0.5 at preprocess.
+    assembled, ref_cache = [], {}
+    for case_id, step, gt in candidates:
+        if case_id not in ref_cache:
+            gt_img = nib.load(str(gt))
+            ref_cache[case_id] = (gt_img.shape[:3], np.asarray(gt_img.affine))
+        ref_grid = ref_cache[case_id]
+        stem = f"{case_id}_step{step:02d}"
+        cid = f"corr_{stem}"
+        summary = convert_case(
+            case_id=cid,
+            ct_path=images_dir / f"{stem}_0000.nii.gz",
+            prelabel_path=prelabel_dir / f"{stem}.nii.gz",
+            ref_grid=ref_grid, experiment=cfg["experiment"],
+            images_dir=images_out, gt_path=gt, labels_dir=labels_out,
+            degraded_marker=f"/{images_dirname}/",
+        )
+        assembled.append(summary)
+        print(f"  {cid}: shape={summary['shape']} labels={summary['label_values']}")
 
     _write_dataset_json(ds_dir, control, cfg, num_training=len(assembled))
     with open(ds_dir / "corrector_build_manifest.json", "w") as f:
