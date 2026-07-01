@@ -54,11 +54,20 @@ echo "================================================================"
 # Both aligners now write metadata_dataset835_<exp>_step_XX/ next to the
 # label_dataset835_<exp>_step_XX/ patches. A plain re-run fills in the missing
 # metadata JSONs WITHOUT rewriting the (deterministic) label patches.
-do_meta() {
-    echo "[remap-fix] (1a) TRAIN tree metadata -> $DATA_ROOT/aligned_patch/metadata_dataset835_${EXPERIMENT}_step_XX/"
+# TRAIN-tree metadata (nnunet-c/data/aligned_patch): written by
+# align_corrector_data.py. This is the ONLY metadata the TRAIN (032) remap
+# needs; keep it independent of the TEST tree so a TEST-tree issue never
+# blocks the TRAIN remap.
+do_meta_train() {
+    echo "[remap-fix] (meta:train) -> $DATA_ROOT/aligned_patch/metadata_dataset835_${EXPERIMENT}_step_XX/"
     python3 "$HERE/scripts/align_corrector_data.py" --config "$CONFIG"
+}
 
-    echo "[remap-fix] (1b) TEST tree metadata (shared CNISP aligned_dir), split=test"
+# TEST-tree metadata (shared CNISP aligned_dir). Needs the work_dir sparse
+# sweep (sparse_manifest.json / source_to_path.json); in a corrector-only
+# setup those may be absent, so this is NON-FATAL (warn + skip the TEST remap).
+do_meta_test() {
+    echo "[remap-fix] (meta:test) shared CNISP aligned_dir, split=test"
     python3 "$REPO_ROOT/nnunet/build_dataset835_sparse_patches.py" \
         --config "$NNUNET_CONFIG_YAML" \
         --experiment "$EXPERIMENT" --split test
@@ -69,7 +78,21 @@ do_meta() {
 # reuses its saved latent, skips optimization, re-decodes + re-maps, and
 # OVERWRITES data/cnisp_pred/*.nii.gz. Parallel across $GPUS.
 do_train() {
+    do_meta_train
+    # Sanity: the remap resumes from saved latents. If none exist, every
+    # sample SKIPs and nothing is rewritten -- surface that loudly.
+    local latdir="$DATA_CNISP_PRED/latent"
+    local nlat=0
+    [[ -d "$latdir" ]] && nlat=$(find "$latdir" -name '*.npy' 2>/dev/null | wc -l | tr -d ' ')
     echo "[remap-fix] (2) remap TRAIN prelabels (032 --remap-from-latent) -> $DATA_CNISP_PRED"
+    echo "[remap-fix]     saved latents in $latdir: $nlat"
+    if [[ "$nlat" == "0" ]]; then
+        echo "[remap-fix] ERROR: no saved latents in $latdir -- 032 --remap-from-latent" >&2
+        echo "            would SKIP every sample (nothing rewritten). Those masks were" >&2
+        echo "            produced without a persisted latent; you must RE-RUN CNISP for" >&2
+        echo "            them (drop the remap flag): bash nnunet-c/run_corrector_cnisp.sh" >&2
+        return 3
+    fi
     REMAP_FROM_LATENT=1 GPUS="$GPUS" bash "$HERE/run_corrector_cnisp.sh"
 }
 
@@ -78,6 +101,13 @@ do_train() {
 # saved latent) and re-run ONLY the native/iso mapping, overwriting
 # runs/<exp>/<run_tag>/native_space*/ (+ iso prelabels when EMIT_ISO=1).
 do_test() {
+    # TEST-tree metadata is non-fatal: if the shared aligned_dir / work_dir
+    # sweep isn't set up, skip the TEST remap instead of aborting the script.
+    if ! do_meta_test; then
+        echo "[remap-fix] WARN: TEST-tree metadata step failed/absent -> skipping the" >&2
+        echo "            CNISP TEST remap. (Fine if you only need the TRAIN prelabels.)" >&2
+        return 0
+    fi
     local iso_args=""
     [[ "$EMIT_ISO" == "1" ]] && iso_args="--emit-iso-prelabel-dir $ISO_DIR --emit-iso-mm 0.5"
     echo "[remap-fix] (3) remap CNISP TEST (03_infer --resume-from-latent) -> runs/$EXPERIMENT/$RUN_TAG/native_space*/"
@@ -93,11 +123,14 @@ do_test() {
         --resume-from-latent $iso_args
 }
 
+# Each stage regenerates its OWN metadata (do_train->train tree, do_test->test
+# tree), so a TEST-tree problem can never block the TRAIN remap. do_train runs
+# FIRST in "all" so data/cnisp_pred is fixed even if the TEST side later warns.
 case "$WHICH" in
-    meta)  do_meta ;;
+    meta)  do_meta_train; do_meta_test || true ;;
     train) do_train ;;
     test)  do_test ;;
-    all)   do_meta; do_train; do_test ;;
+    all)   do_train; do_test ;;
     *) echo "usage: run_remap_fix.sh [all|meta|train|test]" >&2; exit 2 ;;
 esac
 
