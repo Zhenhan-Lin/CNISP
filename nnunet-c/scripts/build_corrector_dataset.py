@@ -41,6 +41,27 @@ from engine.build_dataset import _raw_root, _dataset_dir, _write_dataset_json  #
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
 
 
+def _assemble_one(task):
+    """Assemble ONE (case, step) into a 5ch nnUNet case.
+
+    Top-level (picklable) so it can run in a ProcessPoolExecutor worker. Each
+    (case, step) is independent -- it only reads its own ct/prelabel/gt and
+    writes its own imagesTr/labelsTr files -- so the assembly parallelises
+    cleanly across cases. Returns (cid, summary).
+    """
+    (cid, ct_path, prelabel_path, ref_grid, experiment,
+     images_out, gt, labels_out, degraded_marker) = task
+    summary = convert_case(
+        case_id=cid,
+        ct_path=ct_path,
+        prelabel_path=prelabel_path,
+        ref_grid=ref_grid, experiment=experiment,
+        images_dir=images_out, gt_path=gt, labels_dir=labels_out,
+        degraded_marker=degraded_marker,
+    )
+    return cid, summary
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -57,6 +78,12 @@ def main() -> int:
                          "the IDENTICAL N samples -- the only difference being which "
                          "prelabel fills ch1..4.")
     ap.add_argument("--raw-root", default=None, help="override $nnUNet_raw")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel worker processes for the 5ch assembly. Each "
+                         "(case,step) is independent, so this scales the (slow) "
+                         "order-3 CT resampling across cores. Default 1 "
+                         "(sequential; unchanged behaviour). Try 8-16 on a big "
+                         "box; watch RAM (each worker holds a full-res volume).")
     args = ap.parse_args()
 
     cfg = load_corrector_config(args.config, caller_file=__file__)
@@ -145,7 +172,12 @@ def main() -> int:
     # Common grid = the GT's ORIGINAL native grid: label = GT (shared across
     # steps), ch1-4 = prelabel mask (already on this grid), ch0 = degraded
     # upsampled to it. nnUNet then resamples original -> iso 0.5 at preprocess.
+    # Build the ref grid per case (lazy: nib.load reads only shape+affine, no
+    # data) and the per-(case,step) task list, then assemble sequentially or in
+    # a process pool. ``_assemble_one`` is identical work either way, so
+    # --workers 1 reproduces the old sequential behaviour byte-for-byte.
     assembled, ref_cache = [], {}
+    tasks = []
     for case_id, step, gt in candidates:
         if case_id not in ref_cache:
             gt_img = nib.load(str(gt))
@@ -153,16 +185,31 @@ def main() -> int:
         ref_grid = ref_cache[case_id]
         stem = f"{case_id}_step{step:02d}"
         cid = f"corr_{stem}"
-        summary = convert_case(
-            case_id=cid,
-            ct_path=images_dir / f"{stem}_0000.nii.gz",
-            prelabel_path=prelabel_dir / f"{stem}.nii.gz",
-            ref_grid=ref_grid, experiment=cfg["experiment"],
-            images_dir=images_out, gt_path=gt, labels_dir=labels_out,
-            degraded_marker=f"/{images_dirname}/",
-        )
-        assembled.append(summary)
-        print(f"  {cid}: shape={summary['shape']} labels={summary['label_values']}")
+        tasks.append((
+            cid,
+            images_dir / f"{stem}_0000.nii.gz",
+            prelabel_dir / f"{stem}.nii.gz",
+            ref_grid, cfg["experiment"],
+            images_out, gt, labels_out, f"/{images_dirname}/",
+        ))
+
+    workers = max(1, int(args.workers))
+    if workers > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        print(f"[build] assembling {len(tasks)} case(s) with {workers} workers")
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(_assemble_one, t) for t in tasks]
+            for fut in as_completed(futs):
+                cid, summary = fut.result()
+                assembled.append(summary)
+                print(f"  {cid}: shape={summary['shape']} "
+                      f"labels={summary['label_values']}")
+    else:
+        for t in tasks:
+            cid, summary = _assemble_one(t)
+            assembled.append(summary)
+            print(f"  {cid}: shape={summary['shape']} "
+                  f"labels={summary['label_values']}")
 
     _write_dataset_json(ds_dir, control, cfg, num_training=len(assembled))
     with open(ds_dir / "corrector_build_manifest.json", "w") as f:
