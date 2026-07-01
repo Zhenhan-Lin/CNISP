@@ -45,11 +45,30 @@ if [[ -z "$REF_CKPT" || ! -f "$REF_CKPT" ]]; then
     exit 1
 fi
 
-# SKIP_PREPROCESS=1: dataset/plan/preprocess already done -> jump straight to the
-# gate + surgery + train (e.g. to re-run training with nnUNet_compile=f without
-# wiping & regenerating the preprocessed data, which nnUNetv2_preprocess does).
-if [[ "${SKIP_PREPROCESS:-0}" == "1" ]]; then
-    echo "[run_train] SKIP_PREPROCESS=1 -> skipping fingerprint/plan/merge/preprocess"
+# The per-channel resampler (ch0 order3, ch1-N order0) must be installed for BOTH
+# preprocessing (writes ch1-4 as {0,1}) AND training/validation (nnUNet's
+# end-of-training predict imports the plan's resampling_fn_data). It's a cheap,
+# idempotent file copy into nnunetv2 site-packages, so install it UNCONDITIONALLY
+# here -- otherwise a SKIP_PREPROCESS run on a box where it was never installed
+# crashes at validation with an import error.
+echo "[run_train] (0) install per-channel resampler into nnunetv2 (ch0 order3, ch1-N order0)"
+python3 - "$HERE/engine/corrector_resampling.py" <<'PY'
+import sys, shutil, os
+import nnunetv2.preprocessing.resampling as r
+dst = os.path.join(os.path.dirname(r.__file__), "corrector_resampling.py")
+shutil.copyfile(sys.argv[1], dst)
+print(f"[run_train] installed resampler -> {dst}")
+PY
+
+# SKIP_PREPROCESS defaults to 1 (SKIP): the corrector's preprocess is the slow,
+# OOM-prone step, and it only needs to succeed ONCE (nnUNetv2_preprocess has no
+# resume, so re-running redoes ALL cases). So by default we jump straight to the
+# gate + surgery + train and REUSE the existing preprocessed data. The gate below
+# (check_preprocessed) runs unconditionally and fails loudly if preprocess is
+# missing/incomplete. To (re)build the preprocessed data, run SKIP_PREPROCESS=0.
+if [[ "${SKIP_PREPROCESS:-1}" == "1" ]]; then
+    echo "[run_train] SKIP_PREPROCESS=1 (default) -> skipping fingerprint/plan/merge/preprocess"
+    echo "[run_train]   (reusing existing preprocessed data; set SKIP_PREPROCESS=0 to (re)build)"
 else
     echo "[run_train] (1) extract_fingerprint d=$CTRL_DATASET_ID"
     nnUNetv2_extract_fingerprint -d "$CTRL_DATASET_ID" --verify_dataset_integrity
@@ -61,17 +80,14 @@ else
     python3 "$HERE/scripts/build_finetune_plan.py" \
         --config "$CONFIG" --control "$CONTROL" --out-plan-name "$PLAN_NAME"
 
-    echo "[run_train] (3b) install per-channel resampler into nnunetv2 (ch0 order3, ch1-N order0)"
-    python3 - "$HERE/engine/corrector_resampling.py" <<'PY'
-import sys, shutil, os
-import nnunetv2.preprocessing.resampling as r
-dst = os.path.join(os.path.dirname(r.__file__), "corrector_resampling.py")
-shutil.copyfile(sys.argv[1], dst)
-print(f"[run_train] installed resampler -> {dst}")
-PY
-
     echo "[run_train] (4) preprocess with merged plan $PLAN_NAME"
-    nnUNetv2_preprocess -d "$CTRL_DATASET_ID" -plans_name "$PLAN_NAME" -c "$CONFIGURATION"
+    # PREPROCESS_NP caps the preprocessing worker count. The corrector cases are
+    # 5-channel volumes on the (large) GT-native grid, so nnUNet's default worker
+    # count can exhaust RAM ("Some background worker is 6 feet under" = OOM).
+    # Lower this if you hit that (2 is safe; raise if you have RAM headroom).
+    echo "[run_train]     workers: -np ${PREPROCESS_NP:-<nnUNet default>}"
+    nnUNetv2_preprocess -d "$CTRL_DATASET_ID" -plans_name "$PLAN_NAME" \
+        -c "$CONFIGURATION" ${PREPROCESS_NP:+-np "$PREPROCESS_NP"}
 fi
 
 echo "[run_train] (5) POTHOLE-4 GATE: check_preprocessed"
