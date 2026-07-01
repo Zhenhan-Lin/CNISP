@@ -140,6 +140,7 @@ def eval_case_at_resolution(
     modality: str = "ct",
     num_classes: int = 5,
     start: int = 0,
+    latent_override: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Sparsify → optimize latent → predict dense → Dice vs GT.
@@ -238,19 +239,31 @@ def eval_case_at_resolution(
               ).unsqueeze(0).to(device)
     labels_batch = label_obs.unsqueeze(0).to(device)
 
-    latent = optimize_fn(
-        net,
-        labels_batch,
-        coords,
-        latent_dim=params["latent_dim"],
-        lr=params.get("latent_lr", 1e-2),
-        lat_reg_lambda=params["lat_reg_lambda"],
-        num_iters=params.get("latent_num_iters", 1200),
-        max_num_const_dsc=params.get("max_num_const_train_dsc", -1),
-        device=device,
-        soft=bool(params.get("latent_fit_soft", False)),
-        label_smoothing=float(params.get("latent_fit_label_smoothing", 0.1)),
-    )
+    if latent_override is not None:
+        # Resume-from-latent: reuse a previously optimized latent and skip the
+        # (expensive) test-time optimization entirely. The saved latent is
+        # already the final (Delta-corrected, when applicable) vector, so we
+        # feed it straight into the dense decode below. Used to re-run ONLY the
+        # native/iso mapping after a mapping-side fix, without re-inferring.
+        latent = torch.as_tensor(
+            np.asarray(latent_override, dtype=np.float32), device=device,
+        )
+        if latent.ndim == 1:
+            latent = latent.unsqueeze(0)
+    else:
+        latent = optimize_fn(
+            net,
+            labels_batch,
+            coords,
+            latent_dim=params["latent_dim"],
+            lr=params.get("latent_lr", 1e-2),
+            lat_reg_lambda=params["lat_reg_lambda"],
+            num_iters=params.get("latent_num_iters", 1200),
+            max_num_const_dsc=params.get("max_num_const_train_dsc", -1),
+            device=device,
+            soft=bool(params.get("latent_fit_soft", False)),
+            label_smoothing=float(params.get("latent_fit_label_smoothing", 0.1)),
+        )
 
     # ── Dense prediction with adaptive bounding box ─────────────
     # 1. Initial bbox from sparse foreground + 1 voxel padding
@@ -938,7 +951,21 @@ def run_sweep(
                               f"SKIP (no input patch available)")
                         continue
 
-                print(f"  step={step:>2d}{stag} (eff_res={eff_res:.2f}mm) ... ",
+                # Resume-from-latent fallback: when the pred cache missed (e.g.
+                # this source isn't in save_mask_source_ids so no pred nii was
+                # written) but a saved latent exists AND resume_from_latent is
+                # on, decode from that latent instead of re-optimizing. Lets a
+                # rerun re-map every source from its cheap latent artifact
+                # without paying for latent optimization again.
+                lat_override = None
+                if params.get("resume_from_latent") and output_dir is not None:
+                    _latp = (output_dir / step_dir_name(step, start)
+                             / "latents" / f"{casename}.npy")
+                    if _latp.exists():
+                        lat_override = np.load(str(_latp)).astype(np.float32)
+
+                _tag = "RESUME(z)" if lat_override is not None else "..."
+                print(f"  step={step:>2d}{stag} (eff_res={eff_res:.2f}mm) {_tag} ",
                       end="", flush=True)
 
                 result = eval_case_at_resolution(
@@ -953,6 +980,7 @@ def run_sweep(
                     modality=params.get("sweep_modality", "ct"),
                     num_classes=params.get("num_classes", 5),
                     start=start,
+                    latent_override=lat_override,
                 )
                 result["casename"] = casename
 

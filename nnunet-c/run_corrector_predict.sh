@@ -69,6 +69,13 @@ ISO_ARGS=""
 [[ "$EMIT_ISO" == "1" ]] && ISO_ARGS="--emit-iso-prelabel-dir $ISO_PRELABEL_DIR --emit-iso-mm 0.5"
 echo "[predict] GRID=$GRID EMIT_ISO=$EMIT_ISO  (iso dir: $ISO_PRELABEL_DIR)"
 
+# RESUME_FROM_LATENT=1 -> the CNISP test run reuses cached preds/latents and
+# re-runs ONLY the native/iso mapping (no latent optimization). Use to
+# regenerate masks after the mapping-side fix + observed-metadata regeneration.
+RESUME_FROM_LATENT="${RESUME_FROM_LATENT:-0}"
+RESUME_ARGS=""
+[[ "$RESUME_FROM_LATENT" == "1" ]] && RESUME_ARGS="--resume-from-latent"
+
 # ── single-image debug mode ──────────────────────────────────────────
 # SOURCE=<source_id> (or BUILD_CASEFILE=<path>) restricts the test build to ONE
 # image (all its steps via --steps auto, or BUILD_STEPS), writing to ISOLATED
@@ -103,7 +110,7 @@ if [[ "$RUN_CNISP" == "1" ]]; then
         -c "$CNISP_DIR/configs/$CNISP_TEST_YAML" \
         -m "$CNISP_MODEL_NAME" --checkpoint "$CNISP_CHK" \
         --test-label-source nnunet_pred --run-tag "$RUN_TAG" --experiment "$EXPERIMENT" \
-        $ISO_ARGS
+        $ISO_ARGS $RESUME_ARGS
 else
     echo "[predict] (1) skip CNISP test inference (RUN_CNISP=0; using existing runs/$EXPERIMENT/$RUN_TAG)"
 fi
@@ -134,6 +141,13 @@ PY
 # Cache by default: a (source,step) whose 5ch imagesTs already exist is reused
 # (the assembly is a deterministic resample, so re-running yields the same files).
 # REBUILD_TESTSET=1 forces a full re-assembly (e.g. after the prelabels changed).
+# Safety: if we just RE-MAPPED CNISP from latents (RESUME_FROM_LATENT=1), the
+# ch1..4 prelabels changed, so the cached 5ch testset is stale -> force a rebuild
+# unless the caller explicitly pinned REBUILD_TESTSET.
+if [[ "$RESUME_FROM_LATENT" == "1" && -z "${REBUILD_TESTSET:-}" ]]; then
+    echo "[predict] RESUME_FROM_LATENT=1 -> forcing REBUILD_TESTSET=1 (prelabels changed)"
+    REBUILD_TESTSET=1
+fi
 SKIP_EXISTING_ARG="--skip-existing"
 [[ "${REBUILD_TESTSET:-0}" == "1" ]] && SKIP_EXISTING_ARG=""
 echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -> $TEST_ROOT"

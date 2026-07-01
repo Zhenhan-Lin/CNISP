@@ -160,6 +160,71 @@ def lcc_cleanup_with_warning(
     return out
 
 
+def reconstruct_canonical_patch_affine(meta: dict) -> np.ndarray:
+    """Rebuild the canonical (RAS + OS-flip) patch affine from alignment meta.
+
+    Mirrors ``data_prep.canonical_align.align_single_case`` step-for-step:
+
+        crop offset  ->  RAS reorient  ->  (OS only) flip axis 0
+
+    The returned 4x4 is exactly the affine that was written into the
+    canonical patch NIfTI, so ``affine[:3, 3]`` is the world coordinate of
+    patch voxel ``[0, 0, 0]``. We use it to relate two DIFFERENT canonical
+    crops of the same head (the dense target patch and the observed input
+    patch), which no longer share a world origin under the deployment
+    pipeline (see ``_deployment_index_shift``).
+    """
+    original_affine = np.asarray(meta["original_affine"], dtype=np.float64)
+    crop_slices = meta["crop_slices"]
+
+    # (1) crop offset: shift the origin to the crop's lower corner.
+    pa = original_affine.copy()
+    crop_lo = np.array([crop_slices[ax][0] for ax in range(3)], dtype=np.float64)
+    pa[:3, 3] += original_affine[:3, :3] @ crop_lo
+    cropped_shape = [int(crop_slices[ax][1] - crop_slices[ax][0]) for ax in range(3)]
+
+    # (2) reorient the cropped patch to RAS.
+    orig_ornt = nib.orientations.io_orientation(original_affine)
+    ras_ornt = nib.orientations.axcodes2ornt("RAS")
+    transform = nib.orientations.ornt_transform(orig_ornt, ras_ornt)
+    pa = pa @ nib.orientations.inv_ornt_aff(transform, cropped_shape)
+
+    # (3) OS->OD flip along axis 0 (matches flip_os_to_od).
+    if meta.get("was_flipped", False):
+        # Flip preserves shape, so the RAS axis-0 length == patch_voxel_shape[0].
+        shape0 = int(meta["patch_voxel_shape"][0])
+        reoriented = pa.copy()
+        pa = reoriented.copy()
+        pa[:, 0] *= -1
+        pa[:3, 3] += reoriented[:3, 0] * (shape0 - 1)
+    return pa
+
+
+def _deployment_index_shift(dense_meta: dict, observed_meta: dict) -> np.ndarray:
+    """Dense-canonical voxel shift that re-frames a deployment reconstruction.
+
+    The latent is fit to the OBSERVED input patch (nnUNet sparse pred,
+    canonical-aligned fresh on its own globe centroid) but the reconstruction
+    is decoded on the DENSE target patch's grid. ``inner_crop_64mm`` collapses
+    both patches' physical origins to ``spacing/2`` (``load_patch_as_label_tensor``
+    discards the real affine), so the naive inverse places each eye at the
+    dense-grid index equal to its OBSERVED-grid index -- i.e. it silently
+    assumes the two canonical crops share a world origin. In deployment they
+    do not: the eye is misplaced by the crop-origin difference, and for OS the
+    axis-0 flip mirrors that error (which is why OD looked fine while OS was
+    grossly off, worsening as step_size grows the sparse-vs-dense centroid gap).
+
+    We correct it by shifting ``sub_crop_lo_vox_dense`` by the world-origin
+    difference between the two canonical patches, expressed in dense canonical
+    voxels. The dense affine carries the OS flip, so the sign is handled
+    automatically for both eyes.
+    """
+    a_dense = reconstruct_canonical_patch_affine(dense_meta)
+    a_obs = reconstruct_canonical_patch_affine(observed_meta)
+    delta_world = a_obs[:3, 3] - a_dense[:3, 3]
+    return np.linalg.inv(a_dense[:3, :3]) @ delta_world
+
+
 def remap_canonical_to_original(data: np.ndarray, meta: dict) -> np.ndarray:
     """
     Remap canonical labels {0,1,2,3,4} back to original label scheme,
@@ -220,6 +285,7 @@ def invert_alignment_single_eye(
     sub_crop_lo_vox_dense: Sequence[int],
     sub_crop_shape_vox_dense: Optional[Sequence[int]] = None,
     casename: Optional[str] = None,
+    observed_meta: Optional[dict] = None,
 ) -> np.ndarray:
     """
     Reverse canonical alignment for one eye's 64 mm sub-patch prediction.
@@ -233,6 +299,13 @@ def invert_alignment_single_eye(
         sub_crop_shape_vox_dense: expected sub-patch voxel shape; only used
             for a sanity assert that ``pred_patch.shape`` matches.
         casename: optional name for the LCC WARNING message.
+        observed_meta: OPTIONAL alignment metadata of the OBSERVED input
+            patch (deployment / nnunet_pred mode). When provided, the
+            sub-patch placement is re-framed from the dense target patch's
+            crop to the observed input patch's crop via world coordinates
+            (see ``_deployment_index_shift``). ``None`` keeps the legacy
+            behaviour (correct only when input and target share the crop,
+            e.g. atlas_gt where the input is a sparsified copy of the target).
 
     Returns a CANONICAL-LABELS full-head volume (np.int16) with this eye's
     prediction placed at its native position. Label remapping to the
@@ -254,8 +327,17 @@ def invert_alignment_single_eye(
     ).astype(np.int16, copy=False)
 
     # (2) Place the 64 mm sub-patch inside the 80 mm canonical disk patch.
+    # In deployment the reconstruction content lives in the OBSERVED input
+    # patch's frame; re-frame the placement to that crop before we invert the
+    # dense target patch's flip/reorient/crop (which is what maps back to the
+    # native grid). Without this the OS flip mirrors the crop-origin gap.
+    lo_vox = np.asarray(sub_crop_lo_vox_dense, dtype=np.float64)
+    if observed_meta is not None:
+        lo_vox = lo_vox + _deployment_index_shift(meta, observed_meta)
+    lo_vox = np.round(lo_vox).astype(int).tolist()
+
     disk_shape = tuple(int(v) for v in meta["patch_voxel_shape"])
-    disk_patch = place_sub_patch_in_disk(patch, disk_shape, sub_crop_lo_vox_dense)
+    disk_patch = place_sub_patch_in_disk(patch, disk_shape, lo_vox)
 
     # (3) Un-flip   (4) Un-reorient
     if meta["was_flipped"]:
@@ -333,6 +415,7 @@ def map_results_to_native(
     suffix: str = "_cnisp",
     meta_path_for_casename: Optional[Callable[[str], Path]] = None,
     save_source_ids: Optional[set] = None,
+    observed_meta_path_for: Optional[Callable[[str, int, int], Optional[Path]]] = None,
 ) -> List[Path]:
     """
     Map inference results back to native space.
@@ -359,6 +442,13 @@ def map_results_to_native(
             ``sweep_results.pkl`` / ``test_results.csv`` (the aggregate
             reads from there), so dropping the full-head mask only saves
             disk, not information.
+        observed_meta_path_for: optional resolver ``(casename, step, start)
+            -> Path | None`` for the OBSERVED input patch's alignment
+            metadata (deployment / nnunet_pred mode). When it resolves to an
+            existing JSON the reconstruction is re-framed from the dense
+            target crop to the observed input crop (fixes the OS mirror /
+            step-dependent misplacement). ``None`` keeps the legacy inverse
+            (correct for atlas_gt where input == sparsified target).
 
     Returns:
         list of output file paths
@@ -370,6 +460,19 @@ def map_results_to_native(
         if meta_path_for_casename is not None:
             return Path(meta_path_for_casename(casename))
         return Path(meta_dir) / f"{casename}.json"
+
+    def _observed_meta(result: dict) -> Optional[dict]:
+        if observed_meta_path_for is None:
+            return None
+        p = observed_meta_path_for(
+            result["casename"],
+            int(result.get("step_size", 1)),
+            int(result.get("slice_start_id", 0)),
+        )
+        if p is None or not Path(p).exists():
+            return None
+        with open(p) as f:
+            return json.load(f)
 
     # Group results by source_id
     source_groups: Dict[str, List[Tuple[dict, dict]]] = defaultdict(list)
@@ -399,6 +502,7 @@ def map_results_to_native(
                 sub_crop_lo_vox_dense=sub_crop_lo,
                 sub_crop_shape_vox_dense=sub_crop_shape,
                 casename=cn,
+                observed_meta=_observed_meta(result),
             )
             eye_volumes.append(full_vol)
 
@@ -423,6 +527,7 @@ def map_iso_results_to_native(
     suffix: str = "_cnisp_iso",
     iso_mm: Optional[float] = None,
     meta_path_for_casename: Optional[Callable[[str], Path]] = None,
+    observed_meta_path_for: Optional[Callable[[str, int, int], Optional[Path]]] = None,
 ) -> List[Path]:
     """Save isotropic predictions merged into a full-volume at isotropic spacing.
 
@@ -446,6 +551,11 @@ def map_iso_results_to_native(
             Option C (atlas in ``metadata/``, chk_* in ``metadata_dataset835/``)
             resolves each case's metadata correctly. Falls back to
             ``meta_dir/<casename>.json`` when None (mirrors map_results_to_native).
+        observed_meta_path_for: optional ``(casename, step, start) -> Path | None``
+            resolver for the OBSERVED input patch's alignment metadata. When it
+            resolves to an existing JSON, the sub-patch is re-framed from the
+            dense target crop to the observed input crop (fixes the OS mirror /
+            step-dependent misplacement). ``None`` keeps the legacy inverse.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -454,6 +564,19 @@ def map_iso_results_to_native(
         if meta_path_for_casename is not None:
             return Path(meta_path_for_casename(casename))
         return Path(meta_dir) / f"{casename}.json"
+
+    def _observed_meta(result: dict) -> Optional[dict]:
+        if observed_meta_path_for is None:
+            return None
+        p = observed_meta_path_for(
+            result["casename"],
+            int(result.get("step_size", 1)),
+            int(result.get("slice_start_id", 0)),
+        )
+        if p is None or not Path(p).exists():
+            return None
+        with open(p) as f:
+            return json.load(f)
 
     source_groups: Dict[str, List[Tuple[dict, dict]]] = defaultdict(list)
     for r in results:
@@ -491,6 +614,15 @@ def map_iso_results_to_native(
                 continue
             cn = result["casename"]
             sub_crop_lo, sub_crop_shape = _extract_sub_crop_info(result, cn)
+
+            # Deployment re-framing (see invert_alignment_single_eye): move the
+            # sub-patch corner from the dense target crop to the observed input
+            # crop before we lay it into the iso disk, otherwise the OS flip
+            # mirrors the crop-origin gap. No-op when observed_meta is absent.
+            obs_meta = _observed_meta(result)
+            if obs_meta is not None:
+                sub_crop_lo = (np.asarray(sub_crop_lo, dtype=np.float64)
+                               + _deployment_index_shift(meta, obs_meta))
 
             # The iso pred is a 64 mm sub-patch at iso spacing -- its
             # voxel shape differs from the disk-frame sub-patch (which is

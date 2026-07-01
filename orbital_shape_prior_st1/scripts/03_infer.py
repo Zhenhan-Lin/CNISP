@@ -94,6 +94,15 @@ def main():
         "--emit-iso-mm", type=float, default=0.5,
         help="Isotropic spacing (mm) for --emit-iso-prelabel-dir (default 0.5).",
     )
+    parser.add_argument(
+        "--resume-from-latent", action="store_true", default=False,
+        help=("RESUME: when the pred-nii cache misses but step_XX/latents/"
+              "<case>.npy exists, decode from that saved latent instead of "
+              "re-optimizing. Use to re-map every source (incl. those without "
+              "a saved pred mask under save_mask_source_ids) after a "
+              "mapping-side fix, without paying for latent optimization. "
+              "(Sources WITH a cached pred still resume from the pred nii.)"),
+    )
     args = parser.parse_args()
 
     # Merge configs: paths → train (architecture) → test (overrides runtime settings)
@@ -120,6 +129,8 @@ def main():
             "iso_mm": float(args.emit_iso_mm),
             "out_dir": args.emit_iso_prelabel_dir,
         }
+    if args.resume_from_latent:
+        params["resume_from_latent"] = True
 
     # infer_test_set writes inference_results.pkl + sweep_results.pkl itself
     infer_test_set(params)

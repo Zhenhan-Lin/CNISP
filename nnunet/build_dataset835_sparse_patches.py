@@ -18,6 +18,12 @@ Outputs
 * ``${aligned_dir}/${labels_dataset835_step_prefix}{XX}/{casename}.nii.gz``
   -- canonical-aligned orbital patches (one per eye per source per
   step) carved out of the sparse-grid Dataset835 prediction.
+* ``${aligned_dir}/${metadata_dataset835_step_prefix}{XX}/{casename}.json``
+  -- the matching per-(source, eye, step) alignment metadata. CNISP's
+  native/iso inversion reads these to re-frame the reconstruction from the
+  DENSE target crop to THIS observed input crop; otherwise the OS mask is
+  mirrored/misplaced (worsening with step). "labels"->"metadata" in the
+  prefix so it mirrors the label dir naming.
 
 These patches are the latent-opt INPUT for the Option C deployment
 curve (test_label_source=nnunet_pred). Their through-plane voxel count
@@ -51,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import List, Tuple
 
@@ -93,6 +100,17 @@ def run(args) -> int:
     # the v6 nnUNet-obs patches never collide with the test deployment patches.
     prefix_token = f"{experiment}_train" if args.split == "train" else experiment
     prefix = exp_step_prefix(base_prefix, prefix_token)
+
+    # Parallel metadata prefix (mirrors the label prefix, "labels"->"metadata").
+    # These per-(source, step, eye) alignment JSONs are what
+    # engine/native_mapping uses to RE-FRAME the deployment reconstruction from
+    # the dense target crop to THIS observed input crop; without them the OS
+    # mask is mirrored/misplaced (worse at high step). See
+    # engine.native_mapping._deployment_index_shift.
+    base_meta_prefix = base_prefix.replace(
+        "labels_dataset835", "metadata_dataset835", 1
+    )
+    meta_prefix = exp_step_prefix(base_meta_prefix, prefix_token)
 
     # Pin the patch size to whatever the model was trained on, unless
     # the caller explicitly overrides it. Mismatching patch sizes
@@ -152,8 +170,10 @@ def run(args) -> int:
         # fan-out); it names the patch dir directly so the CNISP read path
         # (step_input_patch_path) finds it for the matching (step, start).
         step_dir = aligned_dir / f"{prefix}{step_tag}"
+        meta_step_dir = aligned_dir / f"{meta_prefix}{step_tag}"
         if step_tag not in seen_step_dirs:
             step_dir.mkdir(parents=True, exist_ok=True)
+            meta_step_dir.mkdir(parents=True, exist_ok=True)
             seen_step_dirs.add(step_tag)
 
         if not seg_path.exists():
@@ -161,10 +181,12 @@ def run(args) -> int:
             issues.append(f"step={step_tag} {sid}: pred missing at {seg_path}")
             continue
 
-        # Skip when both eyes for this (sid, step) already on disk.
+        # Skip when both eyes' label AND metadata for this (sid, step) exist.
         both_eyes_done = (
             (step_dir / f"{sid}_OD.nii.gz").exists()
             and (step_dir / f"{sid}_OS.nii.gz").exists()
+            and (meta_step_dir / f"{sid}_OD.json").exists()
+            and (meta_step_dir / f"{sid}_OS.json").exists()
         )
         if both_eyes_done and not args.force:
             n_skipped_existing += 1
@@ -195,12 +217,15 @@ def run(args) -> int:
 
         for patch, pa, meta in results:
             out_path = step_dir / f"{meta.casename}.nii.gz"
-            if out_path.exists() and not args.force:
+            meta_out = meta_step_dir / f"{meta.casename}.json"
+            if out_path.exists() and meta_out.exists() and not args.force:
                 continue
             nib.save(
                 nib.Nifti1Image(patch.astype(np.uint8), pa),
                 str(out_path),
             )
+            with open(meta_out, "w") as f:
+                json.dump(asdict(meta), f, indent=2)
             n_written += 1
 
     if issues:

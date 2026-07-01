@@ -11,6 +11,9 @@ reads. For each selected image it canonical-aligns:
     (data/nnunet_pred/{case}_step{XX}.nii.gz) ->
     aligned_dir/labels_dataset835_{exp}_step_{XX}/<case>_O{D,S}.nii.gz
     (the CNISP latent-opt input under test_label_source=nnunet_pred)
+    + aligned_dir/metadata_dataset835_{exp}_step_{XX}/<case>_O{D,S}.json
+    (this observed crop's frame; CNISP native/iso inversion re-frames the
+    reconstruction onto it so the OS mask isn't mirrored/misplaced)
 
 It also writes the corrector casenames file (casefiles_dir/<corrector_train_casefile>)
 so 032 can run with --test-casefile that list.
@@ -123,6 +126,14 @@ def main() -> int:
     base_prefix = cnisp_paths.get("labels_dataset835_step_prefix",
                                   "labels_dataset835_step_")
     step_prefix = exp_step_prefix(base_prefix, experiment)      # per-step obs dirs
+    # Parallel per-step OBSERVED-metadata prefix ("labels"->"metadata"). CNISP's
+    # native/iso inversion (engine.native_mapping._deployment_index_shift, via
+    # 032 --observed-meta) reads these to re-frame the reconstruction from the
+    # dense target crop to THIS observed input crop; without them the OS mask is
+    # mirrored/misplaced at high step.
+    meta_step_prefix = step_prefix.replace(
+        "labels_dataset835", "metadata_dataset835", 1
+    )
 
     print(f"[align] experiment={experiment} patch={patch_size_mm}mm")
     print(f"[align] aligned_patch root -> {aligned_patch}")
@@ -177,9 +188,10 @@ def main() -> int:
                               f"({seg}); run run_corrector_data.sh predict")
                 continue
             step_dir = aligned_patch / f"{step_prefix}{step:02d}"
+            meta_step_dir = aligned_patch / f"{meta_step_prefix}{step:02d}"
             try:
                 _align_and_write(seg, case_id, f"corrector_step_{step:02d}",
-                                 patch_size_mm, step_dir, meta_dir=None,
+                                 patch_size_mm, step_dir, meta_dir=meta_step_dir,
                                  force=args.force)
                 n_step += 1
             except Exception as e:  # noqa: BLE001

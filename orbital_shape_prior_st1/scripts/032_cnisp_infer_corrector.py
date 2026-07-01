@@ -53,6 +53,7 @@ from engine.train import create_model                           # noqa: E402
 from engine.infer import (                                      # noqa: E402
     load_model_checkpoint, optimize_latent,
     _load_labels_dense_per_case, _build_label_obs_loader, _meta_path_for_case,
+    _observed_meta_path_for,
     device as INFER_DEVICE,
 )
 from engine.test_label_sources import build_run_layout, step_input_patch_path  # noqa: E402
@@ -124,6 +125,21 @@ def _save_final_masks(results: List[Dict], layout, out_dir: Path) -> Dict:
     latent under out_dir/latent/ for reference / cheap re-decode (e.g. at iso).
     Returns a manifest dict."""
     meta_for = _meta_path_for_case(layout)
+    # Observed input-patch metadata resolver: re-frame the reconstruction from
+    # the dense target crop to the observed nnUNet-pred crop it was fit to,
+    # otherwise the OS mask is mirrored/misplaced (worse at high step). None
+    # for atlas_gt / real_pair.
+    obs_meta_for = _observed_meta_path_for(layout)
+
+    def _observed_meta(result: dict):
+        if obs_meta_for is None:
+            return None
+        mp = obs_meta_for(result["casename"], int(result.get("step_size", 1)),
+                          int(result.get("slice_start_id", 0)))
+        if mp is None or not Path(mp).exists():
+            return None
+        return json.load(open(mp))
+
     out_dir.mkdir(parents=True, exist_ok=True)
     latent_dir = out_dir / "latent"
     latent_dir.mkdir(parents=True, exist_ok=True)
@@ -157,6 +173,7 @@ def _save_final_masks(results: List[Dict], layout, out_dir: Path) -> Dict:
                 r["pred_class_map"], meta,
                 sub_crop_lo_vox_dense=lo, sub_crop_shape_vox_dense=sh,
                 casename=r["casename"],
+                observed_meta=_observed_meta(r),
             )
             fg = full > 0
             merged[fg] = full[fg]                      # canonical-label union
@@ -213,6 +230,15 @@ def main() -> int:
     ap.add_argument("--no-skip-existing", dest="skip_existing",
                     action="store_false",
                     help="recompute even if the output mask exists.")
+    ap.add_argument("--remap-from-latent", dest="remap_from_latent",
+                    action="store_true", default=False,
+                    help="RESUME mode: reuse each (source,step,eye)'s saved "
+                         "latent under <out_dir>/latent/ and re-run ONLY the "
+                         "dense decode + native mapping (no latent optimization, "
+                         "no re-infer). Use this to regenerate masks after a "
+                         "mapping-side fix. Overwrites existing masks (ignores "
+                         "--skip-existing); a (source,step,eye) without a saved "
+                         "latent is skipped.")
     ap.add_argument("--max-samples", type=int, default=0,
                     help="cap the number of (source,step) samples to run, "
                          "GLOBALLY (0=all). Selected as the first N by sorted "
@@ -393,11 +419,24 @@ def main() -> int:
             for step in steps_for(ci):
                 if allowed_pairs is not None and (src, step) not in allowed_pairs:
                     continue  # outside the global --max-samples selection
-                if args.skip_existing:
+                # Skip-if-done only applies to fresh inference. In remap mode we
+                # WANT to overwrite the (buggy) masks with corrected mappings.
+                if args.skip_existing and not args.remap_from_latent:
                     stem = _source_stem(cn)
                     if stem and (out_dir / f"{stem}_step{step:02d}.nii.gz").exists():
                         print(f"  {cn} step={step:02d}: SKIP (output exists)")
                         continue
+
+                # Resume-from-latent: reuse the saved latent, skip optimization.
+                lat_override = None
+                if args.remap_from_latent:
+                    latp = out_dir / "latent" / f"{cn}_step{step:02d}.npy"
+                    if not latp.exists():
+                        print(f"  {cn} step={step:02d}: SKIP remap "
+                              f"(no saved latent at {latp.name})")
+                        continue
+                    lat_override = np.load(str(latp)).astype(np.float32)
+
                 override = (label_obs_loader(cn, step, 0)
                             if label_obs_loader is not None else None)
                 if label_obs_loader is not None and override is None:
@@ -414,6 +453,7 @@ def main() -> int:
                     modality=params.get("sweep_modality", "ct"),
                     num_classes=params.get("num_classes", 5),
                     start=0,
+                    latent_override=lat_override,
                 )
                 r["casename"] = cn
                 src_results.append(r)

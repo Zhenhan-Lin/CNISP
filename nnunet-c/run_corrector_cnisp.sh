@@ -64,6 +64,15 @@ RERUN_FAILED="${RERUN_FAILED:-0}"
 # saved latents for masks that already exist.
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 SKIP_FLAG="--skip-existing"; [[ "$SKIP_EXISTING" == "0" ]] && SKIP_FLAG="--no-skip-existing"
+# REMAP_FROM_LATENT=1 -> resume from each (source,step,eye)'s saved latent and
+# re-run ONLY the dense decode + native mapping (no latent optimization). Forces
+# overwrite (--no-skip-existing) so the buggy masks are replaced. Use after the
+# mapping-side fix + observed-metadata regeneration.
+REMAP_FROM_LATENT="${REMAP_FROM_LATENT:-0}"
+if [[ "$REMAP_FROM_LATENT" == "1" ]]; then
+    SKIP_FLAG="--no-skip-existing"
+    EXTRA_ARGS+=" --remap-from-latent"
+fi
 
 # ── prerequisite: the corrector casefile must exist (written by align) ─
 # Avoids launching N workers that each crash with the same FileNotFoundError.

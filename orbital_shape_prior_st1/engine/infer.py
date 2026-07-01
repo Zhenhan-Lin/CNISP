@@ -506,6 +506,39 @@ def _meta_path_for_case(layout: RunLayout) -> Callable[[str], Path]:
     return _resolve
 
 
+def _observed_meta_path_for(
+    layout: RunLayout,
+) -> Optional[Callable[[str, int, int], Optional[Path]]]:
+    """Resolver for the OBSERVED input patch's per-step alignment metadata.
+
+    Only meaningful under ``nnunet_pred``: the latent-opt input is a
+    per-(case, step) Dataset835 sparse patch, canonical-aligned FRESH on its
+    own globe centroid (a different crop than the dense target patch). CNISP's
+    native/iso inversion needs THAT crop's metadata to re-frame the
+    reconstruction back onto the nnUNet pred; without it the OS mask is
+    mirrored/misplaced (see engine.native_mapping._deployment_index_shift).
+
+    The metadata dirs mirror the sparse-label step dirs with
+    "labels_dataset835" -> "metadata_dataset835" (written by
+    nnunet/build_dataset835_sparse_patches.py). Returns ``None`` for
+    atlas_gt / real_pair (input already shares the target frame, or is
+    handled by post-hoc registration).
+    """
+    if layout.test_label_source != "nnunet_pred":
+        return None
+    labels_prefix = layout.labels_dataset835_step_prefix  # Path (.../labels_..._step_)
+    meta_prefix = labels_prefix.with_name(
+        labels_prefix.name.replace("labels_dataset835", "metadata_dataset835", 1)
+    )
+
+    def _resolve(casename: str, step: int, start: int = 0) -> Path:
+        ostr = "" if int(start) == 0 else f"_o{int(start)}"
+        step_dir = Path(f"{meta_prefix.as_posix()}{int(step):02d}{ostr}")
+        return step_dir / f"{casename}.json"
+
+    return _resolve
+
+
 def _sub_crop_sidecar_dict(result: dict) -> dict:
     """Build the sub-patch sidecar dict for one sweep result.
 
@@ -739,6 +772,10 @@ def infer_test_set(params):
               f"kept for all.")
 
     meta_path_for = _meta_path_for_case(layout)
+    # Observed input-patch metadata resolver (deployment re-framing; None for
+    # atlas_gt / real_pair). Passed to every native/iso mapping call so the
+    # reconstruction is inverted through the crop it was actually fit to.
+    obs_meta_for = _observed_meta_path_for(layout)
     export_preds = params.get("export_predictions", True)
 
     # ── Optional per-case incremental native remap ────────────────
@@ -778,6 +815,7 @@ def infer_test_set(params):
                 suffix=f"_cnisp_step{step:02d}{_ostr}",
                 meta_path_for_casename=meta_path_for,
                 save_source_ids=save_id_set,
+                observed_meta_path_for=obs_meta_for,
             )
             if paths:
                 print(f"    [native] {source_id} step={step:02d}{_ostr}: "
@@ -1011,6 +1049,7 @@ def infer_test_set(params):
             primary_results, layout.metadata_dir, native_dir,
             meta_path_for_casename=meta_path_for,
             save_source_ids=save_id_set,
+            observed_meta_path_for=obs_meta_for,
         )
         print(f"Native-space predictions: {native_dir} ({len(native_paths)} volumes)")
 
@@ -1045,6 +1084,7 @@ def infer_test_set(params):
                     suffix=suffix,
                     meta_path_for_casename=meta_path_for,
                     save_source_ids=save_id_set,
+                    observed_meta_path_for=obs_meta_for,
                 )
 
             # ``by_source_id`` stores **basename only** -- consumers
@@ -1161,6 +1201,7 @@ def infer_test_set(params):
                 results_step, layout.metadata_dir, step_dir,
                 suffix=suffix, iso_mm=iso_mm,
                 meta_path_for_casename=meta_path_for,
+                observed_meta_path_for=obs_meta_for,
             )
             n_iso += len(paths)
             # by_source_id manifest (basename only; mirrors the native path).
