@@ -70,6 +70,31 @@ def _gt_stem(gt_label_path: Path) -> str:
     return gt_label_path.name.replace(".nii.gz", "").replace(".nii", "")
 
 
+def _cached_channels_ok(images_out: Path, cid: str, n_channels: int) -> bool:
+    """True only if ALL n_channels exist AND share one geometry (shape+affine).
+
+    The cache must NOT trust mere file existence: an interrupted rebuild can leave
+    ch0/ch1 at a new grid and ch2..chN from an older build, so the 5 filenames all
+    exist but the case is a MIXED-geometry corruption (ch0/ch1 co-load, ch2..chN
+    don't). Verifying geometry consistency here forces a rebuild in that case
+    instead of silently keeping the corrupt set. nib.load reads only the header,
+    so this is cheap.
+    """
+    ref = None
+    for c in range(n_channels):
+        p = images_out / f"{cid}_{c:04d}.nii.gz"
+        if not p.exists():
+            return False
+        im = nib.load(str(p))
+        sig = (tuple(int(s) for s in im.shape[:3]),
+               np.round(np.asarray(im.affine), 4).tobytes())
+        if ref is None:
+            ref = sig
+        elif sig != ref:
+            return False
+    return True
+
+
 def _discover_steps_cnisp_runs(cfg, sid: str) -> list:
     """Steps where CNISP's deployment run produced this source (via manifest)."""
     run_dir = _pre._cnisp_run_dir(cfg)
@@ -279,13 +304,12 @@ def main() -> int:
                 print(f"  {cid}: pred={Path(pred).name}")
                 continue
 
-            # ── cache (B/C): if all N channels are already on disk, skip the
-            # resample/convert but still record the case so eval is complete. A
-            # partial channel set is treated as a miss and rebuilt below.
-            if args.skip_existing and all(
-                (images_out / f"{cid}_{c:04d}.nii.gz").exists()
-                for c in range(N_CHANNELS)
-            ):
+            # ── cache (B/C): skip the resample/convert only if all N channels
+            # already exist AND share one geometry (guards against an interrupted
+            # rebuild leaving a MIXED-geometry set, which existence-only caching
+            # would silently keep). Still record the case so eval is complete. A
+            # partial OR inconsistent channel set is treated as a miss + rebuilt.
+            if args.skip_existing and _cached_channels_ok(images_out, cid, N_CHANNELS):
                 case_map[cid] = {"source_id": sid, "step": step,
                                  "gt_label_path": str(gt_path),
                                  "gt_struct_to_value": gt_stv,
