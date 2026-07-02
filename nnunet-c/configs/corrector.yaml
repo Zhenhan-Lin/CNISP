@@ -61,6 +61,22 @@ finetune:
   epochs: 300
   initial_lr: 0.01      # slightly below the stock 1e-2; tune here as needed
 
+# ── Prediction defaults (run_corrector_predict.sh) ───────────────────
+# So `bash run_corrector_predict.sh <B|C> <fold>` does the right thing with NO
+# env vars. Every field is still overridable by the matching env var.
+predict:
+  # Assembly grid for the 5ch TEST case. iso (REQUIRED for a correct C run):
+  # build on CNISP's iso-0.5 head grid and take ch1..4 from CNISP's iso-0.5 DENSE
+  # decode -- so ch1..4 are NEVER the degraded/native mask (which is sparse and
+  # zero-gapped between thick slices and would mislead the corrector). gt = legacy
+  # GT-native-grid assembly (do not use for C: reintroduces the degraded mask).
+  grid: iso
+  iso_mm: 0.5           # iso spacing (mm) for grid=iso + CNISP --emit-iso-mm
+  # auto -> 1 for control C (prelabel_source=cnisp), 0 otherwise. B never runs
+  # CNISP, so these MUST stay auto (not a hard 1) to keep B correct.
+  run_cnisp: auto       # stage 1: run CNISP's thick nnunet_pred test (03_infer)
+  emit_iso: auto        # stage 1: emit CNISP iso-0.5 prelabels (required by grid=iso for C)
+
 # Build everything on each image's ORIGINAL native grid (label = GT shared across
 # step 3/6/9; ch1-4 = CNISP native mask; ch0 upsampled to it). nnUNet then
 # resamples original -> iso 0.5 (nnUNetPlans_iso05) at preprocess, using the

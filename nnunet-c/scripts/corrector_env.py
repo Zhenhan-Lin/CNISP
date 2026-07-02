@@ -94,6 +94,13 @@ def main() -> int:
         ),
     }
 
+    # Prediction defaults (run_corrector_predict.sh reads these as fallbacks).
+    pr = cfg.get("predict", {}) or {}
+    lines["PREDICT_GRID"] = pr.get("grid", "iso")
+    lines["PREDICT_ISO_MM"] = pr.get("iso_mm", 0.5)
+    lines["PREDICT_RUN_CNISP"] = pr.get("run_cnisp", "auto")
+    lines["PREDICT_EMIT_ISO"] = pr.get("emit_iso", "auto")
+
     cd = cfg.get("corrector_data")
     if cd:
         root = res["repo_root"]

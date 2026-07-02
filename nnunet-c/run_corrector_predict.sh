@@ -28,18 +28,13 @@ PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
 #               prelabels (those were generated with CNISP 'latest').
 CHK="${CHK:-checkpoint_best.pth}"     # nnUNet-C predict checkpoint (best)
 CNISP_CHK="${CNISP_CHK:-latest}"      # CNISP test checkpoint (latest; matches train prelabels)
-RUN_CNISP="${RUN_CNISP:-auto}"        # auto: 1 for control C, 0 otherwise
 GPUS="${GPUS:-0 1}"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 CNISP_DIR="$REPO_ROOT/orbital_shape_prior_st1"
 export nnUNet_compile="${nnUNet_compile:-f}"
-# Test now assembles the 5ch case on CNISP's iso-0.5 head grid (GRID=iso): control
-# C's ch1..4 come from CNISP's iso-0.5 prelabels, so the CNISP run must EMIT them.
-# EMIT_ISO=auto -> 1 for control C (cnisp) under iso grid, else 0. GRID=gt restores
-# the legacy GT-native-grid assembly (and no iso emit needed).
-GRID="${GRID:-iso}"
-EMIT_ISO="${EMIT_ISO:-auto}"
 ISO_PRELABEL_DIR="${ISO_PRELABEL_DIR:-$HERE/data/cnisp_pred_test_iso}"
+# GRID / RUN_CNISP / EMIT_ISO / ISO_MM defaults come from corrector.yaml `predict:`
+# (see corrector_env PREDICT_*); set AFTER the eval below. All env-overridable.
 
 echo "================================================================"
 echo "[predict] control=$CONTROL fold=$FOLD"
@@ -47,6 +42,15 @@ echo "[predict] nnUNet-C ckpt=$CHK   CNISP ckpt=$CNISP_CHK"
 echo "================================================================"
 
 eval "$(python3 "$HERE/scripts/corrector_env.py" --config "$CONFIG" --control "$CONTROL")"
+
+# ── Prediction defaults from corrector.yaml `predict:` (overridable by env) ──
+# GRID=iso -> assemble on CNISP's iso-0.5 DENSE head grid, so ch1..4 are never the
+# degraded/native (sparse, zero-gapped) mask. RUN_CNISP/EMIT_ISO auto -> 1 for
+# control C, 0 for B (B never runs CNISP).
+GRID="${GRID:-${PREDICT_GRID:-iso}}"
+ISO_MM="${ISO_MM:-${PREDICT_ISO_MM:-0.5}}"
+RUN_CNISP="${RUN_CNISP:-${PREDICT_RUN_CNISP:-auto}}"
+EMIT_ISO="${EMIT_ISO:-${PREDICT_EMIT_ISO:-auto}}"
 
 if [[ "$EXTERNAL" == "1" ]]; then
     echo "[predict] control $CONTROL is external (Dataset$CTRL_DATASET_ID = pure nnUNet"
@@ -66,7 +70,7 @@ if [[ "$EMIT_ISO" == "auto" ]]; then
     [[ "$PRELABEL_SOURCE" == "cnisp" && "$GRID" == "iso" ]] && EMIT_ISO=1 || EMIT_ISO=0
 fi
 ISO_ARGS=""
-[[ "$EMIT_ISO" == "1" ]] && ISO_ARGS="--emit-iso-prelabel-dir $ISO_PRELABEL_DIR --emit-iso-mm 0.5"
+[[ "$EMIT_ISO" == "1" ]] && ISO_ARGS="--emit-iso-prelabel-dir $ISO_PRELABEL_DIR --emit-iso-mm $ISO_MM"
 echo "[predict] GRID=$GRID EMIT_ISO=$EMIT_ISO  (iso dir: $ISO_PRELABEL_DIR)"
 
 # RESUME_FROM_LATENT=1 -> the CNISP test run reuses cached preds/latents and
@@ -154,7 +158,7 @@ echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -
 echo "          cache: ${SKIP_EXISTING_ARG:-off (REBUILD_TESTSET=1)}"
 python3 "$HERE/scripts/build_corrector_testset.py" \
     --config "$CONFIG" --control "$CONTROL" --steps "${BUILD_STEPS:-auto}" \
-    --prelabel-grid "$GRID" --out "$TEST_ROOT" $SKIP_EXISTING_ARG \
+    --prelabel-grid "$GRID" --iso-mm "$ISO_MM" --out "$TEST_ROOT" $SKIP_EXISTING_ARG \
     ${BUILD_CASEFILE:+--casefile "$BUILD_CASEFILE"}
 
 IMAGES_TS="$TEST_ROOT/$CTRL_DATASET_NAME/imagesTs"
