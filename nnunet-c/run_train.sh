@@ -115,9 +115,20 @@ PY
 # The corrector trainer reads its schedule from these (corrector.yaml::finetune).
 export CORRECTOR_EPOCHS CORRECTOR_LR
 
-echo "[run_train] (7) nnUNetv2_train $CTRL_DATASET_ID $CONFIGURATION $FOLD -p $PLAN_NAME"
-echo "          trainer=$CORRECTOR_TRAINER  epochs=$CORRECTOR_EPOCHS  initial_lr=$CORRECTOR_LR"
-nnUNetv2_train "$CTRL_DATASET_ID" "$CONFIGURATION" "$FOLD" \
-    -p "$PLAN_NAME" -tr "$CORRECTOR_TRAINER" -pretrained_weights "$ADAPTED"
+# RESUME=1: continue an interrupted run from its latest/best checkpoint
+# (nnUNetv2_train --c). Use this after a crash/kill (e.g. system-RAM OOM) so you
+# don't restart from scratch. --c ignores -pretrained_weights (it restores the
+# in-progress checkpoint instead), so we drop it here.
+if [[ "${RESUME:-0}" == "1" ]]; then
+    echo "[run_train] (7) RESUME nnUNetv2_train --c $CTRL_DATASET_ID $CONFIGURATION $FOLD -p $PLAN_NAME"
+    echo "          (continues from checkpoint_final/latest/best in the fold dir)"
+    nnUNetv2_train "$CTRL_DATASET_ID" "$CONFIGURATION" "$FOLD" \
+        -p "$PLAN_NAME" -tr "$CORRECTOR_TRAINER" --c
+else
+    echo "[run_train] (7) nnUNetv2_train $CTRL_DATASET_ID $CONFIGURATION $FOLD -p $PLAN_NAME"
+    echo "          trainer=$CORRECTOR_TRAINER  epochs=$CORRECTOR_EPOCHS  initial_lr=$CORRECTOR_LR"
+    nnUNetv2_train "$CTRL_DATASET_ID" "$CONFIGURATION" "$FOLD" \
+        -p "$PLAN_NAME" -tr "$CORRECTOR_TRAINER" -pretrained_weights "$ADAPTED"
+fi
 
 echo "[run_train] done: Dataset${CTRL_DATASET_ID} fold $FOLD finetuned from $REF_CKPT"

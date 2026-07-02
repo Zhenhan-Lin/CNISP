@@ -58,7 +58,7 @@ reference_fold: 2
 # schedule from the 835 weights, with a gentler-than-default LR (stock is 1e-2).
 finetune:
   trainer: nnUNetTrainer_corrector
-  epochs: 200
+  epochs: 150
   initial_lr: 0.005      # slightly below the stock 1e-2; tune here as needed
 
 # Build everything on each image's ORIGINAL native grid (label = GT shared across
