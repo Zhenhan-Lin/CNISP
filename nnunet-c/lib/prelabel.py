@@ -34,8 +34,16 @@ def step_dir_name(step: int) -> str:
 
 
 def degraded_ct_path(cfg: Dict, sid: str, step: int) -> Path:
-    """ch0 source: degraded sparse CT (channel-0 naming)."""
+    """ch0 source: degraded sparse CT (channel-0 naming).
+
+    step==1 is the DENSE baseline: it is never sparsified, so it lives in the
+    shared ``input/native/`` dir, NOT under ``input/<exp>/sparse_step_01/``
+    (which the sweep never creates). Routing step 1 there is what lets the
+    corrector test set include the step_size=1 (dense) point for B and C.
+    """
     root: Path = cfg["_resolved"]["degraded_ct_root"]
+    if int(step) == 1:
+        return root / "native" / f"{sid}_0000.nii.gz"
     exp = cfg["experiment"]
     return root / exp / step_dir_name(step) / f"{sid}_0000.nii.gz"
 
@@ -49,6 +57,11 @@ def source_prediction_dir(cfg: Dict, step: int) -> Path:
 
 def _b_prelabel_path(cfg: Dict, sid: str, step: int) -> Path:
     root: Path = cfg["_resolved"]["nnunet_pred_root"]
+    # step==1 dense baseline: the native pred lives in the shared prediction/
+    # native/ dir (prediction/<exp>/sparse_step_01_native/ is only a symlink to
+    # it). Read the shared one directly so step 1 works even without the symlink.
+    if int(step) == 1:
+        return root / "native" / f"{sid}.nii.gz"
     exp = cfg["experiment"]
     return root / exp / f"{step_dir_name(step)}_native" / f"{sid}.nii.gz"
 

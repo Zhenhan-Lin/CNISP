@@ -117,14 +117,18 @@ def _discover_steps_cnisp_iso(cfg, sid: str) -> list:
 def _discover_steps_nnunet(cfg, sid: str) -> list:
     """Steps with a native-grid Dataset835 sparse pred for this source (A/B)."""
     root = cfg["_resolved"]["nnunet_pred_root"]
-    exp_dir = root / cfg["experiment"]
-    if not exp_dir.is_dir():
-        return []
     steps = []
-    for d in sorted(exp_dir.glob("sparse_step_*_native")):
-        m = _NATIVE_DIR_RE.match(d.name)
-        if m and (d / f"{sid}.nii.gz").exists():
-            steps.append(int(m.group(1)))
+    # step==1 dense baseline lives in the shared prediction/native/ dir, so it
+    # is discovered independently of the exp-scoped sweep dirs (whose
+    # sparse_step_01_native is only a symlink and may be absent).
+    if (root / "native" / f"{sid}.nii.gz").exists():
+        steps.append(1)
+    exp_dir = root / cfg["experiment"]
+    if exp_dir.is_dir():
+        for d in sorted(exp_dir.glob("sparse_step_*_native")):
+            m = _NATIVE_DIR_RE.match(d.name)
+            if m and (d / f"{sid}.nii.gz").exists():
+                steps.append(int(m.group(1)))
     return sorted(set(steps))
 
 

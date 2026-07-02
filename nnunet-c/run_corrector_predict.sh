@@ -162,13 +162,18 @@ OUT_DIR_PRED="${OUT_DIR_PRED:-$PRED_ROOT/$CTRL_DATASET_NAME/fold_${FOLD}}"
 mkdir -p "$OUT_DIR_PRED"
 
 # ── 4. nnUNetv2_predict with the finetuned corrector ─────────────────
-echo "[predict] (4) nnUNetv2_predict d=$CTRL_DATASET_ID p=$PLAN_NAME chk=$CHK"
+# Resume by default: --continue_prediction skips cases whose output mask already
+# exists in $OUT_DIR_PRED, so a re-run only predicts the NEW cases (e.g. the
+# step_size=1 dense point just added). FORCE=1 re-predicts everything.
+PREDICT_RESUME="--continue_prediction"
+[[ "${FORCE:-0}" == "1" ]] && PREDICT_RESUME=""
+echo "[predict] (4) nnUNetv2_predict d=$CTRL_DATASET_ID p=$PLAN_NAME chk=$CHK ${PREDICT_RESUME:+(resume)}"
 echo "          in=$IMAGES_TS"
 echo "          out=$OUT_DIR_PRED"
 nnUNetv2_predict \
     -i "$IMAGES_TS" -o "$OUT_DIR_PRED" \
     -d "$CTRL_DATASET_ID" -c "$CONFIGURATION" -tr "$CORRECTOR_TRAINER" \
-    -p "$PLAN_NAME" -f "$FOLD" -chk "$CHK"
+    -p "$PLAN_NAME" -f "$FOLD" -chk "$CHK" $PREDICT_RESUME
 
 echo "[predict] done: predictions -> $OUT_DIR_PRED"
 
