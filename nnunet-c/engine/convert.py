@@ -45,6 +45,7 @@ def convert_case(
     gt_struct_to_value: Optional[Dict[str, int]] = None,
     labels_dir: Optional[Path] = None,
     degraded_marker: Optional[str] = None,
+    allow_dense_ct: bool = False,
 ) -> Dict:
     """Convert one (case, step) into nnUNet-C channels on ``ref_grid``.
 
@@ -54,7 +55,8 @@ def convert_case(
 
     ``degraded_marker`` pins ch0 to a degraded CT: None -> require the work_dir
     sparse marker ('/{experiment}/sparse_step_'); for the data/ train tree pass
-    e.g. '/images/'.
+    e.g. '/images/'. ``allow_dense_ct=True`` lifts that pin for the step_size=1
+    dense baseline (its ch0 is the native CT by design).
     """
     if gt_path is not None:
         if labels_dir is None:
@@ -68,6 +70,7 @@ def convert_case(
             prelabel_path=Path(prelabel_path),
             prelabel_struct_to_value=dict(NNUNET_LABELS),
             degraded_marker=degraded_marker,
+            allow_dense_ct=allow_dense_ct,
         )
     return _ch.assemble_inference_case(
         case_id=case_id, ct_path=Path(ct_path), target_spacing=None,
@@ -76,4 +79,5 @@ def convert_case(
         prelabel_path=Path(prelabel_path),
         prelabel_struct_to_value=dict(NNUNET_LABELS),
         degraded_marker=degraded_marker,
+        allow_dense_ct=allow_dense_ct,
     )

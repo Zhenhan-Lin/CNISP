@@ -332,6 +332,8 @@ def main() -> int:
             summary = convert_case(
                 case_id=cid, ct_path=ct, prelabel_path=pre_nn, ref_grid=ref_grid,
                 experiment=cfg["experiment"], images_dir=images_out,
+                # step 1 is the dense baseline: ch0 IS the native CT by design.
+                allow_dense_ct=(int(step) == 1),
             )
             assembled.append(summary)
             case_map[cid] = {"source_id": sid, "step": step,

@@ -23,13 +23,20 @@ from lib.labels import remap_to_nnunet
 
 
 def assert_degraded_ct_path(ct_path: Path, experiment: str,
-                            marker: Optional[str] = None) -> None:
+                            marker: Optional[str] = None,
+                            allow_dense_ct: bool = False) -> None:
     """Pin ch0 to a degraded CT; reject native/dense inputs.
 
     Two accepted degraded sources:
       * work_dir sweep:  marker is None -> require '/{experiment}/sparse_step_'
       * data/ tree:      pass marker='/data/images/' (build_corrector_dataset)
+
+    ``allow_dense_ct=True`` intentionally lifts the pin for the step_size=1
+    DENSE baseline: step 1 is never sparsified, so its ch0 legitimately IS the
+    native/dense CT (input/native/). Only set it for that step.
     """
+    if allow_dense_ct:
+        return
     s = str(ct_path)
     if "/input/native/" in s or s.rstrip("/").endswith("/native"):
         raise AssertionError(
@@ -70,6 +77,7 @@ def _assemble_images(
     file_ending: str,
     degraded_marker: Optional[str] = None,
     ref_grid: Optional[tuple] = None,
+    allow_dense_ct: bool = False,
 ):
     """Write ch0 (+ binary ch1..chN) to images_dir on a common reference grid.
 
@@ -78,7 +86,8 @@ def _assemble_images(
     ``target_spacing``. All channels are resampled onto it (ch0 order 3, binary
     masks order 0). Returns (target_shape, target_affine, written_filenames).
     """
-    assert_degraded_ct_path(Path(ct_path), experiment, marker=degraded_marker)
+    assert_degraded_ct_path(Path(ct_path), experiment, marker=degraded_marker,
+                            allow_dense_ct=allow_dense_ct)
 
     ct_img = nib.load(str(ct_path))
     if ref_grid is not None:
@@ -147,17 +156,22 @@ def assemble_inference_case(
     file_ending: str = ".nii.gz",
     degraded_marker: Optional[str] = None,
     ref_grid: Optional[tuple] = None,
+    allow_dense_ct: bool = False,
 ) -> Dict:
     """Assemble inference channels only (no GT/label) into images_dir.
 
     ref_grid=(shape, affine) pins the grid exactly like the TRAINING build (the
     GT/original native grid), so the test inputs match what the model saw; nnUNet
     then resamples original -> iso 0.5 plan at predict time.
+
+    ``allow_dense_ct=True`` lifts the degraded-ch0 pin for the step_size=1 dense
+    baseline (its ch0 is legitimately the native CT).
     """
     target_shape, target_affine, written = _assemble_images(
         case_id, ct_path, target_spacing, n_channels, structures, images_dir,
         experiment, prelabel_path, prelabel_struct_to_value, file_ending,
         degraded_marker=degraded_marker, ref_grid=ref_grid,
+        allow_dense_ct=allow_dense_ct,
     )
     _assert_geometry_images(images_dir, written, target_shape, target_affine)
     return {
@@ -185,6 +199,7 @@ def assemble_case(
     file_ending: str = ".nii.gz",
     degraded_marker: Optional[str] = None,
     ref_grid: Optional[tuple] = None,
+    allow_dense_ct: bool = False,
 ) -> Dict:
     """Assemble one nnUNet TRAINING case onto a common reference grid.
 
@@ -198,6 +213,7 @@ def assemble_case(
         case_id, ct_path, target_spacing, n_channels, structures, images_dir,
         experiment, prelabel_path, prelabel_struct_to_value, file_ending,
         degraded_marker=degraded_marker, ref_grid=ref_grid,
+        allow_dense_ct=allow_dense_ct,
     )
 
     # label: GT remapped to {1,2,3,4}, nearest.
