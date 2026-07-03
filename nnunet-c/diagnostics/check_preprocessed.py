@@ -51,7 +51,15 @@ def _resolve_paths(config: str, control: str, plan_name: str, configuration: Opt
 
 
 def _load_case(data_dir: Path, case: Optional[str]):
-    """Load (data[C,*spatial], seg[1,*spatial]) from a preprocessed case.
+    """Load (data, seg) handles for a preprocessed case.
+
+    ``data`` is returned as a LAZY handle where possible (blosc2 NDArray) so the
+    caller can pull ONE channel at a time (``data[c]``) instead of decompressing
+    the whole 5-channel volume into RAM at once -- the corrector cases are multi-GB,
+    and the full ``[:]`` load is what makes the gate look "stuck". ``.shape`` works
+    on the lazy handle; ``data[c]`` returns a materialized ndarray. ``seg`` is a
+    single channel, so it's materialized directly. npz/npy have no lazy channel
+    slicing, so they fall back to full arrays (still one channel at a time in main).
 
     Supports blosc2 (.b2nd), npz, and npy layouts across nnUNet versions.
     """
@@ -69,15 +77,15 @@ def _load_case(data_dir: Path, case: Optional[str]):
         stem = case or stems[0]
         if loader == "blosc2":
             import blosc2  # lazy
-            data = blosc2.open(str(data_dir / f"{stem}{suffix}"))[:]
-            seg = blosc2.open(str(data_dir / f"{stem}_seg{suffix}"))[:]
+            data = blosc2.open(str(data_dir / f"{stem}{suffix}"))          # LAZY
+            seg = np.asarray(blosc2.open(str(data_dir / f"{stem}_seg{suffix}"))[:])
         elif loader == "npz":
             npz = np.load(str(data_dir / f"{stem}{suffix}"))
-            data, seg = npz["data"], npz["seg"]
+            data, seg = np.asarray(npz["data"]), np.asarray(npz["seg"])
         else:  # npy
-            data = np.load(str(data_dir / f"{stem}{suffix}"))
-            seg = np.load(str(data_dir / f"{stem}_seg{suffix}"))
-        return stem, np.asarray(data), np.asarray(seg)
+            data = np.asarray(np.load(str(data_dir / f"{stem}{suffix}")))
+            seg = np.asarray(np.load(str(data_dir / f"{stem}_seg{suffix}")))
+        return stem, data, seg
 
     raise FileNotFoundError(
         f"no preprocessed case (.b2nd/.npz/.npy) found in {data_dir}. "
@@ -129,7 +137,7 @@ def main() -> int:
 
     # (1) ch0 CT normalization consistent with 835
     exp_lo, exp_hi, fip = _expected_ct_bounds(ref_plan_json)
-    ch0 = data[0].astype(np.float64)
+    ch0 = np.asarray(data[0]).astype(np.float64)   # pull channel 0 ONCE (lazy handle)
     ch0_min, ch0_max, ch0_mean, ch0_std = (float(ch0.min()), float(ch0.max()),
                                            float(ch0.mean()), float(ch0.std()))
     span = max(abs(exp_hi - exp_lo), 1e-6)
@@ -148,9 +156,10 @@ def main() -> int:
     # (2) ch1..ch4 binary
     if n_channels > 1:
         for c in range(1, n_channels):
-            uniq = np.unique(data[c])
+            chan = np.asarray(data[c])          # pull channel c ONCE (lazy handle)
+            uniq = np.unique(chan)
             is_binary = np.all(np.isin(uniq, [0, 1]))
-            rng = (float(data[c].min()), float(data[c].max()))
+            rng = (float(chan.min()), float(chan.max()))
             print(f"[check] ch{c}: unique<= {uniq[:6]}{' ...' if uniq.size > 6 else ''} "
                   f"range={rng} binary={bool(is_binary)}")
             if not is_binary:

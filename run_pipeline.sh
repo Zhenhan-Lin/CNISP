@@ -1218,6 +1218,28 @@ phase_compare() {
             --config "$CONFIG" \
             --comparison-dir "$COMPARISON_DIR" \
             --experiment "$EXP"
+
+    # ── 5-pipeline evaluation figures (volume stability / agreement / surface
+    #    quality). Uses a real MASK_INDEX json if the config sets
+    #    ``eval_mask_index`` (built ONCE into metrics_long.csv, then shared by
+    #    the three drivers), else each driver renders the synthetic layout.
+    echo "  ─── evaluation figures (experiment=$EXP) ───"
+    local eval_index; eval_index="$(read_yaml_field "$CONFIG" "eval_mask_index")"
+    local eval_dir="$COMPARISON_DIR/viz/evaluation__${EXP}"
+    local metrics_csv_arg=()
+    if [[ -n "$eval_index" ]]; then
+        if python3 "$REPO_ROOT/simulation/evaluation/build_metrics.py" \
+                --mask-index "$eval_index" --out-csv "$eval_dir/metrics_long.csv"; then
+            metrics_csv_arg=(--metrics-csv "$eval_dir/metrics_long.csv")
+        else
+            echo "  [warn] build_metrics failed; drivers fall back to synthetic"
+        fi
+    fi
+    for drv in volume_stability_summary volume_agreement_summary surface_quality_summary; do
+        python3 "$REPO_ROOT/simulation/evaluation/${drv}.py" \
+                --out "$eval_dir" --mode "$EXP" "${metrics_csv_arg[@]}" \
+            || echo "  [warn] ${drv} skipped (needs scipy+pandas+matplotlib)"
+    done
 }
 
 phase_nnunet_interp() {
