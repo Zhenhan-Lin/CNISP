@@ -104,15 +104,22 @@ python nnunet-c/debugger/debug_corrector_io.py \
 # (if the 845 model was trained with the stock trainer, use --trainer nnUNetTrainer)
 ```
 
-**Single case — full predict+eval** (produces a mask + Dice for one source; the
-debugger scripts above are read-only and do NOT). Control B is simplest (no CNISP):
+**Single source — per-step Dice** (the actual Dice numbers, not the debug walk):
 ```bash
+# A) predictions already exist -> re-score just this source from the existing map
+python nnunet-c/diagnostics/eval_corrector.py \
+    --map nnunet-c/test_input/PHOTON_CT_CORR_C_cnisp/test_cases_map.json \
+    --pred-dir nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/fold_0 \
+    --source-id atlas_orbit0001_ubMask_al2_fill
+# prints per-step ON/Recti/Globe/Fat/mean Dice + a "by step" summary for that source.
+
+# B) not predicted yet -> predict ALL its steps then auto-eval (control B: no CNISP)
 printf 'atlas_orbit0001_ubMask_al2_fill\n' > /tmp/one_case.txt
-BUILD_CASEFILE=/tmp/one_case.txt BUILD_STEPS=3,6 \
-  bash nnunet-c/run_corrector_predict.sh B 0
+BUILD_CASEFILE=/tmp/one_case.txt BUILD_STEPS=auto \
+  bash nnunet-c/run_corrector_predict.sh C 0
 ```
-(One source id per line; `BUILD_STEPS` limits the steps. For a throwaway run also
-set `TEST_ROOT`/`OUT_DIR_PRED`/`EVAL_CSV` to temp paths.)
+(One source id per line; `BUILD_STEPS=auto` = all discovered steps. For a throwaway
+run also set `TEST_ROOT`/`OUT_DIR_PRED`/`EVAL_CSV` to temp paths.)
 
 Force a full rebuild/re-predict (e.g. prelabels changed):
 ```bash
