@@ -90,7 +90,9 @@ SOURCE="${SOURCE:-}"
 BUILD_CASEFILE="${BUILD_CASEFILE:-}"
 TEST_ROOT="$HERE/test_input"
 PRED_ROOT="$HERE/predictions"
+SINGLE_MODE=0
 if [[ -n "$SOURCE" || -n "$BUILD_CASEFILE" ]]; then
+    SINGLE_MODE=1
     TEST_ROOT="$HERE/test_input_single"
     PRED_ROOT="$HERE/predictions_single"
     if [[ -z "$BUILD_CASEFILE" ]]; then
@@ -166,11 +168,17 @@ OUT_DIR_PRED="${OUT_DIR_PRED:-$PRED_ROOT/$CTRL_DATASET_NAME/fold_${FOLD}}"
 mkdir -p "$OUT_DIR_PRED"
 
 # ── 4. nnUNetv2_predict with the finetuned corrector ─────────────────
-# Resume by default: --continue_prediction skips cases whose output mask already
-# exists in $OUT_DIR_PRED, so a re-run only predicts the NEW cases (e.g. the
-# step_size=1 dense point just added). FORCE=1 re-predicts everything.
-PREDICT_RESUME="--continue_prediction"
-[[ "${FORCE:-0}" == "1" ]] && PREDICT_RESUME=""
+# Prediction OVERWRITES (never a "resume that reuses stale masks") for a
+# single-image run, so the Dice always reflects the CURRENT checkpoint. Only the
+# 5ch INPUT is cached (step 3, --skip-existing); the masks are always re-predicted.
+# Full-test runs resume by default (skip already-predicted cases); FORCE=1 there
+# forces a full re-predict too.
+if [[ "$SINGLE_MODE" == "1" ]]; then
+    PREDICT_RESUME=""                       # single: always re-predict (overwrite)
+else
+    PREDICT_RESUME="--continue_prediction"  # full test: resume unless FORCE
+    [[ "${FORCE:-0}" == "1" ]] && PREDICT_RESUME=""
+fi
 echo "[predict] (4) nnUNetv2_predict d=$CTRL_DATASET_ID p=$PLAN_NAME chk=$CHK ${PREDICT_RESUME:+(resume)}"
 echo "          in=$IMAGES_TS"
 echo "          out=$OUT_DIR_PRED"
