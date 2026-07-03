@@ -53,12 +53,13 @@ from engine.train import create_model                           # noqa: E402
 from engine.infer import (                                      # noqa: E402
     load_model_checkpoint, optimize_latent,
     _load_labels_dense_per_case, _build_label_obs_loader, _meta_path_for_case,
-    _observed_meta_path_for,
+    _observed_meta_path_for, _AUTOCAST_DTYPE,
     device as INFER_DEVICE,
 )
 from engine.test_label_sources import build_run_layout, step_input_patch_path  # noqa: E402
 from engine.native_mapping import (                             # noqa: E402
     invert_alignment_single_eye, _extract_sub_crop_info,
+    map_iso_results_to_native,
 )
 from diagnostics.resolution_sweep import (                     # noqa: E402
     eval_case_at_resolution, adaptive_steps_for_case,
@@ -119,10 +120,19 @@ def _maybe_load_delta(params: dict, model_state: dict):
     return delta
 
 
-def _save_final_masks(results: List[Dict], layout, out_dir: Path) -> Dict:
+def _save_final_masks(results: List[Dict], layout, out_dir: Path,
+                      net=None, emit_iso_dir=None, emit_iso_mm: float = 0.5) -> Dict:
     """Group results by (source, step), merge eyes (canonical), remap, save one
     {1,2,3,4} native mask per (source, step). Also save each eye's optimized
     latent under out_dir/latent/ for reference / cheap re-decode (e.g. at iso).
+
+    When ``emit_iso_dir`` + ``net`` are given, ALSO decode each eye's latent at
+    ``emit_iso_mm`` and write a full-head iso prelabel per (source, step) under
+    ``emit_iso_dir/native_space_step_XX/`` (+ by_source_id manifest), via the
+    SAME ``map_iso_results_to_native`` path (incl. ``observed_meta_path_for``)
+    that ``engine/infer.py`` uses for the TEST iso prelabels -- so the corrector's
+    TRAIN ch1..4 are generated identically to its TEST ch1..4.
+
     Returns a manifest dict."""
     meta_for = _meta_path_for_case(layout)
     # Observed input-patch metadata resolver: re-frame the reconstruction from
@@ -189,6 +199,63 @@ def _save_final_masks(results: List[Dict], layout, out_dir: Path) -> Dict:
         manifest[source_id].append({"step": step, "file": dst.name, "values": vals})
         n += 1
     print(f"[032] wrote {n} final mask(s) -> {out_dir}")
+
+    # ── Optional iso-mm prelabel emit (corrector TRAIN ch1..4) ────────────
+    # Mirror engine/infer.py's iso emit EXACTLY (same map_iso_results_to_native
+    # + observed_meta_path_for), so train iso prelabels match the test ones.
+    if emit_iso_dir is not None and net is not None:
+        iso_root = Path(emit_iso_dir)
+        n_iso = 0
+        for (source_id, step), items in sorted(groups.items()):
+            ref_meta = items[0][1]
+            stem = Path(ref_meta["original_nifti_path"]).name
+            stem = stem.replace(".nii.gz", "").replace(".nii", "")
+            results_step = []
+            for r, meta in items:
+                lat = r.get("latent")
+                if lat is None or np.asarray(lat).size <= 1:
+                    continue
+                lo, sh = _extract_sub_crop_info(r, r["casename"])
+                lat_t = torch.from_numpy(
+                    np.asarray(lat, dtype=np.float32)
+                ).reshape(1, -1).to(INFER_DEVICE)
+                tgt = torch.round(
+                    net.image_size.detach().cpu().float() / float(emit_iso_mm)
+                ).long()
+                with torch.no_grad():
+                    iso_map = net.predict_dense(
+                        lat_t, tgt.to(INFER_DEVICE),
+                        torch.full((3,), float(emit_iso_mm),
+                                   dtype=torch.float32).to(INFER_DEVICE),
+                        autocast_dtype=_AUTOCAST_DTYPE,
+                    )
+                r["pred_class_map_iso"] = iso_map.numpy().astype(np.int16)
+                r["sub_crop_lo_vox_dense"] = lo
+                r["sub_crop_shape_vox_dense"] = sh
+                results_step.append(r)
+            if not results_step:
+                continue
+            step_dir = iso_root / f"native_space_step_{step:02d}"
+            suffix = f"_cnisp_iso_step{step:02d}"
+            meta_dir_fallback = Path(meta_for(items[0][0]["casename"])).parent
+            map_iso_results_to_native(
+                results_step, meta_dir_fallback, step_dir,
+                suffix=suffix, iso_mm=float(emit_iso_mm),
+                meta_path_for_casename=meta_for,
+                observed_meta_path_for=obs_meta_for,
+            )
+            # Per-SOURCE manifest file (race-free across concurrent shard workers,
+            # unlike a single shared manifest.json). build_corrector_dataset reads
+            # manifest_by_source/<source_id>.json.
+            mbs_dir = step_dir / "manifest_by_source"
+            mbs_dir.mkdir(parents=True, exist_ok=True)
+            json.dump({"file": f"{stem}{suffix}.nii.gz",
+                       "iso_mm": float(emit_iso_mm), "step_size": step},
+                      open(mbs_dir / f"{source_id}.json", "w"), indent=2)
+            n_iso += 1
+        if n_iso:
+            print(f"[032] emitted {n_iso} iso-{emit_iso_mm}mm prelabel(s) -> {iso_root}")
+
     return dict(manifest)
 
 
@@ -239,6 +306,17 @@ def main() -> int:
                          "mapping-side fix. Overwrites existing masks (ignores "
                          "--skip-existing); a (source,step,eye) without a saved "
                          "latent is skipped.")
+    ap.add_argument("--emit-iso-prelabel-dir", dest="emit_iso_prelabel_dir",
+                    default=None,
+                    help="ALSO emit a full-head iso prelabel per (source,step) "
+                         "into <dir>/native_space_step_XX/ (+ by_source_id "
+                         "manifest), decoded from the same latent at --emit-iso-mm "
+                         "via the SAME path infer.py uses for TEST iso prelabels "
+                         "(incl. observed-meta reframe). Use it to make the "
+                         "corrector's TRAIN ch1..4 identical to its TEST ch1..4.")
+    ap.add_argument("--emit-iso-mm", dest="emit_iso_mm", type=float, default=0.5,
+                    help="iso spacing (mm) for --emit-iso-prelabel-dir (default "
+                         "0.5; pass the 835 iso plan spacing to match the builder).")
     ap.add_argument("--max-samples", type=int, default=0,
                     help="cap the number of (source,step) samples to run, "
                          "GLOBALLY (0=all). Selected as the first N by sorted "
@@ -470,7 +548,12 @@ def main() -> int:
                 print(f"  [{si}/{n_src}] {cn} step={step:02d}: "
                       f"dense={r['dice']['mean']:.3f} obs={r['dice_observed']['mean']:.3f}")
         if src_results:
-            manifest.update(_save_final_masks(src_results, layout, out_dir))
+            manifest.update(_save_final_masks(
+                src_results, layout, out_dir,
+                net=(net if args.emit_iso_prelabel_dir else None),
+                emit_iso_dir=args.emit_iso_prelabel_dir,
+                emit_iso_mm=args.emit_iso_mm,
+            ))
 
     # Shard-aware manifest name so concurrent workers don't clobber each other.
     shard_tag = str(args.shard_id).replace(",", "-")

@@ -47,7 +47,7 @@ from lib import prelabel as _pre  # noqa: E402
 from lib.labels import (  # noqa: E402
     resolve_source_infos, remap_native_to_nnunet, NNUNET_LABELS,
 )
-from lib.resample import build_reference_grid  # noqa: E402
+from lib.resample import build_reference_grid, resolve_target_spacing  # noqa: E402
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
 _NATIVE_DIR_RE = re.compile(r"^sparse_step_(\d+)_native$")
@@ -196,8 +196,12 @@ def main() -> int:
                          "ch1..4 come from CNISP's iso-0.5 prelabels (no native "
                          "round-trip, no GT grid). gt: legacy -- assemble on the GT "
                          "native grid, ch1..4 from CNISP native_space masks.")
-    ap.add_argument("--iso-mm", type=float, default=0.5,
-                    help="iso spacing (mm) for --prelabel-grid iso (default 0.5).")
+    ap.add_argument("--iso-mm", type=float, default=None,
+                    help="iso spacing (mm) for --prelabel-grid iso. DEFAULT "
+                         "(unset): resolve from the 835 iso plan "
+                         "(reference_plan_json, e.g. 0.4765625) via "
+                         "resolve_target_spacing -- MUST match the train build "
+                         "(build_corrector_dataset --iso-mm).")
     ap.add_argument("--out", default=None, help="output root (default: nnunet-c/test_input)")
     ap.add_argument("--skip-existing", action="store_true",
                     help="cache: skip the 5ch resample/convert for a (source,step) "
@@ -213,6 +217,10 @@ def main() -> int:
     is_A = control["prelabel_source"] == "none"
     is_cnisp = control["prelabel_source"] == "cnisp"
     grid_iso = (args.prelabel_grid == "iso")
+    # iso spacing: --iso-mm overrides; else the 835 iso plan spacing (must match
+    # the train builder so train/test share the network's plan geometry).
+    iso_mm = (float(args.iso_mm) if args.iso_mm is not None
+              else float(resolve_target_spacing(cfg)[0]))
     if not is_A and int(control["n_channels"]) != 5:
         raise RuntimeError("this builder assembles the 5-channel controls (B/C); "
                            "use --control A only for the map/eval baseline.")
@@ -326,7 +334,7 @@ def main() -> int:
             #   gt  -> legacy GT native grid.
             if grid_iso:
                 ref_grid = build_reference_grid(nib.load(str(ct)),
-                                                [args.iso_mm] * 3)
+                                                [iso_mm] * 3)
             else:
                 ref_grid = ref_grid_gt
 

@@ -48,9 +48,26 @@ eval "$(python3 "$HERE/scripts/corrector_env.py" --config "$CONFIG" --control "$
 # degraded/native (sparse, zero-gapped) mask. RUN_CNISP/EMIT_ISO auto -> 1 for
 # control C, 0 for B (B never runs CNISP).
 GRID="${GRID:-${PREDICT_GRID:-iso}}"
-ISO_MM="${ISO_MM:-${PREDICT_ISO_MM:-0.5}}"
 RUN_CNISP="${RUN_CNISP:-${PREDICT_RUN_CNISP:-auto}}"
 EMIT_ISO="${EMIT_ISO:-${PREDICT_EMIT_ISO:-auto}}"
+# iso spacing for the CNISP emit + testset assembly. DEFAULT: the 835 iso plan
+# spacing (resolve_target_spacing -> e.g. 0.4765625), so emit/test match the
+# train builder + network plan. Falls back to 0.5 only if the plan can't be read.
+# Override with ISO_MM=<mm> (or PREDICT_ISO_MM in the config predict block).
+ISO_MM="${ISO_MM:-${PREDICT_ISO_MM:-}}"
+if [[ -z "$ISO_MM" ]]; then
+    ISO_MM="$(python3 - <<PY 2>/dev/null || true
+import sys
+sys.path.insert(0, "$HERE")
+from lib.config import load_corrector_config
+from lib.resample import resolve_target_spacing
+cfg = load_corrector_config("$CONFIG", caller_file="$HERE/run_corrector_predict.sh")
+print(f"{float(resolve_target_spacing(cfg)[0]):.7f}")
+PY
+)"
+fi
+ISO_MM="${ISO_MM:-0.5}"
+echo "[predict] iso spacing (emit + testset assembly) = $ISO_MM mm"
 
 if [[ "$EXTERNAL" == "1" ]]; then
     echo "[predict] control $CONTROL is external (Dataset$CTRL_DATASET_ID = pure nnUNet"

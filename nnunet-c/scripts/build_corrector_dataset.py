@@ -35,8 +35,11 @@ add_repo_to_syspath(__file__)
 import numpy as np  # noqa: E402
 import nibabel as nib  # noqa: E402
 
-from engine.convert import convert_case  # noqa: E402  (the SINGLE converter)
+from engine.convert import convert_case, STRUCTS  # noqa: E402  (the SINGLE converter)
 from engine.build_dataset import _raw_root, _dataset_dir, _write_dataset_json  # noqa: E402
+from lib.resample import build_reference_grid, resolve_target_spacing  # noqa: E402
+from lib import prelabel as _pre  # noqa: E402
+from lib.labels import remap_native_to_nnunet  # noqa: E402
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.yaml"
 
@@ -62,6 +65,23 @@ def _assemble_one(task):
     return cid, summary
 
 
+def _stage_iso_prelabel_nn(cfg, case_id: str, step: int, stage_dir: Path) -> Path:
+    """TRAIN iso prelabel for (case,step) -> remapped BY NAME to nnUNet {1,2,3,4}.
+
+    Mirrors build_corrector_testset._nn_prelabel: the CNISP iso mask is in
+    canonical scheme, so remap_native_to_nnunet(scheme='auto') aligns structures
+    to channels (a value split would swap Globe/Recti). Returns the staged path.
+    """
+    src = _pre._c_train_iso_prelabel_path(cfg, case_id, step)
+    img = nib.load(str(src))
+    arr = np.asanyarray(img.dataobj)
+    nn, _scheme, _off = remap_native_to_nnunet(arr, STRUCTS, scheme="auto")
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    out = stage_dir / f"corr_{case_id}_step{step:02d}.nii.gz"
+    nib.save(nib.Nifti1Image(nn.astype(np.uint8), img.affine), str(out))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -78,6 +98,21 @@ def main() -> int:
                          "the IDENTICAL N samples -- the only difference being which "
                          "prelabel fills ch1..4.")
     ap.add_argument("--raw-root", default=None, help="override $nnUNet_raw")
+    ap.add_argument("--prelabel-grid", choices=["iso", "native"], default="iso",
+                    help="control C ch1..4 source: 'iso' (default) = CNISP "
+                         "iso-DIRECT decode (data/cnisp_pred_train_iso, remapped "
+                         "BY NAME to {1,2,3,4}) -- the SAME decode path as the test "
+                         "build, so train/test ch1..4 match. 'native' = legacy "
+                         "data/cnisp_pred native mask resampled to the iso grid. "
+                         "Ignored for control B (ch1..4 = nnUNet pred).")
+    ap.add_argument("--iso-mm", type=float, default=None,
+                    help="iso spacing (mm) for the assembly ref grid, built from "
+                         "each step's degraded CT FOV. DEFAULT (unset): resolve "
+                         "from the 835 iso plan (reference_plan_json, e.g. "
+                         "0.4765625) via resolve_target_spacing -- i.e. the SAME "
+                         "spacing the network's plan uses and the first training "
+                         "used. MUST match the test build "
+                         "(build_corrector_testset --iso-mm).")
     ap.add_argument("--workers", type=int, default=1,
                     help="parallel worker processes for the 5ch assembly. Each "
                          "(case,step) is independent, so this scales the (slow) "
@@ -93,6 +128,10 @@ def main() -> int:
                            f"{control['dataset_id']}); nothing to build.")
     if int(control["n_channels"]) != 5:
         raise RuntimeError("this builder is for the 5-channel controls (B/C).")
+
+    # control C ch1..4: iso-direct decode (default, matches test) vs legacy native.
+    is_cnisp = control["prelabel_source"] == "cnisp"
+    use_iso = is_cnisp and args.prelabel_grid == "iso"
 
     cd = cfg["corrector_data"]
     res = cfg["_resolved"]
@@ -119,9 +158,21 @@ def main() -> int:
     images_out.mkdir(parents=True, exist_ok=True)
     labels_out.mkdir(parents=True, exist_ok=True)
 
+    # Assembly spacing = the 835 iso plan spacing (resolve_target_spacing reads
+    # nnUNetPlans_iso05 -> e.g. [0.4765625]*3), unless --iso-mm overrides it. This
+    # is what the FIRST training used and what the finetune plan resamples to, so
+    # nnUNet's preprocess resample is a near no-op. MUST match the test builder.
+    iso_spacing = ([float(args.iso_mm)] * 3 if args.iso_mm is not None
+                   else [float(x) for x in resolve_target_spacing(cfg)])
+
+    stage_dir = ds_dir / "_prelabel_nn_train"   # staged remapped iso prelabels (C+iso)
+    pre_desc = (f"CNISP iso-direct decode ({_pre._cnisp_train_iso_root(cfg)}, "
+                f"remapped by name)" if use_iso else str(prelabel_dir))
     print(f"[build] control={args.control.upper()} -> {ds_dir}")
-    print(f"[build] ch0={images_dir}  prelabel={prelabel_dir}  grid=GT original (per source)")
-    print(f"[build]   (nnUNet resamples this original grid -> iso 0.5 plan at preprocess)")
+    print(f"[build] ch0={images_dir}  prelabel={pre_desc}")
+    print(f"[build] grid = iso {iso_spacing} from each step's degraded-CT FOV "
+          f"(from {'--iso-mm' if args.iso_mm is not None else '835 iso plan'}; "
+          f"matches build_corrector_testset)")
 
     # ── Phase 1: deterministic candidate selection ───────────────────
     # Build the ordered list of buildable (case_id, step) FIRST, then optionally
@@ -148,8 +199,17 @@ def main() -> int:
                 continue
             stem = f"{case_id}_step{step:02d}"
             ct = images_dir / f"{stem}_0000.nii.gz"
-            pre = prelabel_dir / f"{stem}.nii.gz"
-            if not ct.exists() or not pre.exists():
+            if not ct.exists():
+                skipped += 1
+                continue
+            # ch1..4 availability: iso prelabel (C+iso, via manifest) or native file.
+            if use_iso:
+                try:
+                    _pre._c_train_iso_prelabel_path(cfg, case_id, step)
+                except (FileNotFoundError, KeyError):
+                    skipped += 1
+                    continue
+            elif not (prelabel_dir / f"{stem}.nii.gz").exists():
                 skipped += 1
                 continue
             if need_cnisp and not (cnisp_dir / f"{stem}.nii.gz").exists():
@@ -169,26 +229,31 @@ def main() -> int:
         candidates = candidates[:cap]
 
     # ── Phase 2: assemble only the selected (case, step) ─────────────
-    # Common grid = the GT's ORIGINAL native grid: label = GT (shared across
-    # steps), ch1-4 = prelabel mask (already on this grid), ch0 = degraded
-    # upsampled to it. nnUNet then resamples original -> iso 0.5 at preprocess.
-    # Build the ref grid per case (lazy: nib.load reads only shape+affine, no
-    # data) and the per-(case,step) task list, then assemble sequentially or in
-    # a process pool. ``_assemble_one`` is identical work either way, so
-    # --workers 1 reproduces the old sequential behaviour byte-for-byte.
-    assembled, ref_cache = [], {}
+    # Grid = the iso-mm grid built from THIS step's degraded-CT FOV -- IDENTICAL
+    # to how the test set is assembled (build_corrector_testset --prelabel-grid
+    # iso), so train and test share the same geometry (no GT grid at train, which
+    # test can never use). ch0 = degraded CT resampled onto it, ch1-4 = prelabel
+    # mask resampled onto it, label = GT resampled onto it (order 0) -- GT is used
+    # ONLY for supervision, not as the geometry reference. nnUNet then resamples
+    # this iso grid -> the plan spacing at preprocess (near no-op). ``_assemble_one``
+    # is identical work either way, so --workers 1 reproduces sequential behaviour.
+    assembled = []
     tasks = []
     for case_id, step, gt in candidates:
-        if case_id not in ref_cache:
-            gt_img = nib.load(str(gt))
-            ref_cache[case_id] = (gt_img.shape[:3], np.asarray(gt_img.affine))
-        ref_grid = ref_cache[case_id]
         stem = f"{case_id}_step{step:02d}"
+        ct_path = images_dir / f"{stem}_0000.nii.gz"
+        # iso grid from this step's degraded CT FOV (lazy: reads shape+affine only)
+        ref_grid = build_reference_grid(nib.load(str(ct_path)), iso_spacing)
         cid = f"corr_{stem}"
+        # ch1..4: iso-direct decode (staged, remapped by name) or legacy native.
+        if use_iso:
+            prelabel_path = _stage_iso_prelabel_nn(cfg, case_id, step, stage_dir)
+        else:
+            prelabel_path = prelabel_dir / f"{stem}.nii.gz"
         tasks.append((
             cid,
-            images_dir / f"{stem}_0000.nii.gz",
-            prelabel_dir / f"{stem}.nii.gz",
+            ct_path,
+            prelabel_path,
             ref_grid, cfg["experiment"],
             images_out, gt, labels_out, f"/{images_dirname}/",
         ))

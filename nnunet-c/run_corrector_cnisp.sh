@@ -73,6 +73,28 @@ if [[ "$REMAP_FROM_LATENT" == "1" ]]; then
     SKIP_FLAG="--no-skip-existing"
     EXTRA_ARGS+=" --remap-from-latent"
 fi
+# EMIT_ISO=1 (default): also emit CNISP iso-DIRECT prelabels for the TRAIN set
+# (data/cnisp_pred_train_iso) via the SAME decode path infer.py uses for TEST, so
+# the corrector's train ch1..4 match its test ch1..4. build_corrector_dataset
+# --prelabel-grid iso reads them. ISO_MM defaults to the 835 iso plan spacing.
+EMIT_ISO="${EMIT_ISO:-1}"
+if [[ "$EMIT_ISO" == "1" ]]; then
+    ISO_OUT="${ISO_OUT:-$REPO_ROOT/nnunet-c/data/cnisp_pred_train_iso}"
+    if [[ -z "${ISO_MM:-}" ]]; then
+        ISO_MM="$(python3 - <<PY 2>/dev/null || true
+import sys
+sys.path.insert(0, "$HERE")
+from lib.config import load_corrector_config
+from lib.resample import resolve_target_spacing
+cfg = load_corrector_config("$HERE/configs/corrector.yaml", caller_file="$HERE/run_corrector_cnisp.sh")
+print(f"{float(resolve_target_spacing(cfg)[0]):.7f}")
+PY
+)"
+    fi
+    ISO_MM="${ISO_MM:-0.5}"
+    EXTRA_ARGS+=" --emit-iso-prelabel-dir $ISO_OUT --emit-iso-mm $ISO_MM"
+    echo "[run_corrector_cnisp] EMIT_ISO=1 -> iso prelabels @ ${ISO_MM}mm -> $ISO_OUT"
+fi
 
 # ── prerequisite: the corrector casefile must exist (written by align) ─
 # Avoids launching N workers that each crash with the same FileNotFoundError.

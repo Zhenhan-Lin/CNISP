@@ -85,6 +85,39 @@ def _cnisp_iso_root(cfg: Dict) -> Path:
     return cfg["_resolved"]["nnunet_c_root"] / "data" / name
 
 
+def _cnisp_train_iso_root(cfg: Dict) -> Path:
+    """Root of the iso prelabels emitted for the corrector TRAIN set.
+
+    Written by ``032_cnisp_infer_corrector.py --emit-iso-prelabel-dir`` (via
+    ``run_corrector_cnisp.sh`` EMIT_ISO). Same layout as the test iso root:
+        <root>/native_space_step_XX/<stem>_cnisp_iso_stepXX.nii.gz + manifest.json
+    Default: ``nnunet-c/data/cnisp_pred_train_iso``.
+    """
+    name = (cfg.get("corrector_data", {}) or {}).get(
+        "cnisp_train_iso_pred_dirname", "cnisp_pred_train_iso"
+    )
+    return cfg["_resolved"]["nnunet_c_root"] / "data" / name
+
+
+def _c_train_iso_prelabel_path(cfg: Dict, sid: str, step: int) -> Path:
+    """CNISP iso head mask for a TRAIN source/step (same iso-decode path as test).
+
+    Reads the PER-SOURCE manifest ``manifest_by_source/<sid>.json`` that 032's
+    iso emit writes (per-source so concurrent shard workers don't race a shared
+    manifest). So the corrector's train ch1..4 come from the SAME iso decode as
+    its test ch1..4.
+    """
+    step_dir = _cnisp_train_iso_root(cfg) / f"native_space_step_{int(step):02d}"
+    mf = step_dir / "manifest_by_source" / f"{sid}.json"
+    if not mf.is_file():
+        raise FileNotFoundError(
+            f"CNISP train iso prelabel missing for {sid!r} step {step}: {mf}. "
+            f"Emit train iso prelabels first: EMIT_ISO=1 run_corrector_cnisp.sh."
+        )
+    name = json.load(open(mf))["file"]
+    return step_dir / name
+
+
 def _c_iso_prelabel_path(cfg: Dict, sid: str, step: int) -> Path:
     """CNISP iso-0.5 head mask for this source/step, resolved via manifest.json."""
     step_dir = _cnisp_iso_root(cfg) / f"native_space_step_{int(step):02d}"

@@ -144,6 +144,12 @@ corrector_data:
   #   <stem>_cnisp_iso_stepXX.nii.gz + manifest.json. Written by the CNISP test run
   #   (03_infer.py --emit-iso-prelabel-dir / run_corrector_predict.sh EMIT_ISO).
   cnisp_iso_pred_dirname: cnisp_pred_test_iso
+  # CNISP iso-0.5 TRAIN prelabels (control C train ch1..4 under --prelabel-grid
+  # iso). Emitted by run_corrector_cnisp.sh EMIT_ISO=1 (032 --emit-iso-prelabel-dir)
+  # via the SAME iso-decode path as the test prelabels, so train/test ch1..4 match.
+  # Layout: <data_root>/<cnisp_train_iso_pred_dirname>/native_space_step_XX/
+  #   <stem>_cnisp_iso_stepXX.nii.gz + manifest_by_source/<source_id>.json
+  cnisp_train_iso_pred_dirname: cnisp_pred_train_iso
   # Corrector CNISP aligned patches live HERE (not the shared CNISP aligned_dir),
   # so the corrector run never touches the CNISP training patch tree. Holds
   # labels_dataset835/, metadata_dataset835/, labels_dataset835_<exp>_step_XX/.
