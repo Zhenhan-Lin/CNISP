@@ -179,7 +179,10 @@ else
     PREDICT_RESUME="--continue_prediction"  # full test: resume unless FORCE
     [[ "${FORCE:-0}" == "1" ]] && PREDICT_RESUME=""
 fi
+CKPT_PATH="${nnUNet_results%/}/Dataset$(printf '%03d' "$CTRL_DATASET_ID")_${CTRL_DATASET_NAME}/${CORRECTOR_TRAINER}__${PLAN_NAME}__${CONFIGURATION}/fold_${FOLD}/${CHK}"
 echo "[predict] (4) nnUNetv2_predict d=$CTRL_DATASET_ID p=$PLAN_NAME chk=$CHK ${PREDICT_RESUME:+(resume)}"
+echo "          checkpoint=$CKPT_PATH"
+[[ -f "$CKPT_PATH" ]] || echo "          [warn] checkpoint file not found at that path (nnUNet may resolve it differently)"
 echo "          in=$IMAGES_TS"
 echo "          out=$OUT_DIR_PRED"
 nnUNetv2_predict \
