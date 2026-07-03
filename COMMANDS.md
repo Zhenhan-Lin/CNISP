@@ -106,20 +106,27 @@ python nnunet-c/debugger/debug_corrector_io.py \
 
 **Single source — per-step Dice** (the actual Dice numbers, not the debug walk):
 ```bash
-# A) predictions already exist -> re-score just this source from the existing map
+# A) re-score EXISTING masks (does NOT predict / does NOT load a checkpoint):
+#    Dice reflects whatever checkpoint produced the masks in --pred-dir.
 python nnunet-c/diagnostics/eval_corrector.py \
     --map nnunet-c/test_input/PHOTON_CT_CORR_C_cnisp/test_cases_map.json \
     --pred-dir nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/fold_0 \
     --source-id atlas_orbit0001_ubMask_al2_fill
-# prints per-step ON/Recti/Globe/Fat/mean Dice + a "by step" summary for that source.
+# prints per-step ON/Recti/Globe/Fat/mean Dice + a "by step" summary, AND saves:
+#   <pred-dir>/eval_C__atlas_orbit0001_ubMask_al2_fill.csv          (per-case)
+#   <pred-dir>/eval_C__atlas_orbit0001_ubMask_al2_fill_by_step.csv  (by-step)
+# override the location with --out-csv <path>.
 
-# B) not predicted yet -> predict ALL its steps then auto-eval (control B: no CNISP)
-printf 'atlas_orbit0001_ubMask_al2_fill\n' > /tmp/one_case.txt
-BUILD_CASEFILE=/tmp/one_case.txt BUILD_STEPS=auto \
+# B) FRESH predict with the current best checkpoint, then eval (THIS one loads
+#    the ckpt; A does not). SOURCE=<sid> = single-image mode: isolated *_single
+#    dirs, predictions kept, Dice printed + CSV saved. Reuses the cached 5ch test
+#    inputs (never rebuilds them unless REBUILD_TESTSET=1).
+RUN_CNISP=0 SOURCE=atlas_orbit0001_ubMask_al2_fill BUILD_STEPS=auto \
   bash nnunet-c/run_corrector_predict.sh C 0
 ```
-(One source id per line; `BUILD_STEPS=auto` = all discovered steps. For a throwaway
-run also set `TEST_ROOT`/`OUT_DIR_PRED`/`EVAL_CSV` to temp paths.)
+(`BUILD_STEPS=auto` = all discovered steps. `CHK` defaults to `checkpoint_best.pth`
+-- use `CHK=checkpoint_final.pth` for final. Masks + Dice CSVs land under
+`nnunet-c/predictions_single/<name>/`.)
 
 Force a full rebuild/re-predict (e.g. prelabels changed):
 ```bash

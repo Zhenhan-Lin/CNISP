@@ -66,7 +66,10 @@ def main() -> int:
                     help="dir holding predictions for RELATIVE pred_file entries "
                          "(nnUNetv2_predict output for B/C). Not needed when the "
                          "map's pred_file paths are absolute (control A).")
-    ap.add_argument("--out-csv", default=None, help="per-case Dice CSV")
+    ap.add_argument("--out-csv", default=None,
+                    help="per-case Dice CSV. Default (when unset): "
+                         "<pred-dir>/eval_<control>[__<source>].csv (a companion "
+                         "..._by_step.csv is always written too).")
     ap.add_argument("--source-id", action="append", default=None,
                     help="score only these source_id(s) (repeatable). Use to see "
                          "ONE source's per-step Dice + the 'by step' summary for it.")
@@ -182,16 +185,42 @@ def main() -> int:
         print(f"    step={step}: " + " ".join(f"{n}={m:.3f}" for n, m in zip(structures, ms))
               + f"  mean={float(np.mean(ms)):.3f}")
 
+    # ── Always persist results (default path when --out-csv is unset) ──
+    # Default: alongside the predictions (or the map when pred_dir is unset),
+    # named eval_<control>[__<source>].csv so a manual run leaves a file behind
+    # instead of only scrolling past in the terminal.
     if args.out_csv:
         out = Path(args.out_csv)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        fields = ["case_id", "source_id", "step"] + \
-                 [f"dice_{n}" for n in structures] + ["dice_mean"]
-        with open(out, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields)
-            w.writeheader()
-            w.writerows(rows)
-        print(f"[eval] per-case CSV -> {out}")
+    else:
+        base = pred_dir if pred_dir else Path(args.map).parent
+        tag = ""
+        if args.source_id:
+            safe = "_".join(s.replace("/", "_") for s in args.source_id)
+            tag = f"__{safe}" if len(args.source_id) == 1 else "__filtered"
+        out = base / f"eval_{control}{tag}.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # per-case long CSV
+    fields = ["case_id", "source_id", "step"] + \
+             [f"dice_{n}" for n in structures] + ["dice_mean"]
+    with open(out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+
+    # by-step aggregate CSV (mirrors the "by step" summary printed above)
+    by_step_out = out.with_name(out.stem + "_by_step.csv")
+    with open(by_step_out, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step"] + [f"dice_{n}" for n in structures] + ["dice_mean", "n"])
+        for step in sorted(per_struct_by_step):
+            ms = [float(np.mean(per_struct_by_step[step][n])) for n in structures]
+            n_step = len(per_struct_by_step[step][structures[0]])
+            w.writerow([step] + [f"{m:.5f}" for m in ms]
+                       + [f"{float(np.mean(ms)):.5f}", n_step])
+
+    print(f"[eval] per-case CSV -> {out}")
+    print(f"[eval] by-step CSV  -> {by_step_out}")
     return 0
 
 
