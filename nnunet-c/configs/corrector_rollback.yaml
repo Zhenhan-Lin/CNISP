@@ -1,0 +1,118 @@
+# ── nnUNet-C corrector ROLLBACK / ablation config ────────────────────
+# Purpose: isolate the CNISP native-mapping fix. Reverts the config-level knobs
+# to the old baseline so the ONLY deliberate change vs that baseline is the
+# native-mapping fix (which lives in the CNISP code, not this config):
+#   * dataset back to n=200 SOURCE IMAGES (target_samples OFF)
+#   * step sizes 3/6/9 (12 dropped)
+#   * DEFAULT epochs + lr (stock nnUNetTrainer: 1000 epochs, lr 1e-2) -- NOT the
+#     custom nnUNetTrainer_corrector 300/0.01 schedule.
+# NOTE: the iso-grid assembly + iso-direct ch1..4 code changes are still active
+# (they are code, not config; the old GT-grid path was removed). If you also want
+# ch1..4 back on the NATIVE mask (pre-iso-direct), build with
+# `--prelabel-grid native` (Step 4) and skip the train iso emit (Step 3 EMIT_ISO=0).
+#
+# A clone of corrector.yaml (load_corrector_config has no inheritance) with ONLY
+# the knobs above changed.
+
+nnunet_config_yaml: nnunet/configs_v7.yaml
+
+experiment: thick
+
+cnisp_model_name: orbital_ad_v6_5_gt
+cnisp_train_yaml: train_v6_5_gt.yaml
+cnisp_test_yaml: test_corrector.yaml
+run_tag: corrector_gt
+
+nnunet_pred_root: null
+degraded_ct_root: null
+
+reference_dataset_id: 835
+reference_dataset_name: PHOTON_CT_QAfiltered
+reference_plan: nnUNetPlans
+reference_plan_json: nnUNetPlans_iso05
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+reference_fold: 2
+
+# ── Corrector finetune schedule — DEFAULT (stock nnUNetTrainer) ───────
+# trainer=nnUNetTrainer -> the corrector trains with nnUNet's stock schedule
+# (1000 epochs, initial_lr 1e-2). epochs/initial_lr below are IGNORED by the
+# stock trainer (they only apply to nnUNetTrainer_corrector); kept for reference.
+finetune:
+  trainer: nnUNetTrainer
+  epochs: 1000
+  initial_lr: 0.01
+
+predict:
+  grid: iso
+  iso_mm: 0.4765625     # 835 iso plan spacing (matches the builder + network plan)
+  run_cnisp: auto
+  emit_iso: auto
+
+target_spacing: null
+
+structures: [ON, Recti, Globe, Fat]
+labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4
+
+corrector_train_split: nnunet-c/splits/corrector_train.txt
+corrector_train_casefile: corrector_train_cases.txt
+
+corrector_data:
+  checklist_csv: /fs5/p_masi/linz18/QA_record/QA/PHOTON_CP/new_check/review_checklist_part2.csv
+  select:
+    keep: false
+    qa_status: yes
+  # These control only the data-gen POOL (how many source images to degrade), NOT
+  # the final dataset size. The ROLLBACK "200" is MAX_SAMPLES, applied at the raw
+  # dataset build: `build_corrector_dataset.py --max-samples 200` caps the built
+  # Dataset845/855 to the first 200 (case,step) samples (control-independent:
+  # requires nnunet_pred AND cnisp_pred, so B and C pick the IDENTICAL 200).
+  # n=200 cases here just guarantees the pool is a superset of those 200 samples.
+  target_samples: null
+  n: 200
+  # ROLLBACK: 3/6/9 (12 dropped); threshold 7.0mm on step 9 -- the ORIGINAL
+  # baseline values (git 083453e/21b84f0). thick_threshold_mm was only later
+  # bumped to 10.0; 7.0 is what the baseline this ablation compares against used.
+  # NOTE: build_corrector_dataset.py now reads THIS `steps` list as its default
+  # step filter, so step 12 is dropped at RAW-BUILD time (from the existing
+  # manifest) without re-running data-gen/CNISP. thick_threshold_mm (7.0) is only
+  # applied by build_corrector_data.py (data-gen); reusing the existing manifest
+  # keeps whatever step-9 kept-flags that run used. To honor 7.0 exactly, re-run
+  # build_corrector_data.py with this config first (reuses degraded CTs; does NOT
+  # touch cnisp_pred).
+  steps: [3, 6, 9]
+  thick_threshold_mm: 7.0
+  thick_threshold_steps: [9]
+  modality: ct
+  data_root: nnunet-c/data
+  images_dirname: images
+  nnunet_pred_dirname: nnunet_pred
+  cnisp_pred_dirname: cnisp_pred
+  cnisp_iso_pred_dirname: cnisp_pred_test_iso
+  cnisp_train_iso_pred_dirname: cnisp_pred_train_iso
+  aligned_patch_dirname: aligned_patch
+
+controls:
+  A:
+    dataset_id: 835
+    dataset_name: PHOTON_CT_QAfiltered
+    prelabel_source: none
+    n_channels: 1
+    external: true
+  B:
+    dataset_id: 855
+    dataset_name: PHOTON_CT_CORR_B_stacked
+    prelabel_source: nnunet
+    n_channels: 5
+    external: false
+  C:
+    dataset_id: 845
+    dataset_name: PHOTON_CT_CORR_C_cnisp
+    prelabel_source: cnisp
+    n_channels: 5
+    external: false
