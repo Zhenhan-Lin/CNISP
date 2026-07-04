@@ -121,7 +121,7 @@ def _maybe_load_delta(params: dict, model_state: dict):
 
 
 def _save_final_masks(results: List[Dict], layout, out_dir: Path,
-                      net=None, emit_iso_dir=None, emit_iso_mm: float = 0.5) -> Dict:
+                      net=None, emit_iso_dir=None, emit_iso_mm: float = 0.4765625) -> Dict:
     """Group results by (source, step), merge eyes (canonical), remap, save one
     {1,2,3,4} native mask per (source, step). Also save each eye's optimized
     latent under out_dir/latent/ for reference / cheap re-decode (e.g. at iso).
@@ -314,9 +314,11 @@ def main() -> int:
                          "via the SAME path infer.py uses for TEST iso prelabels "
                          "(incl. observed-meta reframe). Use it to make the "
                          "corrector's TRAIN ch1..4 identical to its TEST ch1..4.")
-    ap.add_argument("--emit-iso-mm", dest="emit_iso_mm", type=float, default=0.5,
-                    help="iso spacing (mm) for --emit-iso-prelabel-dir (default "
-                         "0.5; pass the 835 iso plan spacing to match the builder).")
+    ap.add_argument("--emit-iso-mm", dest="emit_iso_mm", type=float,
+                    default=0.4765625,
+                    help="iso spacing (mm) for --emit-iso-prelabel-dir. Default "
+                         "0.4765625 = the 835 iso plan (nnUNetPlans_iso05) spacing, "
+                         "matching the train/test builder + network plan grid.")
     ap.add_argument("--max-samples", type=int, default=0,
                     help="cap the number of (source,step) samples to run, "
                          "GLOBALLY (0=all). Selected as the first N by sorted "

@@ -91,7 +91,7 @@ print(f"{float(resolve_target_spacing(cfg)[0]):.7f}")
 PY
 )"
     fi
-    ISO_MM="${ISO_MM:-0.5}"
+    ISO_MM="${ISO_MM:-0.4765625}"   # fallback = 835 iso plan (nnUNetPlans_iso05) spacing
     EXTRA_ARGS+=" --emit-iso-prelabel-dir $ISO_OUT --emit-iso-mm $ISO_MM"
     echo "[run_corrector_cnisp] EMIT_ISO=1 -> iso prelabels @ ${ISO_MM}mm -> $ISO_OUT"
 fi

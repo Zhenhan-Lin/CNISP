@@ -73,7 +73,9 @@ def main() -> int:
     ap.add_argument("--meta-subdirs", default="metadata_dataset835,metadata")
     ap.add_argument("--out-dir", default=None,
                     help="iso output root (default nnunet-c/data/cnisp_pred_test_iso)")
-    ap.add_argument("--iso-mm", type=float, default=0.5)
+    ap.add_argument("--iso-mm", type=float, default=0.4765625,
+                    help="iso spacing (mm); default 0.4765625 = the 835 iso plan "
+                         "(nnUNetPlans_iso05) spacing (matches the corrector plan).")
     ap.add_argument("--sources", nargs="*", default=None,
                     help="only build these source_ids (default: all finished)")
     args = ap.parse_args()

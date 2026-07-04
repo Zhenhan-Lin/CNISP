@@ -66,7 +66,7 @@ print(f"{float(resolve_target_spacing(cfg)[0]):.7f}")
 PY
 )"
 fi
-ISO_MM="${ISO_MM:-0.5}"
+ISO_MM="${ISO_MM:-0.4765625}"   # fallback = 835 iso plan (nnUNetPlans_iso05) spacing
 echo "[predict] iso spacing (emit + testset assembly) = $ISO_MM mm"
 
 if [[ "$EXTERNAL" == "1" ]]; then

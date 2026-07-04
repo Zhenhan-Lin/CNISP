@@ -91,8 +91,10 @@ def main():
               "when unset."),
     )
     parser.add_argument(
-        "--emit-iso-mm", type=float, default=0.5,
-        help="Isotropic spacing (mm) for --emit-iso-prelabel-dir (default 0.5).",
+        "--emit-iso-mm", type=float, default=0.4765625,
+        help="Isotropic spacing (mm) for --emit-iso-prelabel-dir. Default "
+             "0.4765625 = the 835 iso plan (nnUNetPlans_iso05) spacing, so the "
+             "nnUNet-C corrector's iso prelabels match its network plan grid.",
     )
     parser.add_argument(
         "--resume-from-latent", action="store_true", default=False,
