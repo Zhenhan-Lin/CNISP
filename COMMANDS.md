@@ -185,3 +185,22 @@ Key comparison outputs (repo-level `comparison/`):
 ls -d "$nnUNet_raw"/DatasetNNN_* "$nnUNet_preprocessed"/DatasetNNN_* "$nnUNet_results"/DatasetNNN_*
 mv "$nnUNet_results/DatasetNNN_<bad_name>" "$nnUNet_results/DatasetNNN_<good_name>"
 ```
+
+**Predict result never changes / doesn't reflect the latest weights** — the nnUNet
+results dir is named `<trainer>__<plan>__<config>`, so **you MUST predict with the
+same `finetune.trainer` you trained with** (i.e. the same config). Mismatch =
+predict silently reads an OLD checkpoint from the *other* trainer's dir:
+- `corrector.yaml`      → `finetune.trainer: nnUNetTrainer_corrector` → weights in
+  `Dataset845_*/nnUNetTrainer_corrector__nnUNetPlansFinetune__3d_fullres/`
+- `corrector_rollback.yaml` → `finetune.trainer: nnUNetTrainer` (stock) → weights in
+  `Dataset845_*/nnUNetTrainer__nnUNetPlansFinetune__3d_fullres/`
+
+So a rollback-trained model must be predicted with the rollback config (and force a
+fresh 5ch input with `REBUILD_TESTSET=1`, since the single-image input is cached):
+```bash
+RUN_CNISP=0 SOURCE=<sid> BUILD_STEPS=auto REBUILD_TESTSET=1 \
+  CONFIG=nnunet-c/configs/corrector_rollback.yaml \
+  bash nnunet-c/run_corrector_predict.sh C 0
+```
+Verify stage-4 prints `checkpoint=.../nnUNetTrainer__.../fold_0/checkpoint_best.pth`
+(the right trainer dir) with **no** `[warn] checkpoint file not found`.
