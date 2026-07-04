@@ -33,6 +33,12 @@ def run(args) -> int:
         with open(args.mask_index) as f:
             index = json.load(f)
     df = load_metrics_df(args.metrics_csv, index, args.tau_mm)
+    if df is None and (args.metrics_csv or args.mask_index):
+        raise SystemExit(
+            "[volume_agreement_summary] --metrics-csv / --mask-index was given "
+            f"but no metrics could be loaded ({args.metrics_csv or args.mask_index} "
+            "missing or empty). Build it first (build_mask_index.py -> "
+            "build_metrics.py); refusing to draw the synthetic placeholder.")
     synth = df is None
     if synth:
         print("[volume_agreement_summary] no metrics -> synthetic layout")

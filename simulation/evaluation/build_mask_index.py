@@ -16,8 +16,11 @@ produced (no re-inference):
                      -> <cnisp-run-dir>/native_space_step_XX/<by_source_id[sid]>
     D. Proposed      nnU->CNISP->nnU corrector (control C corrector)
                      -> <proposed-pred-dir>/<pred_file from the arm-C map>
-    E. Oracle        CNISP shape prior with the GT as input (ceiling)
+    E. Oracle        CNISP shape prior with the GT as input (cnisp-gt ceiling)
                      -> <oracle-run-dir>/native_space_step_XX/<by_source_id[sid]>
+       GT            the true GT itself, a DISTINCT reference arm (default on;
+                     --no-gt-arm to omit) -> the case's gt_label_path
+                     (GT-vs-GT => Dice 1 / ASSD 0, a reference line not a method)
 
 The (case, step, GT path, GT label scheme) universe comes from the corrector
 ``test_cases_map.json`` sidecar(s) (written by build_corrector_testset.py) -- the
@@ -77,6 +80,8 @@ ARM_CASCADE = "Cascade UNet"
 ARM_CNISP = "CNISP"
 ARM_PROPOSED = "Proposed"
 ARM_ORACLE = "Oracle"
+ARM_GT = "GT"
+ALL_ARMS = (ARM_NNUNET, ARM_CASCADE, ARM_CNISP, ARM_PROPOSED, ARM_ORACLE, ARM_GT)
 
 # struct order used to read the corrector map's gt_struct_to_value.
 _ON, _RECTI, _GLOBE, _FAT = "ON", "Recti", "Globe", "Fat"
@@ -214,8 +219,7 @@ def run(args) -> int:
     eff_idx = build_eff_res_index(sweep_pkl) if sweep_pkl else {}
 
     index: List[Dict] = []
-    stats = {a: 0 for a in (ARM_NNUNET, ARM_CASCADE, ARM_CNISP,
-                            ARM_PROPOSED, ARM_ORACLE)}
+    stats = {a: 0 for a in ALL_ARMS}
     n_missing = 0
 
     for (sid, step) in sorted(case_gt):
@@ -265,7 +269,13 @@ def run(args) -> int:
         cp = proposed.get((sid, step))
         if cp is not None:
             _emit(ARM_PROPOSED, cp["pred"], "nnunet", 0)
-        # C. CNISP + E. Oracle -- native_space masks, scheme auto-detected.
+        # GT reference arm: the true GT itself, DISTINCT from Oracle (=cnisp-gt).
+        # GT-vs-GT is perfect by construction (Dice 1 / ASSD 0 / CoV 0) -- an
+        # explicit reference line, not a competing method.
+        if args.gt_arm:
+            _emit(ARM_GT, gt_path, gt_scheme, gt_off)
+
+        # C. CNISP + E. Oracle (cnisp-gt) -- native_space masks, scheme auto-detected.
         for arm, run_dir in ((ARM_CNISP, cnisp_run), (ARM_ORACLE, oracle_run)):
             if run_dir is None:
                 continue
@@ -294,7 +304,7 @@ def run(args) -> int:
         json.dump(index, f, indent=2)
 
     print(f"[mask_index] {len(index)} entries -> {out}")
-    for arm in (ARM_NNUNET, ARM_CASCADE, ARM_CNISP, ARM_PROPOSED, ARM_ORACLE):
+    for arm in ALL_ARMS:
         print(f"    {arm:14s}: {stats[arm]} mask(s)")
     if n_missing:
         print(f"    (missing/absent masks skipped: {n_missing})")
@@ -343,8 +353,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run_tag for arm C when derived from --config "
                          "(default nnunet_pred).")
     ap.add_argument("--oracle-run-tag", default="atlas_gt",
-                    help="run_tag for arm E when derived from --config "
-                         "(default atlas_gt).")
+                    help="run_tag for arm E (Oracle = cnisp-gt) when derived from "
+                         "--config (default atlas_gt).")
+    ap.add_argument("--gt-arm", action=argparse.BooleanOptionalAction, default=True,
+                    help="Emit a separate 'GT' reference arm from each case's true "
+                         "GT (default on). This is DISTINCT from Oracle (=cnisp-gt): "
+                         "GT-vs-GT is perfect by construction (Dice 1 / ASSD 0 / "
+                         "CoV 0), a reference line rather than a method. Pass "
+                         "--no-gt-arm to omit it.")
     ap.add_argument("--sweep-pkl", default=None,
                     help="sweep_results.pkl for the eff_res join. Default: "
                          "<cnisp-run-dir>/sweep_results.pkl.")

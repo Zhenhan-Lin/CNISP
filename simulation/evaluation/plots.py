@@ -31,9 +31,11 @@ mpl.rcParams.update({
 LEGEND = {"nnUNet": "nnUNet (baseline)",
           "Cascade UNet": "Cascade UNet (nnU\u2192nnU self-correction)",
           "CNISP": "CNISP (shape prior only)",
-          "Proposed": "Proposed (nnU\u2192CNISP\u2192nnU)", "Oracle": "CNISP+GT (oracle)"}
+          "Proposed": "Proposed (nnU\u2192CNISP\u2192nnU)",
+          "Oracle": "Oracle (CNISP+GT ceiling)",
+          "GT": "Ground truth (reference)"}
 COLOR = {"nnUNet": "#d62728", "Cascade UNet": "#9467bd", "CNISP": "#1f77b4",
-         "Proposed": "#2ca02c", "Oracle": "#7f7f7f"}
+         "Proposed": "#2ca02c", "Oracle": "#7f7f7f", "GT": "#000000"}
 
 
 def _foot(fig, synthetic: bool) -> None:
@@ -47,10 +49,11 @@ def stability_figure(cov_mean: Dict, cov_sd: Dict, on_range: Dict,
     """Cross-resolution volume stability: CoV bars + optic-nerve per-scan range."""
     fig = plt.figure(figsize=(11, 4.4))
     gs = gridspec.GridSpec(1, 2, width_ratios=[2.1, 1], wspace=0.28)
-    ax = fig.add_subplot(gs[0]); x = np.arange(len(STRUCTURES)); w = 0.16
+    ax = fig.add_subplot(gs[0]); x = np.arange(len(STRUCTURES))
+    n_m = len(METHODS); w = 0.8 / n_m; c = (n_m - 1) / 2.0
     for i, m in enumerate(METHODS):
         vals = [cov_mean[m][s] for s in STRUCTURES]; err = [cov_sd[m][s] for s in STRUCTURES]
-        ax.bar(x + (i - 2) * w, vals, w, yerr=err, capsize=2.5, color=COLOR[m],
+        ax.bar(x + (i - c) * w, vals, w, yerr=err, capsize=2.5, color=COLOR[m],
                label=LEGEND[m], ec="white", lw=0.5, error_kw=dict(lw=0.8))
     ax.axhline(10, ls=":", color="0.4")
     ax.text(len(STRUCTURES) - 0.55, 10.4, "10% (radiomics stability threshold)",
@@ -65,7 +68,7 @@ def stability_figure(cov_mean: Dict, cov_sd: Dict, on_range: Dict,
         b.set_facecolor(COLOR[METHODS[i]]); b.set_alpha(0.6); b.set_edgecolor("0.3")
     for k in ("cmedians", "cbars", "cmins", "cmaxes"):
         if k in parts: parts[k].set_color("0.3")
-    axb.set_xticks(range(1, 6)); axb.set_xticklabels(METHODS, rotation=30, ha="right", fontsize=8.5)
+    axb.set_xticks(range(1, len(METHODS) + 1)); axb.set_xticklabels(METHODS, rotation=30, ha="right", fontsize=8.5)
     axb.set_ylabel("Per-scan volume range\nacross resolutions (% of mean)  \u2193")
     axb.set_title("(b)  Optic nerve: per-scan wander", loc="left", fontsize=10.5)
     _foot(fig, synthetic)
@@ -114,7 +117,7 @@ def volume_agreement_figure(per_arm: Dict, signed: Dict,
     for k in ("cmedians", "cbars", "cmins", "cmaxes"):
         if k in parts: parts[k].set_color("0.3")
     ax_c.axhline(0, color="0.55", ls=":", lw=0.9)
-    ax_c.set_xticks(range(1, 6)); ax_c.set_xticklabels(METHODS, rotation=25, ha="right", fontsize=8.5)
+    ax_c.set_xticks(range(1, len(METHODS) + 1)); ax_c.set_xticklabels(METHODS, rotation=25, ha="right", fontsize=8.5)
     ax_c.set_ylabel("signed volume error (%)"); ax_c.set_title("(c)  Signed volume error across methods", loc="left")
     fig.suptitle("Volume accuracy on the GT set: near-zero bias, tight limits of agreement, "
                  "no thickness-dependent drift for the proposed method", fontsize=10.6, y=1.02)
@@ -134,7 +137,7 @@ def surface_figure(metrics: Dict[str, Dict[str, np.ndarray]],
                         showfliers=False, medianprops=dict(color="0.15", lw=1.4))
         for i, b in enumerate(bp["boxes"]):
             b.set_facecolor(COLOR[METHODS[i]]); b.set_alpha(0.75); b.set_edgecolor("0.3")
-        ax.set_xticks(range(1, 6)); ax.set_xticklabels(METHODS, rotation=30, ha="right", fontsize=8.5)
+        ax.set_xticks(range(1, len(METHODS) + 1)); ax.set_xticklabels(METHODS, rotation=30, ha="right", fontsize=8.5)
         ax.set_title(f"{name}  {arrows[name]}", loc="left")
     axes[0].set_ylabel("value")
     fig.suptitle("Surface quality: the proposed masks are closer to the reference boundary and smoother",

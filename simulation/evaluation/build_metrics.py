@@ -39,7 +39,8 @@ def run(args) -> int:
     if not index:
         print(f"[build_metrics] empty MASK_INDEX in {args.mask_index}", file=sys.stderr)
         return 2
-    df = build_metrics_table(index, tau=args.tau_mm, save_csv=args.out_csv)
+    df = build_metrics_table(index, tau=args.tau_mm, save_csv=args.out_csv,
+                             progress=True)
     print(f"[build_metrics] {len(index)} mask(s) -> {len(df)} row(s) -> {args.out_csv}")
     return 0
 

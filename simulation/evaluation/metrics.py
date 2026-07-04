@@ -17,6 +17,8 @@ Depends on numpy + scipy.ndimage + nibabel (+ pandas for the table writer).
 
 from __future__ import annotations
 
+import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -26,13 +28,15 @@ from scipy import ndimage
 # Foreground structures in DISPLAY-name order, used everywhere downstream.
 STRUCTURES: List[str] = ["Globe", "Optic nerve", "Recti", "Fat"]
 
-# The five evaluated pipelines (arms), in A-E display order:
+# The evaluated pipelines (arms), in A-E display order, plus the GT reference:
 #   A. nnUNet       image-conditioned nnUNet on the sparse CT (baseline)
 #   B. Cascade UNet nnU->nnU self-correction (control B, nnUNet-prelabel corrector)
 #   C. CNISP        CNISP shape prior with the nnUNet sparse pred as input
 #   D. Proposed     nnU->CNISP->nnU corrector (control C, CNISP-prelabel corrector)
-#   E. Oracle       CNISP shape prior with the GT as input (ceiling)
-METHODS: List[str] = ["nnUNet", "Cascade UNet", "CNISP", "Proposed", "Oracle"]
+#   E. Oracle       CNISP shape prior with the GT as input (cnisp-gt ceiling)
+#   GT              the true ground truth itself -- a reference line, NOT a method
+#                   (Dice 1 / ASSD 0 / CoV 0 by construction). Distinct from Oracle.
+METHODS: List[str] = ["nnUNet", "Cascade UNet", "CNISP", "Proposed", "Oracle", "GT"]
 
 # structure -> integer label, per source scheme (keys are the DISPLAY names).
 SCHEMES: Dict[str, Dict[str, int]] = {
@@ -73,6 +77,18 @@ def surface_metrics(pred: np.ndarray, gt: np.ndarray, spacing,
     pred, gt = pred.astype(bool), gt.astype(bool)
     if pred.sum() == 0 or gt.sum() == 0:
         return dict(assd=np.nan, hd95=np.nan, nsd=np.nan)
+    # Crop to the (pred | gt) bounding box + a small margin before the distance
+    # transforms. The orbital structures occupy a tiny fraction of the ~512^3
+    # head volume, so the full-volume EDT is almost all wasted work. Both masks
+    # sit entirely inside the crop, so every surface voxel and its nearest
+    # opposite-surface distance is computed exactly -- the margin keeps the
+    # erosion (border_value=0) from clipping mask voxels at the crop edge.
+    union = pred | gt
+    coords = np.argwhere(union)
+    lo = np.maximum(coords.min(0) - 2, 0)
+    hi = np.minimum(coords.max(0) + 3, np.asarray(union.shape))
+    sl = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi))
+    pred, gt = pred[sl], gt[sl]
     ps, gs = _surface(pred), _surface(gt)
     dt_to_gt = ndimage.distance_transform_edt(~gs, sampling=spacing)
     dt_to_pred = ndimage.distance_transform_edt(~ps, sampling=spacing)
@@ -163,7 +179,8 @@ def compute_case_metrics(pred_path: PathLike, gt_path: PathLike,
 
 
 def build_metrics_table(index: List[Dict], tau: float = DEFAULT_TAU_MM,
-                        save_csv: Optional[PathLike] = None):
+                        save_csv: Optional[PathLike] = None,
+                        progress: bool = False):
     """Turn a MASK_INDEX into a tidy long-format DataFrame (one row per structure).
 
     ``index``: list of dicts, one per (case, arm, step, mode) mask::
@@ -173,11 +190,19 @@ def build_metrics_table(index: List[Dict], tau: float = DEFAULT_TAU_MM,
 
     Writes ``save_csv`` when given and returns the DataFrame. This is the shared
     interface consumed by every ``*_summary`` driver (like the paired CSV is the
-    interface for the comparison summaries).
+    interface for the comparison summaries). ``progress`` prints a per-mask
+    heartbeat to stderr (each mask does a world-aware resample + per-structure
+    distance transforms, so a full index is minutes of silent CPU otherwise).
     """
     import pandas as pd
     recs = []
-    for it in index:
+    n = len(index)
+    t0 = time.time()
+    for i, it in enumerate(index, 1):
+        if progress:
+            print(f"[build_metrics] {i}/{n}  {it.get('case')} / {it.get('arm')} "
+                  f"/ step{it.get('step')}  ({time.time() - t0:.0f}s elapsed)",
+                  file=sys.stderr, flush=True)
         rows = compute_case_metrics(it["pred_path"], it["gt_path"],
                                     it["pred_scheme"], it["gt_scheme"], tau,
                                     it.get("offset_pred", 0), it.get("offset_gt", 0))
