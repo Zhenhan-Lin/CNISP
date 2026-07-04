@@ -97,6 +97,14 @@ def main() -> int:
                          "INDEPENDENT basis) so --control B and --control C select "
                          "the IDENTICAL N samples -- the only difference being which "
                          "prelabel fills ch1..4.")
+    ap.add_argument("--steps", default=None,
+                    help="comma-separated step sizes to INCLUDE, e.g. 3,6,9. "
+                         "Only (case,step) whose step is in this set are built; "
+                         "everything else in the manifest is skipped. DEFAULT "
+                         "(unset): use corrector_data.steps from the config (so a "
+                         "rollback config with steps: [3,6,9] drops step 12 at "
+                         "build time without re-running data-gen). Pass 'all' to "
+                         "build every step present in the manifest.")
     ap.add_argument("--raw-root", default=None, help="override $nnUNet_raw")
     ap.add_argument("--prelabel-grid", choices=["iso", "native"], default="iso",
                     help="control C ch1..4 source: 'iso' (default) = CNISP "
@@ -183,6 +191,20 @@ def main() -> int:
     # keep the per-control predicate (ct + this control's prelabel [+ cnisp when
     # --require-cnisp] + gt).
     nnunet_dir = data_root / cd.get("nnunet_pred_dirname", "nnunet_pred")
+
+    # Step filter (drops e.g. step 12 for a rollback WITHOUT re-running data-gen):
+    # --steps > config corrector_data.steps > all steps in the manifest.
+    if args.steps is not None and args.steps.strip().lower() == "all":
+        steps_filter = None
+    elif args.steps is not None:
+        steps_filter = {int(s) for s in args.steps.split(",") if s.strip()}
+    elif cd.get("steps"):
+        steps_filter = {int(s) for s in cd["steps"]}
+    else:
+        steps_filter = None
+    print(f"[build] steps filter = "
+          f"{sorted(steps_filter) if steps_filter is not None else 'all (manifest)'}")
+
     cap = max(0, int(args.max_samples))
     need_cnisp = bool(args.require_cnisp) or cap > 0
     need_nnunet = cap > 0
@@ -194,6 +216,8 @@ def main() -> int:
             skipped += 1
             continue
         for step in sorted(int(s) for s in entry.get("steps", {})):
+            if steps_filter is not None and step not in steps_filter:
+                continue
             sinfo = entry["steps"][str(step)]
             if not sinfo.get("kept"):
                 continue
