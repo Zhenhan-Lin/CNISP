@@ -40,6 +40,8 @@ def run(args) -> int:
             "missing or empty). Build it first (build_mask_index.py -> "
             "build_metrics.py); refusing to draw the synthetic placeholder.")
     synth = df is None
+    if not synth and args.common_samples:
+        df = aggregate.restrict_to_common(df)
     if synth:
         print("[volume_agreement_summary] no metrics -> synthetic layout")
         per_arm, signed = synthetic.volume_agreement()
@@ -60,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ba-structure", default=aggregate.DEFAULT_BA_STRUCTURE,
                     help=f"structure for Bland-Altman (default {aggregate.DEFAULT_BA_STRUCTURE}).")
     ap.add_argument("--mode", default=aggregate.DEFAULT_MODE)
+    ap.add_argument("--common-samples", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Restrict to the (case, step) common to every compared "
+                         "method (default on). --no-common-samples uses each "
+                         "method's full set.")
     ap.add_argument("--tau-mm", type=float, default=DEFAULT_TAU_MM)
     return ap
 

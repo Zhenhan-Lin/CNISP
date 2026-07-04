@@ -20,6 +20,37 @@ DEFAULT_MODE = "thick"          # sweep mode aggregated for CoV / surface panels
 DEFAULT_BA_STRUCTURE = "Globe"  # structure shown in the Bland-Altman panels
 
 
+def restrict_to_common(df, methods=None, verbose: bool = True):
+    """Keep only (case, step) rows present for EVERY compared method.
+
+    Makes every figure average over the IDENTICAL (source, step) population, so a
+    difference reflects method quality rather than which cases a method happened
+    to cover (e.g. Proposed producing fewer (case, step) than nnUNet). This is the
+    figure-side analogue of ``eval_corrector.py --intersect-with``.
+
+    ``methods`` defaults to every arm present in ``df`` EXCEPT ``GT`` (the GT
+    reference is derived from the GT and is present for every case, so it never
+    constrains the intersection; its rows are kept on the surviving keys).
+    """
+    if methods is None:
+        present = set(df["arm"])
+        methods = [m for m in METHODS if m != "GT" and m in present]
+    if not methods:
+        return df
+    sub = df[df["arm"].isin(methods)]
+    counts = sub.groupby(["case", "step"])["arm"].nunique()
+    common = counts[counts == len(methods)].index          # (case, step) with all
+    keep = df.set_index(["case", "step"]).index.isin(common)
+    out = df.loc[keep].reset_index(drop=True)
+    if verbose:
+        import sys
+        n_all = df.groupby(["case", "step"]).ngroups
+        print(f"[common] {len(common)}/{n_all} (case, step) common to all "
+              f"{len(methods)} methods {methods}; kept {len(out)}/{len(df)} rows.",
+              file=sys.stderr)
+    return out
+
+
 def stability(df, mode: str = DEFAULT_MODE) -> Tuple[Dict, Dict, Dict]:
     """Volume CoV across step-sizes per (method, structure) + optic-nerve range.
 
@@ -63,5 +94,5 @@ def surface(df, mode: str = DEFAULT_MODE) -> Dict[str, Dict[str, np.ndarray]]:
             "Surface Dice @1mm": {m: g[g.arm == m]["nsd"].dropna().values for m in METHODS}}
 
 
-__all__ = ["stability", "volume_agreement", "surface",
+__all__ = ["stability", "volume_agreement", "surface", "restrict_to_common",
            "DEFAULT_MODE", "DEFAULT_BA_STRUCTURE"]

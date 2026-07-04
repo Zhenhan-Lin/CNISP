@@ -38,6 +38,36 @@ COLOR = {"nnUNet": "#d62728", "Cascade UNet": "#9467bd", "CNISP": "#1f77b4",
          "Proposed": "#2ca02c", "Oracle": "#7f7f7f", "GT": "#000000"}
 
 
+def _violin(ax, series_by_method: Dict, widths: float, rotation: int = 30) -> None:
+    """Per-METHODS violin that tolerates empty/degenerate arms.
+
+    matplotlib's ``violinplot`` raises on a zero-size array (e.g. an arm with no
+    rows in the metrics table, or the GT reference before the table is rebuilt),
+    which would abort the whole figure. We therefore plot only the non-empty arms
+    at their fixed METHODS x-slot, colour each by its own method, and still label
+    every slot. A constant arm (e.g. GT range == 0) is jittered infinitesimally so
+    its KDE renders instead of collapsing.
+    """
+    positions, data, kept = [], [], []
+    for i, m in enumerate(METHODS):
+        arr = np.asarray(series_by_method.get(m, []), dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            continue
+        if np.ptp(arr) == 0:
+            arr = arr + np.linspace(-1e-6, 1e-6, arr.size)
+        positions.append(i + 1); data.append(arr); kept.append(m)
+    if data:
+        parts = ax.violinplot(data, positions=positions, showmedians=True, widths=widths)
+        for b, m in zip(parts["bodies"], kept):
+            b.set_facecolor(COLOR[m]); b.set_alpha(0.6); b.set_edgecolor("0.3")
+        for k in ("cmedians", "cbars", "cmins", "cmaxes"):
+            if k in parts:
+                parts[k].set_color("0.3")
+    ax.set_xticks(range(1, len(METHODS) + 1))
+    ax.set_xticklabels(METHODS, rotation=rotation, ha="right", fontsize=8.5)
+
+
 def _foot(fig, synthetic: bool) -> None:
     if synthetic:
         fig.text(0.995, 0.004, "Illustrative layout \u00b7 synthetic placeholder data",
@@ -63,12 +93,7 @@ def stability_figure(cov_mean: Dict, cov_sd: Dict, on_range: Dict,
     ax.set_title("(a)  Lower cross-resolution variability = better harmonization", loc="left")
     ax.legend(fontsize=8, loc="upper left")
     axb = fig.add_subplot(gs[1])
-    parts = axb.violinplot([on_range[m] for m in METHODS], showmedians=True, widths=0.8)
-    for i, b in enumerate(parts["bodies"]):
-        b.set_facecolor(COLOR[METHODS[i]]); b.set_alpha(0.6); b.set_edgecolor("0.3")
-    for k in ("cmedians", "cbars", "cmins", "cmaxes"):
-        if k in parts: parts[k].set_color("0.3")
-    axb.set_xticks(range(1, len(METHODS) + 1)); axb.set_xticklabels(METHODS, rotation=30, ha="right", fontsize=8.5)
+    _violin(axb, on_range, widths=0.8, rotation=30)
     axb.set_ylabel("Per-scan volume range\nacross resolutions (% of mean)  \u2193")
     axb.set_title("(b)  Optic nerve: per-scan wander", loc="left", fontsize=10.5)
     _foot(fig, synthetic)
@@ -111,13 +136,8 @@ def volume_agreement_figure(per_arm: Dict, signed: Dict,
     ax_a.text(-0.17, 0.98, "over-\nestimate", transform=ax_a.transAxes, fontsize=7.5, color="0.4", va="top")
     ax_a.text(-0.17, 0.02, "under-\nestimate", transform=ax_a.transAxes, fontsize=7.5, color="0.4", va="bottom")
     ax_c = fig.add_subplot(gs[2])
-    parts = ax_c.violinplot([signed[m] for m in METHODS], showmedians=True, widths=0.85)
-    for i, b in enumerate(parts["bodies"]):
-        b.set_facecolor(COLOR[METHODS[i]]); b.set_alpha(0.62); b.set_edgecolor("0.3")
-    for k in ("cmedians", "cbars", "cmins", "cmaxes"):
-        if k in parts: parts[k].set_color("0.3")
+    _violin(ax_c, signed, widths=0.85, rotation=25)
     ax_c.axhline(0, color="0.55", ls=":", lw=0.9)
-    ax_c.set_xticks(range(1, len(METHODS) + 1)); ax_c.set_xticklabels(METHODS, rotation=25, ha="right", fontsize=8.5)
     ax_c.set_ylabel("signed volume error (%)"); ax_c.set_title("(c)  Signed volume error across methods", loc="left")
     fig.suptitle("Volume accuracy on the GT set: near-zero bias, tight limits of agreement, "
                  "no thickness-dependent drift for the proposed method", fontsize=10.6, y=1.02)
