@@ -26,13 +26,15 @@ of the native GT + its struct->value scheme. Effective resolution per (source,
 step) is joined from the CNISP ``sweep_results.pkl`` so every arm lands on the
 same eff_res the comparison figures use.
 
-Every arm mask is Diced against the SAME native GT on the SAME grid downstream
-(``metrics.compute_case_metrics``), so this builder verifies pred.shape == GT.shape
-and skips (with a warning) any mask that is off-grid, rather than letting the
-metrics assert abort the whole run. nnUNet-scheme arms (A/B/D) are recorded as
-``pred_scheme=nnunet, offset_pred=0``; the CNISP native masks (C/E) are written in
-each source's ORIGINAL scheme (nnUNet for chk_/deployment, labelfusion for atlas,
-possibly with a negative offset), so their scheme+offset is auto-detected per mask.
+Every arm mask is Diced against the SAME native GT downstream
+(``metrics.compute_case_metrics``), which resamples the prediction onto the GT
+voxel grid by world coordinates (order 0) when the grids differ -- so masks
+exported on the iso-0.5 head grid (the corrector output) or any other grid are
+handled there; this builder does NOT gate on geometry. nnUNet-scheme arms (A/B/D)
+are recorded as ``pred_scheme=nnunet, offset_pred=0``; the CNISP native masks
+(C/E) are written in each source's ORIGINAL scheme (nnUNet for chk_/deployment,
+labelfusion for atlas, possibly with a negative offset), so their scheme+offset
+is auto-detected per mask.
 
 Usage
 -----
@@ -211,31 +213,9 @@ def run(args) -> int:
     exclude = tuple(p for p in (args.exclude_source_prefix or "").split(",") if p)
     eff_idx = build_eff_res_index(sweep_pkl) if sweep_pkl else {}
 
-    # ── GT geometry cache (load each GT once) ──
-    gt_shape_cache: Dict[str, Tuple[int, ...]] = {}
-
-    def _gt_shape(gt_path: Path) -> Optional[Tuple[int, ...]]:
-        key = str(gt_path)
-        if key not in gt_shape_cache:
-            try:
-                gt_shape_cache[key] = tuple(int(s) for s in
-                                            nib.load(str(gt_path)).shape[:3])
-            except Exception as e:  # noqa: BLE001
-                print(f"  [skip] GT unreadable {gt_path} ({e})", file=sys.stderr)
-                gt_shape_cache[key] = None
-        return gt_shape_cache[key]
-
-    def _shape_of(path: Path) -> Optional[Tuple[int, ...]]:
-        try:
-            return tuple(int(s) for s in nib.load(str(path)).shape[:3])
-        except Exception as e:  # noqa: BLE001
-            print(f"    [skip] mask unreadable {path} ({e})", file=sys.stderr)
-            return None
-
     index: List[Dict] = []
     stats = {a: 0 for a in (ARM_NNUNET, ARM_CASCADE, ARM_CNISP,
                             ARM_PROPOSED, ARM_ORACLE)}
-    n_off_grid = 0
     n_missing = 0
 
     for (sid, step) in sorted(case_gt):
@@ -243,8 +223,9 @@ def run(args) -> int:
             continue
         gt_path = case_gt[(sid, step)]["gt"]
         stv = case_gt[(sid, step)]["stv"]
-        gshape = _gt_shape(gt_path)
-        if gshape is None:
+        if not gt_path.exists():
+            print(f"  [skip] {sid} step{step:02d}: GT missing ({gt_path})",
+                  file=sys.stderr)
             continue
         try:
             gt_scheme, gt_off = _gt_scheme_offset(stv)
@@ -255,17 +236,13 @@ def run(args) -> int:
 
         def _emit(arm: str, pred_path: Optional[Path], pred_scheme: str,
                   off_pred: int) -> None:
-            nonlocal n_off_grid, n_missing
+            # metrics.compute_case_metrics resamples pred onto the GT grid
+            # (world-aware, order 0), so a differing pred grid is expected and
+            # handled there -- the builder only records the mask, it does not
+            # gate on geometry.
+            nonlocal n_missing
             if pred_path is None or not pred_path.exists():
                 n_missing += 1
-                return
-            pshape = _shape_of(pred_path)
-            if pshape is None:
-                return
-            if pshape != gshape:
-                n_off_grid += 1
-                print(f"    [skip {arm}] {sid} step{step:02d}: pred grid "
-                      f"{pshape} != GT grid {gshape}", file=sys.stderr)
                 return
             index.append({
                 "case": sid, "arm": arm, "step": int(step), "mode": exp,
@@ -302,11 +279,6 @@ def run(args) -> int:
             if not mpath.exists():
                 n_missing += 1
                 continue
-            if _shape_of(mpath) != gshape:
-                n_off_grid += 1
-                print(f"    [skip {arm}] {sid} step{step:02d}: off-grid",
-                      file=sys.stderr)
-                continue
             try:
                 arr = np.asanyarray(nib.load(str(mpath)).dataobj)
                 scheme, bg = _detect_scheme_offset(arr)
@@ -326,9 +298,8 @@ def run(args) -> int:
         print(f"    {arm:14s}: {stats[arm]} mask(s)")
     if n_missing:
         print(f"    (missing/absent masks skipped: {n_missing})")
-    if n_off_grid:
-        print(f"    (off-grid masks skipped: {n_off_grid} -- resample onto the "
-              f"GT grid first if these are expected)")
+    print("    (preds on a different grid than GT are resampled onto the GT "
+          "grid at metrics time -- world-aware, order 0)")
     if not index:
         print("[mask_index] EMPTY index -- check the arm paths above.",
               file=sys.stderr)

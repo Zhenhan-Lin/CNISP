@@ -111,21 +111,54 @@ def compute_case_metrics(pred_path: PathLike, gt_path: PathLike,
                          pred_scheme: str, gt_scheme: str,
                          tau: float = DEFAULT_TAU_MM,
                          offset_pred: int = 0, offset_gt: int = 0) -> List[Dict]:
-    """Per-structure metric dicts for one (prediction, GT) pair on the same grid."""
-    pdat, pspc = load_labelmap(pred_path, offset_pred)
-    gdat, gspc = load_labelmap(gt_path, offset_gt)
-    assert pdat.shape == gdat.shape, (
-        f"pred {pdat.shape} vs gt {gdat.shape}: resample prediction to the GT grid first")
+    """Per-structure metric dicts for one (prediction, GT) pair.
+
+    The prediction is resampled onto the GT voxel grid by WORLD coordinates
+    (nearest / order 0, so labels stay discrete) whenever the two grids differ
+    -- the SAME convention ``eval_corrector.py`` / ``compare_native.py`` use, and
+    the reason the corrector masks (exported on the iso-0.5 head grid) can be
+    Diced against the original-resolution GT. GT is never resampled. Every metric
+    (Dice, surface, volume) is then computed on the shared GT grid, so ``vol_pred``
+    and ``vol_gt`` use the same voxel volume.
+    """
+    import nibabel as nib
+    from nibabel.processing import resample_from_to
+
+    gimg = nib.load(str(gt_path))
+    gdat = np.asarray(gimg.dataobj)
+    if offset_gt:
+        gdat = np.clip(gdat + offset_gt, 0, None)
+    gdat = gdat.astype(np.int32)
+    gspc = np.array(gimg.header.get_zooms()[:3], dtype=float)
+
+    pimg = nib.load(str(pred_path))
+    pdat = np.asarray(pimg.dataobj)
+    if offset_pred:
+        pdat = np.clip(pdat + offset_pred, 0, None)
+    pdat = pdat.astype(np.int32)
+
+    same_grid = (pdat.shape == gdat.shape
+                 and np.allclose(np.asarray(pimg.affine, dtype=float),
+                                 np.asarray(gimg.affine, dtype=float), atol=1e-3))
+    if not same_grid:
+        pimg_off = nib.Nifti1Image(pdat.astype(np.int16),
+                                   np.asarray(pimg.affine, dtype=float))
+        pres = resample_from_to(
+            pimg_off, (tuple(int(x) for x in gdat.shape),
+                       np.asarray(gimg.affine, dtype=float)),
+            order=0, mode="constant", cval=0)
+        pdat = np.asarray(pres.dataobj).astype(np.int32)
+
     pm = binary_structures(pdat, pred_scheme)
     gm = binary_structures(gdat, gt_scheme)
-    vv_p, vv_g = float(np.prod(pspc)), float(np.prod(gspc))
+    vv = float(np.prod(gspc))   # both masks now live on the GT grid
     out = []
     for s in STRUCTURES:
-        sm = surface_metrics(pm[s], gm[s], pspc, tau)
+        sm = surface_metrics(pm[s], gm[s], gspc, tau)
         out.append(dict(structure=s,
                         dice=compute_dice(pm[s], gm[s]),
-                        vol_pred=float(pm[s].sum()) * vv_p,
-                        vol_gt=float(gm[s].sum()) * vv_g, **sm))
+                        vol_pred=float(pm[s].sum()) * vv,
+                        vol_gt=float(gm[s].sum()) * vv, **sm))
     return out
 
 
