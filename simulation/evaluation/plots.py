@@ -28,10 +28,11 @@ mpl.rcParams.update({
     "savefig.dpi": 200, "savefig.bbox": "tight",
 })
 
-LEGEND = {"nnU-Net": "nnU-Net (baseline)", "CNISP": "CNISP (shape prior only)",
-          "nnU\u2192nnU": "nnU\u2192nnU (self-correction)",
+LEGEND = {"nnUNet": "nnUNet (baseline)",
+          "Cascade UNet": "Cascade UNet (nnU\u2192nnU self-correction)",
+          "CNISP": "CNISP (shape prior only)",
           "Proposed": "Proposed (nnU\u2192CNISP\u2192nnU)", "Oracle": "CNISP+GT (oracle)"}
-COLOR = {"nnU-Net": "#d62728", "CNISP": "#1f77b4", "nnU\u2192nnU": "#9467bd",
+COLOR = {"nnUNet": "#d62728", "Cascade UNet": "#9467bd", "CNISP": "#1f77b4",
          "Proposed": "#2ca02c", "Oracle": "#7f7f7f"}
 
 
@@ -95,12 +96,12 @@ def volume_agreement_figure(per_arm: Dict, signed: Dict,
     fig = plt.figure(figsize=(13, 4.4))
     gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1.12, 1.05], wspace=0.33)
     ax_a = fig.add_subplot(gs[0]); ax_a.set_ylabel("V$_{pred}$ \u2212 V$_{GT}$  (mm\u00b3)")
-    _bland_altman(ax_a, fig, **{k: per_arm["nnU-Net"][k] for k in ("v_pred", "v_gt", "thickness")},
-                  title="(a)  Bland\u2013Altman \u2014 nnU-Net", col=COLOR["nnU-Net"])
+    _bland_altman(ax_a, fig, **{k: per_arm["nnUNet"][k] for k in ("v_pred", "v_gt", "thickness")},
+                  title="(a)  Bland\u2013Altman \u2014 nnUNet", col=COLOR["nnUNet"])
     ax_b = fig.add_subplot(gs[1], sharey=ax_a)
     _bland_altman(ax_b, fig, **{k: per_arm["Proposed"][k] for k in ("v_pred", "v_gt", "thickness")},
                   title="(b)  Bland\u2013Altman \u2014 Proposed", col=COLOR["Proposed"], colorbar=True)
-    all_diff = np.concatenate([per_arm["nnU-Net"]["v_pred"] - per_arm["nnU-Net"]["v_gt"],
+    all_diff = np.concatenate([per_arm["nnUNet"]["v_pred"] - per_arm["nnUNet"]["v_gt"],
                                per_arm["Proposed"]["v_pred"] - per_arm["Proposed"]["v_gt"]])
     pad = 0.15 * (all_diff.max() - all_diff.min() + 1)
     ax_a.set_ylim(all_diff.min() - pad, all_diff.max() + pad)

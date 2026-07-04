@@ -14,7 +14,7 @@ MASK_INDEX json = a list of dicts, one per (case, arm, step, mode) mask::
      "gt_path": ".../atlas_labels/...nii.gz",
      "pred_scheme": "nnunet", "gt_scheme": "labelfusion", "offset_gt": 1000}
 
-arms: nnU-Net / CNISP / nnU->nnU / Proposed / Oracle.
+arms (A-E): nnUNet / Cascade UNet / CNISP / Proposed / Oracle.
 
 Usage:
     python simulation/evaluation/build_metrics.py \

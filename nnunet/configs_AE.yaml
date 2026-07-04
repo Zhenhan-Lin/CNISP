@@ -1,0 +1,97 @@
+# ── A-E paper-figure comparison config (THICK, corrector experiment) ──
+# Clone of configs_v6_5_gt.yaml whose ONLY difference is the method LABELS: the
+# comparison figures (Dice vs effective resolution) come out with the paper's
+# A-E naming instead of the internal nnUNet-C / CNISP-v6.5-gt strings.
+#
+#   A. nnUNet        nnUNet-sparse baseline (label kept as "nnUNet-sparse" -- it
+#                    is the sparse-CT sweep; see note below to force "nnUNet").
+#   B. Cascade UNet  control B corrector (Dataset855, nnU->nnU self-correction).
+#   C. CNISP         corrector_gt CNISP run (fed control C's prelabels).
+#   D. Proposed      control C corrector (Dataset845, nnU->CNISP->nnU).
+#   E. Oracle        atlas_gt CNISP run (optimized against the manual GT).
+#
+# Dices only artefacts already on disk; regenerates nothing.
+
+# ── nnUNet inference identity ─────────────────────────────────────
+dataset_id: 835
+dataset_name: PHOTON_CT_QAfiltered
+plan: nnUNetPlans
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+folds: [2]
+gpu_id: 0
+
+# ── CNISP-side artefacts (v6.5-gt, the corrector's CNISP) ─────────
+cnisp_paths_yaml: /fs5/p_masi/linz18/local_projects/CNISP/orbital_shape_prior_st1/configs/paths.yaml
+cnisp_model_name: orbital_ad_v6_5_gt
+cnisp_train_yaml: train_v6_5_gt.yaml
+
+# ── CNISP curves (C. CNISP + E. Oracle) ──────────────────────────
+# Each run_tag MUST already have runs/thick/<run_tag>/native_space_step_*/ masks.
+cnisp_runs_to_compare:
+  - run_tag: corrector_gt
+    method_label: CNISP
+  - run_tag: atlas_gt
+    method_label: Oracle
+
+deployment_gt_dirname_for_chk: prediction/native
+
+# ── nnUNet-C corrector arms (B. Cascade UNet + D. Proposed) ───────
+# arm C (Proposed) points at the predictions/backup/ dir per the requested run;
+# arm B (Cascade UNet) uses the standard stacked dir. Each eval_csv is produced
+# by nnunet-c/diagnostics/eval_corrector.py (see the command list).
+nnunet_c_runs:
+  - {method_label: "Cascade UNet", eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_B_stacked/eval_B_fold0.csv}
+  - {method_label: "Proposed",     eval_csv: nnunet-c/predictions/backup/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv}
+
+# Legacy single-arm keys (standalone nnUNet-C bundle in run_pipeline.sh).
+nnunet_c_method_label: "Proposed"
+nnunet_c_eval_csv: nnunet-c/predictions/backup/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv
+
+# ── Source CT discovery ───────────────────────────────────────────
+atlas_image_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_images
+pivot_csv: /fs5/p_masi/linz18/QA_record/table_collection/PHOTON_CP_QA_pivot_table.csv
+pivot_image_path_columns: [ct_image_path, image_path, image, ct, t1]
+pivot_subject_column: subject_label
+
+# ── Working directories ───────────────────────────────────────────
+work_dir: /fs5/p_masi/linz18/local_projects/CNISP/nnunet
+smore_out_root: /fs5/p_masi/linz18/data/smore_resolved_images
+smore_suffix: _smore
+
+# ── Sparse-CT sweep ───────────────────────────────────────────────
+cnisp_slice_step_axis: 2
+sparse_axis_alignment_min: 0.95
+sparse_eff_res_tolerance: 0.05
+sparse_eff_res_max_drift: 0.30
+
+# ── High-eff_res start-offset fan-out — start=0 only for thick ─────
+start_offset_eff_res_min_mm: 3.5
+start_offsets: [0]
+
+# ── Degradation type for the nnUNet sparse sweep ──────────────────
+sweep_degrade_mode: thick
+sweep_modality: ct
+
+# ── 5-arm evaluation figures (volume stability / agreement / surface) ──
+# When set, run_pipeline.sh's `compare` phase folds the 5-arm evaluation
+# figures in automatically (build_metrics -> the three *_summary drivers). The
+# json itself is produced ONCE by simulation/evaluation/build_mask_index.py
+# (see the command list); it does not exist until you build it, so build it
+# first, then re-run `compare` (or run the evaluation drivers by hand).
+eval_mask_index: comparison/viz/evaluation__thick/mask_index.json
+
+# ── Aggregation ───────────────────────────────────────────────────
+summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
+
+# ── Viz source filter ─────────────────────────────────────────────
+viz_include_source_prefixes: []
+viz_exclude_source_prefixes: ["chk_"]
+
+# ── nnUNet label-scheme assertion ─────────────────────────────────
+expected_nnunet_labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4

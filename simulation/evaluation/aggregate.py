@@ -43,7 +43,7 @@ def stability(df, mode: str = DEFAULT_MODE) -> Tuple[Dict, Dict, Dict]:
 
 
 def volume_agreement(df, structure: str = DEFAULT_BA_STRUCTURE,
-                     ba_arms=("nnU-Net", "Proposed")) -> Tuple[Dict, Dict]:
+                     ba_arms=("nnUNet", "Proposed")) -> Tuple[Dict, Dict]:
     """Per-arm Bland-Altman inputs for one structure + pooled signed error/method."""
     per_arm = {}
     for m in ba_arms:

@@ -26,8 +26,13 @@ from scipy import ndimage
 # Foreground structures in DISPLAY-name order, used everywhere downstream.
 STRUCTURES: List[str] = ["Globe", "Optic nerve", "Recti", "Fat"]
 
-# The five evaluated pipelines (arms), in display order.
-METHODS: List[str] = ["nnU-Net", "CNISP", "nnU\u2192nnU", "Proposed", "Oracle"]
+# The five evaluated pipelines (arms), in A-E display order:
+#   A. nnUNet       image-conditioned nnUNet on the sparse CT (baseline)
+#   B. Cascade UNet nnU->nnU self-correction (control B, nnUNet-prelabel corrector)
+#   C. CNISP        CNISP shape prior with the nnUNet sparse pred as input
+#   D. Proposed     nnU->CNISP->nnU corrector (control C, CNISP-prelabel corrector)
+#   E. Oracle       CNISP shape prior with the GT as input (ceiling)
+METHODS: List[str] = ["nnUNet", "Cascade UNet", "CNISP", "Proposed", "Oracle"]
 
 # structure -> integer label, per source scheme (keys are the DISPLAY names).
 SCHEMES: Dict[str, Dict[str, int]] = {
