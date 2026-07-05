@@ -24,6 +24,7 @@ Two test_label_source modes share this code path (see test_default.yaml):
 
 import functools
 import json
+import os
 import pickle
 import time
 from collections import defaultdict
@@ -45,7 +46,14 @@ from diagnostics.resolution_sweep import (
 )
 from engine.train import create_model
 from engine.io_utils import load_latest_checkpoint
-from engine.native_mapping import map_results_to_native
+# ROLLBACK/ABLATION toggle: CNISP_BUGGY_NATIVE_MAPPING=1 swaps in the PRE-FIX
+# (pre-8540137) native mapping to regenerate the OLD buggy CNISP prelabels.
+# Default (unset) keeps the correct, deployment-shift-aware mapping.
+if os.environ.get("CNISP_BUGGY_NATIVE_MAPPING") == "1":
+    from engine.native_mapping_buggy import map_results_to_native
+    print("[native_mapping] CNISP_BUGGY_NATIVE_MAPPING=1 -> using PRE-FIX BUGGY native mapping")
+else:
+    from engine.native_mapping import map_results_to_native
 from engine.test_label_sources import (
     RunLayout,
     build_run_layout,
@@ -1164,7 +1172,10 @@ def infer_test_set(params):
     iso_cfg = params.get("emit_iso_prelabel") or {}
     if (iso_cfg.get("enabled") and all_results
             and params.get("export_predictions", True)):
-        from engine.native_mapping import map_iso_results_to_native
+        if os.environ.get("CNISP_BUGGY_NATIVE_MAPPING") == "1":
+            from engine.native_mapping_buggy import map_iso_results_to_native
+        else:
+            from engine.native_mapping import map_iso_results_to_native
         iso_mm = float(iso_cfg.get("iso_mm", 0.5))
         iso_out = Path(iso_cfg["out_dir"])
         iso_out.mkdir(parents=True, exist_ok=True)

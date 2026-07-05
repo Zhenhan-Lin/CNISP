@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -57,10 +58,19 @@ from engine.infer import (                                      # noqa: E402
     device as INFER_DEVICE,
 )
 from engine.test_label_sources import build_run_layout, step_input_patch_path  # noqa: E402
-from engine.native_mapping import (                             # noqa: E402
-    invert_alignment_single_eye, _extract_sub_crop_info,
-    map_iso_results_to_native,
-)
+# ROLLBACK/ABLATION toggle: CNISP_BUGGY_NATIVE_MAPPING=1 swaps in the PRE-FIX
+# (pre-8540137) native mapping to regenerate the OLD buggy CNISP prelabels.
+if os.environ.get("CNISP_BUGGY_NATIVE_MAPPING") == "1":     # noqa: E402
+    from engine.native_mapping_buggy import (               # noqa: E402
+        invert_alignment_single_eye, _extract_sub_crop_info,
+        map_iso_results_to_native,
+    )
+    print("[native_mapping] CNISP_BUGGY_NATIVE_MAPPING=1 -> using PRE-FIX BUGGY native mapping")
+else:
+    from engine.native_mapping import (                     # noqa: E402
+        invert_alignment_single_eye, _extract_sub_crop_info,
+        map_iso_results_to_native,
+    )
 from diagnostics.resolution_sweep import (                     # noqa: E402
     eval_case_at_resolution, adaptive_steps_for_case,
 )

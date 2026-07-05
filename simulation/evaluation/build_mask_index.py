@@ -74,7 +74,9 @@ sys.path.insert(0, str(REPO_ROOT))
 from nnunet.helpers.config import load_yaml  # noqa: E402
 from nnunet.lib.metrics import build_eff_res_index  # noqa: E402
 
-# A-E arm display labels; MUST match simulation.evaluation.metrics.METHODS.
+# A-E arm display labels; A-E MUST match simulation.evaluation.metrics.METHODS.
+# ARM_GT is an optional, non-plotted reference arm (see --gt-arm), so it is
+# intentionally present here but absent from METHODS.
 ARM_NNUNET = "nnUNet"
 ARM_CASCADE = "Cascade UNet"
 ARM_CNISP = "CNISP"
@@ -355,12 +357,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--oracle-run-tag", default="atlas_gt",
                     help="run_tag for arm E (Oracle = cnisp-gt) when derived from "
                          "--config (default atlas_gt).")
-    ap.add_argument("--gt-arm", action=argparse.BooleanOptionalAction, default=True,
+    ap.add_argument("--gt-arm", action=argparse.BooleanOptionalAction, default=False,
                     help="Emit a separate 'GT' reference arm from each case's true "
-                         "GT (default on). This is DISTINCT from Oracle (=cnisp-gt): "
+                         "GT (default OFF). This is DISTINCT from Oracle (=cnisp-gt): "
                          "GT-vs-GT is perfect by construction (Dice 1 / ASSD 0 / "
-                         "CoV 0), a reference line rather than a method. Pass "
-                         "--no-gt-arm to omit it.")
+                         "CoV 0). It is NOT plotted (absent from metrics.METHODS), so "
+                         "leave it off unless you specifically want a GT-vs-GT column "
+                         "in metrics_long.csv. Pass --gt-arm to emit it.")
     ap.add_argument("--sweep-pkl", default=None,
                     help="sweep_results.pkl for the eff_res join. Default: "
                          "<cnisp-run-dir>/sweep_results.pkl.")

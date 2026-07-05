@@ -28,15 +28,18 @@ from scipy import ndimage
 # Foreground structures in DISPLAY-name order, used everywhere downstream.
 STRUCTURES: List[str] = ["Globe", "Optic nerve", "Recti", "Fat"]
 
-# The evaluated pipelines (arms), in A-E display order, plus the GT reference:
+# The evaluated pipelines (arms), in A-E display order:
 #   A. nnUNet       image-conditioned nnUNet on the sparse CT (baseline)
 #   B. Cascade UNet nnU->nnU self-correction (control B, nnUNet-prelabel corrector)
 #   C. CNISP        CNISP shape prior with the nnUNet sparse pred as input
 #   D. Proposed     nnU->CNISP->nnU corrector (control C, CNISP-prelabel corrector)
 #   E. Oracle       CNISP shape prior with the GT as input (cnisp-gt ceiling)
-#   GT              the true ground truth itself -- a reference line, NOT a method
-#                   (Dice 1 / ASSD 0 / CoV 0 by construction). Distinct from Oracle.
-METHODS: List[str] = ["nnUNet", "Cascade UNet", "CNISP", "Proposed", "Oracle", "GT"]
+# NOTE: GT is NOT a plotted arm. It is used for the metrics themselves (every arm
+# is Diced / surface-compared against GT, and vol_gt / signed_pct come from GT),
+# but a GT-vs-GT reference bar (Dice 1 / ASSD 0 / CoV 0) is intentionally omitted
+# from the figures. build_mask_index.py can still emit a "GT" arm (--gt-arm), but
+# since "GT" is absent here every downstream aggregate/plot loop skips those rows.
+METHODS: List[str] = ["nnUNet", "Cascade UNet", "CNISP", "Proposed", "Oracle"]
 
 # structure -> integer label, per source scheme (keys are the DISPLAY names).
 SCHEMES: Dict[str, Dict[str, int]] = {
