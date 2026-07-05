@@ -25,7 +25,14 @@ experiment: thick
 cnisp_model_name: orbital_ad_v6_5_gt
 cnisp_train_yaml: train_v6_5_gt.yaml
 cnisp_test_yaml: test_corrector.yaml
-run_tag: corrector_gt
+# ISOLATED run_tag: --resume-from-latent READS latents from AND the run WRITES
+# native masks + sweep_results.pkl/csv BACK INTO runs/<experiment>/<run_tag>/.
+# Using the fixed 'corrector_gt' would overwrite those buggy (they feed the
+# comparison pipeline). Seed this folder ONCE with the fixed run's latents before
+# running (see the command), so resume finds them here instead of in corrector_gt:
+#   cp -r <output_basedir>/orbital_ad_v6_5_gt/runs/thick/corrector_gt \
+#         <output_basedir>/orbital_ad_v6_5_gt/runs/thick/corrector_gt_buggy
+run_tag: corrector_gt_buggy
 
 nnunet_pred_root: null
 degraded_ct_root: null
