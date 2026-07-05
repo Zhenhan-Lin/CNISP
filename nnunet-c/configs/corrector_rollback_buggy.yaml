@@ -1,0 +1,109 @@
+# ── nnUNet-C corrector ROLLBACK-BUGGY verification config ─────────────
+# Clone of corrector_rollback.yaml used ONLY to test the model trained under the
+# BUGGY (pre-8540137) CNISP native mapping, keeping its I/O fully separated from
+# the fixed run. Differences vs corrector_rollback.yaml:
+#   * finetune.trainer          -> nnUNetTrainer_earliest_corrector  (matches the
+#                                  results folder the checkpoint lives in)
+#   * cnisp_iso_pred_dirname     -> cnisp_pred_test_iso_buggy  (buggy test iso
+#                                  prelabels, regenerated with
+#                                  CNISP_BUGGY_NATIVE_MAPPING=1 + resume-from-latent;
+#                                  never overwrites the fixed cnisp_pred_test_iso)
+#   * controls.C.dataset_name    -> PHOTON_CT_CORR_C_cnisp_buggy  (so
+#                                  run_corrector_predict.sh writes
+#                                  test_input/PHOTON_CT_CORR_C_cnisp_buggy and
+#                                  predictions/PHOTON_CT_CORR_C_cnisp_buggy)
+# NOTE: nnUNetv2_predict resolves the model by dataset ID (845 -> the REAL
+# Dataset845_PHOTON_CT_CORR_C_cnisp on disk), so the *_buggy dataset_name only
+# routes OUR test_input/predictions dirs; the CKPT_PATH echo in the script will
+# harmlessly warn "not found" (it builds the display path from the *_buggy name).
+# Predict with PLAN_NAME=nnUNetPlans CHK=checkpoint_best.pth (see the command).
+
+nnunet_config_yaml: nnunet/configs_v7.yaml
+
+experiment: thick
+
+cnisp_model_name: orbital_ad_v6_5_gt
+cnisp_train_yaml: train_v6_5_gt.yaml
+cnisp_test_yaml: test_corrector.yaml
+run_tag: corrector_gt
+
+nnunet_pred_root: null
+degraded_ct_root: null
+
+reference_dataset_id: 835
+reference_dataset_name: PHOTON_CT_QAfiltered
+reference_plan: nnUNetPlans
+reference_plan_json: nnUNetPlans_iso05
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+reference_fold: 2
+
+# The checkpoint under test lives in
+#   Dataset845_PHOTON_CT_CORR_C_cnisp/nnUNetTrainer_earliest_corrector__nnUNetPlans__3d_fullres/
+# so CORRECTOR_TRAINER must be nnUNetTrainer_earliest_corrector. epochs/initial_lr
+# are irrelevant at predict time.
+finetune:
+  trainer: nnUNetTrainer_earliest_corrector
+  epochs: 1000
+  initial_lr: 0.01
+
+predict:
+  grid: iso
+  iso_mm: 0.4765625
+  run_cnisp: auto
+  emit_iso: auto
+
+target_spacing: null
+
+structures: [ON, Recti, Globe, Fat]
+labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4
+
+corrector_train_split: nnunet-c/splits/corrector_train.txt
+corrector_train_casefile: corrector_train_cases.txt
+
+corrector_data:
+  checklist_csv: /fs5/p_masi/linz18/QA_record/QA/PHOTON_CP/new_check/review_checklist_part2.csv
+  select:
+    keep: false
+    qa_status: yes
+  target_samples: null
+  n: 200
+  steps: [3, 6, 9]
+  thick_threshold_mm: 7.0
+  thick_threshold_steps: [9]
+  modality: ct
+  data_root: nnunet-c/data
+  images_dirname: images
+  nnunet_pred_dirname: nnunet_pred
+  cnisp_pred_dirname: cnisp_pred
+  # BUGGY test iso prelabels live here (separate from the fixed run).
+  cnisp_iso_pred_dirname: cnisp_pred_test_iso_buggy
+  cnisp_train_iso_pred_dirname: cnisp_pred_train_iso
+  aligned_patch_dirname: aligned_patch
+
+controls:
+  A:
+    dataset_id: 835
+    dataset_name: PHOTON_CT_QAfiltered
+    prelabel_source: none
+    n_channels: 1
+    external: true
+  B:
+    dataset_id: 855
+    dataset_name: PHOTON_CT_CORR_B_stacked
+    prelabel_source: nnunet
+    n_channels: 5
+    external: false
+  C:
+    dataset_id: 845
+    # *_buggy only routes test_input/predictions dirs; nnUNetv2_predict still
+    # resolves the checkpoint by dataset id 845 (the real dir on disk).
+    dataset_name: PHOTON_CT_CORR_C_cnisp_buggy
+    prelabel_source: cnisp
+    n_channels: 5
+    external: false
