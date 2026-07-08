@@ -61,6 +61,14 @@ start_offsets: [0]
 sweep_degrade_mode: thick
 sweep_modality: ct
 
+# ── 5-arm evaluation figures (volume stability / agreement / surface) ──
+# When set, run_pipeline.sh's `compare` phase folds the 5-arm evaluation
+# figures in automatically (build_metrics -> the three *_summary drivers). The
+# json itself is produced ONCE by simulation/evaluation/build_mask_index.py;
+# it does not exist until you build it, so build it first, then re-run
+# `compare` (or run the evaluation drivers by hand).
+eval_mask_index: comparison/viz/evaluation__thick/mask_index.json
+
 # ── Aggregation ───────────────────────────────────────────────────
 summary_bucket_edges_mm: [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.5, 11.0, 13.0]
 
