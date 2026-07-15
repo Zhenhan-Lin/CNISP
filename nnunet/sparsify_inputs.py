@@ -278,6 +278,72 @@ def _sparsify_one_ct(
     return sparse_arr, new_affine
 
 
+def _truncate_one_ct(
+    ct_path: Path,
+    z_axis: int,
+    keep_fraction: float,
+    pad_value: Optional[float] = None,
+    side: str = "end",
+) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int]]:
+    """FOV-truncate a CT along ``z_axis``: keep a contiguous ``keep_fraction`` of
+    slices, blank the rest with ``pad_value`` (air). Returns (array, affine,
+    (vis_lo, vis_hi)) where the half-open slice range ``[vis_lo, vis_hi)`` along
+    ``z_axis`` is the VISIBLE (retained) window -- contiguous for every ``side``, so
+    the blanked (out-of-FOV) region is exactly its complement. The region-restricted
+    eval uses this to score the visible vs truncated part.
+
+    UNLIKE ``_sparsify_one_ct`` (slice decimation -> coarser through-plane
+    spacing), this changes NO spacing and PRESERVES the grid (shape + affine): it
+    only replaces out-of-FOV slices with the padding value, so the truncated
+    region is "imaged-but-empty" (no evidence). That is exactly what the corrector
+    must learn to defer to the completed CNISP prior for, and it isolates the FOV
+    variable from slice thickness (the native CT is truncated, not thickened).
+
+    Parameters
+    ----------
+    z_axis : through-plane axis to truncate along (e.g. the manifest ``step_axis``).
+    keep_fraction : fraction of the z-extent to RETAIN, in (0, 1]; the rest is blanked.
+    pad_value : fill for blanked slices; None -> the CT's own min (air/background HU),
+        which matches whatever air value the scan uses (``resample_to_grid`` pads
+        out-of-grid with 0, NOT air, so the blank must be written here).
+    side : which end(s) to blank -- "end" (high index, e.g. superior cut-off),
+        "start" (low index), or "both" (a centred limited FOV, split evenly).
+    """
+    if not (0.0 < float(keep_fraction) <= 1.0):
+        raise ValueError(f"keep_fraction must be in (0, 1], got {keep_fraction}")
+    img = nib.load(str(ct_path))
+    arr = np.asarray(img.dataobj).copy()
+    affine = img.affine.copy()
+    ax = int(z_axis)
+    pv = float(arr.min()) if pad_value is None else float(pad_value)
+    n = int(arr.shape[ax])
+    n_blank = int(round((1.0 - float(keep_fraction)) * n))
+    if n_blank <= 0:
+        return arr, affine, (0, n)
+
+    def _blank(lo: int, hi: int) -> None:
+        if hi <= lo:
+            return
+        sl = [slice(None)] * arr.ndim
+        sl[ax] = slice(lo, hi)
+        arr[tuple(sl)] = pv
+
+    if side == "end":                       # cut the high-index end (superior)
+        _blank(n - n_blank, n)
+        vis_lo, vis_hi = 0, n - n_blank
+    elif side == "start":                   # cut the low-index end (inferior)
+        _blank(0, n_blank)
+        vis_lo, vis_hi = n_blank, n
+    elif side == "both":                    # centred limited FOV
+        half = n_blank // 2
+        _blank(0, half)
+        _blank(n - (n_blank - half), n)
+        vis_lo, vis_hi = half, n - (n_blank - half)
+    else:
+        raise ValueError(f"side must be end|start|both, got {side!r}")
+    return arr, affine, (int(vis_lo), int(vis_hi))
+
+
 def _eff_res_from_affine(affine: np.ndarray, axis: int) -> float:
     """Norm of the affine's column for ``axis`` = new physical spacing."""
     return float(np.linalg.norm(affine[:3, axis]))

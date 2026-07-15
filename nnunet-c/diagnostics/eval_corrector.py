@@ -92,7 +92,25 @@ def main() -> int:
     ap.add_argument("--tau-mm", type=float, default=1.0,
                     help="Surface-Dice (NSD) tolerance in mm (default: %(default)s), "
                          "matching simulation.evaluation.metrics.DEFAULT_TAU_MM.")
+    ap.add_argument("--region", choices=["all", "visible", "truncated"], default="all",
+                    help="FOV experiment: restrict scoring to the VISIBLE (imaged) or "
+                         "TRUNCATED (blanked) part of each case via --trunc-manifest. "
+                         "'all' (default) = whole volume. The region mask is applied to "
+                         "the label arrays before every per-structure metric, so surface "
+                         "metrics at the FOV cut include the cut face.")
+    ap.add_argument("--trunc-manifest", default=None,
+                    help="fov_truncation_manifest.json (build_fov_truncated_data.py); "
+                         "keyed by source_id -> pseudo-step -> {trunc_axis, visible_range, "
+                         "source_shape}. Required for --region visible|truncated.")
     args = ap.parse_args()
+
+    trunc = None
+    if args.region != "all":
+        if not args.trunc_manifest:
+            print("[eval] --region visible|truncated needs --trunc-manifest",
+                  file=sys.stderr)
+            return 2
+        trunc = json.load(open(args.trunc_manifest))
 
     # Reuse the existing metrics module (no duplicate surface-distance code). Import
     # lazily + guarded so the default Dice-only path never depends on it.
@@ -146,6 +164,10 @@ def main() -> int:
     print("=" * 64)
     print(f"[eval] control={control}  cases={len(cases)}  structures={structures}")
     print(f"[eval] resample: PREDICTION -> native GT grid (order 0); Dice on GT grid")
+    if args.region != "all":
+        print(f"[eval] region={args.region} (FOV-restricted via {args.trunc_manifest})")
+    if surface_metrics is not None:
+        print(f"[eval] full metrics: ASSD/HD95/NSD(tau={args.tau_mm}mm) + volume + bias")
     print("=" * 64)
 
     rows = []
@@ -172,6 +194,27 @@ def main() -> int:
         pred_rs = _rs.resample_to_grid(pred_img, gt_img.shape[:3],
                                        gt_img.affine, order=0)
         pred_nn = np.asanyarray(pred_rs.dataobj).astype(np.int16)
+
+        # ── FOV region restriction (visible vs truncated) ──
+        # Zero both label arrays outside the chosen region so every per-structure
+        # metric is computed on that region only. The visible_range is a slice
+        # window on the SOURCE grid; it maps directly iff the GT grid matches it.
+        if trunc is not None:
+            info = (trunc.get(str(c.get("source_id")), {}) or {}).get(str(c.get("step")))
+            if not info or tuple(int(s) for s in gt_nn.shape) != \
+                    tuple(int(s) for s in info.get("source_shape", ())):
+                print(f"  {cid}: no trunc info / grid mismatch for --region; skip")
+                missing += 1
+                continue
+            ax = int(info["trunc_axis"])
+            vlo, vhi = int(info["visible_range"][0]), int(info["visible_range"][1])
+            visible = np.zeros(gt_nn.shape, dtype=bool)
+            sl = [slice(None)] * gt_nn.ndim
+            sl[ax] = slice(vlo, vhi)
+            visible[tuple(sl)] = True
+            keep = visible if args.region == "visible" else ~visible
+            gt_nn = np.where(keep, gt_nn, 0)
+            pred_nn = np.where(keep, pred_nn, 0)
 
         row = {"case_id": cid, "source_id": c.get("source_id", ""),
                "step": c.get("step", "")}

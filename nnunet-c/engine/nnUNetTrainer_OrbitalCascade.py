@@ -66,6 +66,13 @@ class nnUNetTrainer_OrbitalCascade(nnUNetTrainer_corrector):
 
     def initialize(self):
         super().initialize()  # schedule (epochs/lr) + network + label/config managers
+        # ── stratification strata (env-driven) ──
+        # Default = the thickness sweep {3,6,9}; the FOV-truncation experiment
+        # overrides it with its truncation-level pseudo-steps via
+        # CORRECTOR_STRATA="s1,s2,..." (the loader + batch_size follow self.STRATA).
+        sv = os.environ.get("CORRECTOR_STRATA")
+        if sv:
+            self.STRATA = tuple(int(x) for x in sv.split(",") if x.strip())
         # ── prior-aug hyperparameters (env-driven) ──
         jv = os.environ.get("CORRECTOR_JITTER_VOXELS", "4,2,2")
         self._jitter_max = tuple(int(x) for x in jv.split(",") if x.strip())
