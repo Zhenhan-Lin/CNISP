@@ -44,6 +44,8 @@ import nibabel as nib  # noqa: E402
 
 from engine.convert import convert_case, STRUCTS, N_CHANNELS  # noqa: E402  (the SINGLE converter)
 from lib import prelabel as _pre  # noqa: E402
+from lib import channels as _ch  # noqa: E402  (cascade: 1-ch CT via assemble_inference_case)
+from lib import resample as _rs  # noqa: E402  (cascade: resample the prior to the CT grid)
 from lib.labels import (  # noqa: E402
     resolve_source_infos, remap_native_to_nnunet, NNUNET_LABELS,
 )
@@ -203,6 +205,12 @@ def main() -> int:
                          "resolve_target_spacing -- MUST match the train build "
                          "(build_corrector_dataset --iso-mm).")
     ap.add_argument("--out", default=None, help="output root (default: nnunet-c/test_input)")
+    ap.add_argument("--layout", choices=["stacked", "cascade"], default="stacked",
+                    help="'stacked' (default) = 5-ch imagesTs (ch0 CT + ch1..4 prior). "
+                         "'cascade' (Route A) = 1-ch CT imagesTs ({cid}_0000.nii.gz) + "
+                         "a prevsegTs/ dir of {cid}.nii.gz CNISP prior masks on the "
+                         "SAME grid; feed the latter to nnUNetv2_predict via "
+                         "-prev_stage_predictions (control C only).")
     ap.add_argument("--skip-existing", action="store_true",
                     help="cache: skip the 5ch resample/convert for a (source,step) "
                          "whose imagesTs channels (_0000.._000N) already exist, but "
@@ -240,7 +248,15 @@ def main() -> int:
     ctl_dir = out_root / control["dataset_name"]
     images_out = ctl_dir / "imagesTs"
     stage_dir = ctl_dir / "_prelabel_nn"
+    prevseg_out = ctl_dir / "prevsegTs"   # cascade: {cid}.nii.gz CNISP prior masks
     (images_out if not is_A else ctl_dir).mkdir(parents=True, exist_ok=True)
+    cascade = (args.layout == "cascade")
+    if cascade:
+        if not is_cnisp:
+            raise RuntimeError("--layout cascade is for control C (CNISP prior) only.")
+        if not grid_iso:
+            raise RuntimeError("--layout cascade requires --prelabel-grid iso.")
+        prevseg_out.mkdir(parents=True, exist_ok=True)
 
     if is_cnisp:
         _need = _pre._cnisp_iso_root(cfg) if grid_iso else _pre._cnisp_run_dir(cfg)
@@ -317,15 +333,21 @@ def main() -> int:
             # rebuild leaving a MIXED-geometry set, which existence-only caching
             # would silently keep). Still record the case so eval is complete. A
             # partial OR inconsistent channel set is treated as a miss + rebuilt.
-            if args.skip_existing and _cached_channels_ok(images_out, cid, N_CHANNELS):
-                case_map[cid] = {"source_id": sid, "step": step,
-                                 "gt_label_path": str(gt_path),
-                                 "gt_struct_to_value": gt_stv,
-                                 "pred_file": f"{cid}.nii.gz"}
-                assembled.append(cid)
-                cached += 1
-                print(f"  {cid}: CACHED ({N_CHANNELS}ch exist; skip rebuild)")
-                continue
+            if args.skip_existing:
+                if cascade:
+                    _cache_ok = ((images_out / f"{cid}_0000.nii.gz").is_file()
+                                 and (prevseg_out / f"{cid}.nii.gz").is_file())
+                else:
+                    _cache_ok = _cached_channels_ok(images_out, cid, N_CHANNELS)
+                if _cache_ok:
+                    case_map[cid] = {"source_id": sid, "step": step,
+                                     "gt_label_path": str(gt_path),
+                                     "gt_struct_to_value": gt_stv,
+                                     "pred_file": f"{cid}.nii.gz"}
+                    assembled.append(cid)
+                    cached += 1
+                    print(f"  {cid}: CACHED (skip rebuild)")
+                    continue
 
             # Reference grid for the 5ch case:
             #   iso -> iso-mm head grid from the DEGRADED image (ch0) FOV; B and
@@ -361,18 +383,39 @@ def main() -> int:
                 skipped += 1
                 continue
             pre_nn = _nn_prelabel(pre_info, cid, stage_dir)   # -> {1,2,3,4}
-            summary = convert_case(
-                case_id=cid, ct_path=ct, prelabel_path=pre_nn, ref_grid=ref_grid,
-                experiment=cfg["experiment"], images_dir=images_out,
-                # step 1 is the dense baseline: ch0 IS the native CT by design.
-                allow_dense_ct=(int(step) == 1),
-            )
-            assembled.append(summary)
+            if cascade:
+                # Route A: 1-ch CT ({cid}_0000) + the prior as {cid}.nii.gz on the
+                # SAME grid (nnUNet asserts image/seg spatial match at predict; it
+                # then crops+resamples+one-hots the prior itself via
+                # -prev_stage_predictions). ch0 reuses the degraded-CT pin + geometry
+                # asserts; the prior is resampled order-0 onto the identical grid.
+                summary = _ch.assemble_inference_case(
+                    case_id=cid, ct_path=ct, target_spacing=None, n_channels=1,
+                    structures=STRUCTS, images_dir=images_out,
+                    experiment=cfg["experiment"], ref_grid=ref_grid,
+                    allow_dense_ct=(int(step) == 1),
+                )
+                tgt_shape, tgt_aff = ref_grid
+                pre_rs = _rs.resample_to_grid(
+                    nib.load(str(pre_nn)), tgt_shape, tgt_aff, order=0)
+                pre_arr = np.asanyarray(pre_rs.dataobj).astype(np.uint8)
+                nib.save(nib.Nifti1Image(pre_arr, np.asarray(tgt_aff)),
+                         str(prevseg_out / f"{cid}.nii.gz"))
+                assembled.append(cid)
+                print(f"  {cid}: shape={summary['shape']} (1ch CT + prevseg)")
+            else:
+                summary = convert_case(
+                    case_id=cid, ct_path=ct, prelabel_path=pre_nn, ref_grid=ref_grid,
+                    experiment=cfg["experiment"], images_dir=images_out,
+                    # step 1 is the dense baseline: ch0 IS the native CT by design.
+                    allow_dense_ct=(int(step) == 1),
+                )
+                assembled.append(summary)
+                print(f"  {cid}: shape={summary['shape']}")
             case_map[cid] = {"source_id": sid, "step": step,
                              "gt_label_path": str(gt_path),
                              "gt_struct_to_value": gt_stv,
                              "pred_file": f"{cid}.nii.gz"}
-            print(f"  {cid}: shape={summary['shape']}")
 
     with open(ctl_dir / "test_cases_map.json", "w") as f:
         json.dump({"control": args.control.upper(), "casefile": casefile.name,
@@ -383,6 +426,9 @@ def main() -> int:
           f"skipped {skipped} (missing files).")
     if not is_A:
         print(f"[testset] imagesTs -> {images_out}")
+    if cascade:
+        print(f"[testset] prevsegTs -> {prevseg_out}  "
+              f"(pass to nnUNetv2_predict -prev_stage_predictions)")
     print(f"[testset] map     -> {ctl_dir / 'test_cases_map.json'}")
     return 0
 

@@ -22,6 +22,11 @@ CONTROL="${1:?usage: run_corrector_predict.sh <B|C> <fold>}"
 FOLD="${2:?usage: run_corrector_predict.sh <B|C> <fold>}"
 CONFIG="${CONFIG:-$HERE/configs/corrector.yaml}"
 PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
+# CASCADE=1 -> native-cascade (Route A) predict: build a 1-ch CT testset + a
+# prevsegTs/ dir of {cid}.nii.gz CNISP prior masks, and pass that dir to
+# nnUNetv2_predict via -prev_stage_predictions (nnUNet one-hots the prior itself).
+# Set CORRECTOR_TRAINER=nnUNetTrainer_OrbitalCascade to match the trained model.
+CASCADE="${CASCADE:-0}"
 # Two DIFFERENT checkpoints (do not conflate):
 #   CHK       = nnUNet-C predict checkpoint -> best (the finetuned corrector)
 #   CNISP_CHK = CNISP test-inference checkpoint -> latest, to MATCH the training
@@ -149,15 +154,22 @@ print(f"[predict] installed resampler -> {dst}")
 PY
 
 # The B/C model was trained with the corrector trainer, so its results dir is
-# named <CORRECTOR_TRAINER>__nnUNetPlansFinetune__3d_fullres/. Install the
-# trainer class so nnUNetv2_predict can rebuild the network from it.
-echo "[predict] (2b) install corrector trainer into nnunetv2 ($CORRECTOR_TRAINER)"
-python3 - "$HERE/engine/nnUNetTrainer_corrector.py" <<'PY'
+# named <CORRECTOR_TRAINER>__nnUNetPlansFinetune__3d_fullres/. Install the trainer
+# class (and, for the cascade model, its sibling imports) so nnUNetv2_predict can
+# rebuild the network from it. Copying all four is cheap + idempotent; the stock
+# corrector path just ignores the extra modules.
+echo "[predict] (2b) install corrector runtime modules into nnunetv2 ($CORRECTOR_TRAINER)"
+python3 - "$HERE/engine" <<'PY'
 import sys, shutil, os
 import nnunetv2.training.nnUNetTrainer.nnUNetTrainer as m
-dst = os.path.join(os.path.dirname(m.__file__), "nnUNetTrainer_corrector.py")
-shutil.copyfile(sys.argv[1], dst)
-print(f"[predict] installed trainer -> {dst}")
+pkg = os.path.dirname(m.__file__)
+eng = sys.argv[1]
+for name in ("nnUNetTrainer_corrector.py", "nnUNetTrainer_OrbitalCascade.py",
+             "corrector_augment.py", "corrector_stratified_loader.py"):
+    src = os.path.join(eng, name)
+    if os.path.isfile(src):
+        shutil.copyfile(src, os.path.join(pkg, name))
+        print(f"[predict] installed {name} -> {pkg}")
 PY
 
 # ── 3. assemble 5-channel test inputs ────────────────────────────────
@@ -173,11 +185,19 @@ if [[ "$RESUME_FROM_LATENT" == "1" && -z "${REBUILD_TESTSET:-}" ]]; then
 fi
 SKIP_EXISTING_ARG="--skip-existing"
 [[ "${REBUILD_TESTSET:-0}" == "1" ]] && SKIP_EXISTING_ARG=""
-echo "[predict] (3) build_corrector_testset (convert CNISP runs output -> 5ch) -> $TEST_ROOT"
+# Cascade (Route A): build a 1-ch CT testset + a prevsegTs/ dir of {cid}.nii.gz
+# CNISP prior masks; the latter is fed to nnUNetv2_predict via -prev_stage_predictions.
+LAYOUT_ARG=""; PREVSEG_ARG=""
+if [[ "$CASCADE" == "1" ]]; then
+    LAYOUT_ARG="--layout cascade"
+    PREVSEG_TS="$TEST_ROOT/$CTRL_DATASET_NAME/prevsegTs"
+    PREVSEG_ARG="-prev_stage_predictions $PREVSEG_TS"
+fi
+echo "[predict] (3) build_corrector_testset (layout=$([[ "$CASCADE" == 1 ]] && echo cascade || echo stacked)) -> $TEST_ROOT"
 echo "          cache: ${SKIP_EXISTING_ARG:-off (REBUILD_TESTSET=1)}"
 python3 "$HERE/scripts/build_corrector_testset.py" \
     --config "$CONFIG" --control "$CONTROL" --steps "${BUILD_STEPS:-auto}" \
-    --prelabel-grid "$GRID" --iso-mm "$ISO_MM" --out "$TEST_ROOT" $SKIP_EXISTING_ARG \
+    --prelabel-grid "$GRID" --iso-mm "$ISO_MM" --out "$TEST_ROOT" $SKIP_EXISTING_ARG $LAYOUT_ARG \
     ${BUILD_CASEFILE:+--casefile "$BUILD_CASEFILE"}
 
 IMAGES_TS="$TEST_ROOT/$CTRL_DATASET_NAME/imagesTs"
@@ -202,10 +222,11 @@ echo "          checkpoint=$CKPT_PATH"
 [[ -f "$CKPT_PATH" ]] || echo "          [warn] checkpoint file not found at that path (nnUNet may resolve it differently)"
 echo "          in=$IMAGES_TS"
 echo "          out=$OUT_DIR_PRED"
+[[ -n "$PREVSEG_ARG" ]] && echo "          prev_stage=${PREVSEG_TS}"
 nnUNetv2_predict \
     -i "$IMAGES_TS" -o "$OUT_DIR_PRED" \
     -d "$CTRL_DATASET_ID" -c "$CONFIGURATION" -tr "$CORRECTOR_TRAINER" \
-    -p "$PLAN_NAME" -f "$FOLD" -chk "$CHK" $PREDICT_RESUME
+    -p "$PLAN_NAME" -f "$FOLD" -chk "$CHK" $PREDICT_RESUME $PREVSEG_ARG
 
 echo "[predict] done: predictions -> $OUT_DIR_PRED"
 

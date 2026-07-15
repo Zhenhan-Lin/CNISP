@@ -140,14 +140,28 @@ Whole-volume, step-stratified selection over the periodic snapshots (reuses
 
 ---
 
-## D. Predict — DELIVERED SEPARATELY (next)
+## D. Predict + eval (cascade)
+```bash
+CASCADE=1 CORRECTOR_TRAINER=nnUNetTrainer_OrbitalCascade \
+CHK=checkpoint_best.pth \
+bash nnunet-c/run_corrector_predict.sh C 0
+```
+`run_corrector_predict.sh` then: installs the 4 modules, builds a **1-ch CT** testset
+plus a `prevsegTs/` dir of `{cid}.nii.gz` CNISP prior masks
+(`build_corrector_testset.py --layout cascade`), runs
+`nnUNetv2_predict … -prev_stage_predictions <prevsegTs>` (nnUNet crops/resamples/
+one-hots the prior itself), then `eval_corrector.py` (pred → native-GT grid Dice).
 
-Under cascade the predict input is a **1-ch CT** plus a folder of **`{caseid}.nii.gz`
-CNISP prior masks** passed to `nnUNetv2_predict -prev_stage_predictions <dir>`
-(nnUNet preprocesses + one-hots the prior itself). This needs:
-- `build_corrector_testset.py --layout cascade` (write 1-ch CT + a prevseg dir), and
-- `run_corrector_predict.sh` cascade branch (1-ch build + `-prev_stage_predictions`
-  + install the 4 modules).
+- Use `CHK=checkpoint_epoch_XXXX.pth` to eval a specific snapshot, or run section C
+  (`select_checkpoint.py`) to pick the stratified-best one first.
+- The eval map + `imagesTs` this produces are exactly the `--map` / `--images-ts`
+  inputs for section C.
 
-These two edits are the remaining piece and come next; training (A+B) does not depend
-on them.
+Manual equivalent (if not using the wrapper):
+```bash
+python nnunet-c/scripts/build_corrector_testset.py \
+    --control C --layout cascade --prelabel-grid iso --steps auto --out nnunet-c/test_input
+nnUNetv2_predict -i nnunet-c/test_input/<name>/imagesTs -o <out> \
+    -d 845 -c "$CFG" -tr nnUNetTrainer_OrbitalCascade -p "$PLAN" -f 0 -chk checkpoint_best.pth \
+    -prev_stage_predictions nnunet-c/test_input/<name>/prevsegTs
+```
