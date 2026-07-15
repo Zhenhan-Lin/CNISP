@@ -24,7 +24,7 @@ MASK_INIT="${MASK_INIT:-zero}"
 WORK_TMP="${WORK_TMP:-$HERE/staging/_finetune}"
 # CASCADE=1 -> native-cascade (Route A) layout: 1-ch CT data + a per-case CNISP
 # seg_prev. The multi-step data prep (2 datasets + relocate_prevseg) lives in
-# nnunet-c/CASCADE_RUNBOOK.md; this script then reuses that preprocessed data
+# CNISP/RUNBOOK.md; this script then reuses that preprocessed data
 # (SKIP_PREPROCESS=1) and only adds --cascade to the gate. Set CORRECTOR_TRAINER=
 # nnUNetTrainer_OrbitalCascade (corrector.yaml or env) to train the overhaul.
 CASCADE="${CASCADE:-0}"
@@ -79,7 +79,7 @@ if [[ "${SKIP_PREPROCESS:-1}" == "1" ]]; then
 elif [[ "$CASCADE" == "1" ]]; then
     echo "[run_train] ERROR: CASCADE=1 with SKIP_PREPROCESS=0 is not supported here." >&2
     echo "            Cascade prep builds TWO datasets (main + prior) + relocates the" >&2
-    echo "            seg_prev -- run nnunet-c/CASCADE_RUNBOOK.md, then re-run this with" >&2
+    echo "            seg_prev -- run CNISP/RUNBOOK.md, then re-run this with" >&2
     echo "            SKIP_PREPROCESS=1 (default) to reuse that preprocessed data." >&2
     exit 2
 else

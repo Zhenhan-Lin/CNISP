@@ -25,7 +25,7 @@ SEPARATE data root, so the thickness experiment is untouched):
 The truncation itself reuses `nnunet.sparsify_inputs._truncate_one_ct` (next to
 `_sparsify_one_ct`; no duplicate degradation code).
 
-BOX FOLLOW-UP (see FOV_RUNBOOK.md): run the 835 stage-1 model on each truncated CT
+BOX FOLLOW-UP (see RUNBOOK_FOV.md): run the 835 stage-1 model on each truncated CT
 to get a coarse seg, run CNISP 032 on that (`--steps 50,65,80`) to emit the
 COMPLETED iso prior, then `build_corrector_dataset.py --layout cascade` on a FOV
 config (data_root = this <out>, steps = the pseudo-steps, its own control-C id).
@@ -181,7 +181,7 @@ def main() -> int:
     print(f"[fov] sidecar  -> {out_root / 'fov_truncation_manifest.json'}")
     print("[fov] NEXT (box): 835 stage-1 predict on each truncated CT -> CNISP 032 "
           f"(--steps {','.join(str(s) for s in steps)}) -> build_corrector_dataset "
-          "--layout cascade on a FOV config. See FOV_RUNBOOK.md.")
+          "--layout cascade on a FOV config. See RUNBOOK_FOV.md.")
     return 0
 
 
