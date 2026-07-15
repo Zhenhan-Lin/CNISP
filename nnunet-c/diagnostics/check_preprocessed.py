@@ -116,13 +116,24 @@ def main() -> int:
     ap.add_argument("--case", default=None, help="specific case stem (default: first)")
     ap.add_argument("--tol", type=float, default=0.15,
                     help="relative tolerance for CT normalized-bound check")
+    ap.add_argument("--cascade", action="store_true",
+                    help="native-cascade (Route A) layout: expect a 1-channel CT "
+                         "image (the prior is NOT in the data -- it rides a separate "
+                         "per-case seg_prev), skip the ch1..4 binary check, and "
+                         "instead verify the seg_prev folder covers this case with "
+                         "an integer {0..4} mask on the same grid.")
+    ap.add_argument("--prevseg-dir", default=None,
+                    help="(cascade) override the seg_prev folder (else computed from "
+                         "the plan's previous_stage).")
     args = ap.parse_args()
 
     cfg, ctrl, data_dir, ref_plan_json = _resolve_paths(
         args.config, args.control, args.plan_name, args.configuration
     )
-    n_channels = int(ctrl["n_channels"])
-    print(f"[check] control={args.control.upper()} data_dir={data_dir}")
+    # cascade writes a 1-ch CT image; stacked keeps the control's n_channels.
+    n_channels = 1 if args.cascade else int(ctrl["n_channels"])
+    print(f"[check] control={args.control.upper()} "
+          f"layout={'cascade' if args.cascade else 'stacked'} data_dir={data_dir}")
 
     stem, data, seg = _load_case(data_dir, args.case)
     print(f"[check] case={stem} data.shape={data.shape} seg.shape={seg.shape}")
@@ -181,13 +192,54 @@ def main() -> int:
     if bad:
         failures.append(f"label has unexpected values {bad} (expected subset of 0..4)")
 
+    # (5) cascade: the per-case seg_prev exists, is integer {0..4}, same grid.
+    if args.cascade:
+        configuration = args.configuration or cfg["configuration"]
+        ds_dir = data_dir.parent
+        prev_dir = None
+        if args.prevseg_dir:
+            prev_dir = Path(args.prevseg_dir)
+        else:
+            plan_json = ds_dir / f"{args.plan_name}.json"
+            prev = None
+            if plan_json.is_file():
+                prev = (json.load(open(plan_json)).get("configurations", {})
+                        .get(configuration, {}).get("previous_stage"))
+            if not prev:
+                failures.append(
+                    f"plan {plan_json} lacks configurations.{configuration}."
+                    f"previous_stage -- rebuild with build_finetune_plan.py --cascade")
+            else:
+                prev_dir = ds_dir / prev / "predicted_next_stage" / configuration
+        if prev_dir is not None:
+            prev_file = prev_dir / f"{stem}.b2nd"
+            print(f"[check] seg_prev dir = {prev_dir}")
+            if not prev_file.is_file():
+                failures.append(
+                    f"seg_prev missing for {stem}: {prev_file} not found "
+                    f"(run relocate_prevseg.py after preprocessing the prior dataset)")
+            else:
+                import blosc2  # lazy
+                sp = np.asarray(blosc2.open(str(prev_file))[:])
+                sp_uniq = sorted(int(v) for v in np.unique(sp))
+                sp_spatial = tuple(sp.shape[-len(data.shape[1:]):])
+                print(f"[check] seg_prev: shape={sp.shape} values={sp_uniq}")
+                if sorted(set(sp_uniq) - {0, 1, 2, 3, 4}):
+                    failures.append(f"seg_prev has values outside 0..4: {sp_uniq}")
+                if sp_spatial != tuple(data.shape[1:]):
+                    failures.append(
+                        f"seg_prev spatial {sp_spatial} != data spatial "
+                        f"{tuple(data.shape[1:])} -- grid mismatch (the prior dataset "
+                        f"must use the SAME finetune plan + identical CT)")
+
     print("───────────────────────────────────────────────────────────")
     if failures:
         print("[check] FAIL (pothole-4 gate):")
         for m in failures:
             print(f"  - {m}")
         return 1
-    print("[check] PASS: CT normalization, binary channels, shapes, and labels OK.")
+    extra = "seg_prev coverage" if args.cascade else "binary channels"
+    print(f"[check] PASS: CT normalization, {extra}, shapes, and labels OK.")
     return 0
 
 

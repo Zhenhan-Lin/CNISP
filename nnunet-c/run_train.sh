@@ -22,6 +22,13 @@ CONFIG="${CONFIG:-$HERE/configs/corrector.yaml}"
 PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
 MASK_INIT="${MASK_INIT:-zero}"
 WORK_TMP="${WORK_TMP:-$HERE/staging/_finetune}"
+# CASCADE=1 -> native-cascade (Route A) layout: 1-ch CT data + a per-case CNISP
+# seg_prev. The multi-step data prep (2 datasets + relocate_prevseg) lives in
+# nnunet-c/CASCADE_RUNBOOK.md; this script then reuses that preprocessed data
+# (SKIP_PREPROCESS=1) and only adds --cascade to the gate. Set CORRECTOR_TRAINER=
+# nnUNetTrainer_OrbitalCascade (corrector.yaml or env) to train the overhaul.
+CASCADE="${CASCADE:-0}"
+GATE_ARGS=""; [[ "$CASCADE" == "1" ]] && GATE_ARGS="--cascade"
 # torch.compile (nnUNet default ON) can produce broken forward passes on some
 # torch/CUDA combos -> all-background preds -> pseudo-dice stuck at 0. Default OFF;
 # export nnUNet_compile=1 to re-enable once you've confirmed it's stable.
@@ -69,6 +76,12 @@ PY
 if [[ "${SKIP_PREPROCESS:-1}" == "1" ]]; then
     echo "[run_train] SKIP_PREPROCESS=1 (default) -> skipping fingerprint/plan/merge/preprocess"
     echo "[run_train]   (reusing existing preprocessed data; set SKIP_PREPROCESS=0 to (re)build)"
+elif [[ "$CASCADE" == "1" ]]; then
+    echo "[run_train] ERROR: CASCADE=1 with SKIP_PREPROCESS=0 is not supported here." >&2
+    echo "            Cascade prep builds TWO datasets (main + prior) + relocates the" >&2
+    echo "            seg_prev -- run nnunet-c/CASCADE_RUNBOOK.md, then re-run this with" >&2
+    echo "            SKIP_PREPROCESS=1 (default) to reuse that preprocessed data." >&2
+    exit 2
 else
     echo "[run_train] (1) extract_fingerprint d=$CTRL_DATASET_ID"
     nnUNetv2_extract_fingerprint -d "$CTRL_DATASET_ID" --verify_dataset_integrity
@@ -90,9 +103,9 @@ else
         -c "$CONFIGURATION" ${PREPROCESS_NP:+-np "$PREPROCESS_NP"}
 fi
 
-echo "[run_train] (5) POTHOLE-4 GATE: check_preprocessed"
+echo "[run_train] (5) POTHOLE-4 GATE: check_preprocessed ${GATE_ARGS:+($GATE_ARGS)}"
 python3 "$HERE/diagnostics/check_preprocessed.py" \
-    --config "$CONFIG" --control "$CONTROL" --plan-name "$PLAN_NAME"
+    --config "$CONFIG" --control "$CONTROL" --plan-name "$PLAN_NAME" $GATE_ARGS
 
 mkdir -p "$WORK_TMP"
 ADAPTED="$WORK_TMP/ckpt_${REF_DATASET_ID}_to${N_CHANNELS}ch_${CONTROL}.pth"
@@ -102,14 +115,26 @@ python3 "$HERE/scripts/adapt_checkpoint.py" \
     --channels "$N_CHANNELS" --mask-init "$MASK_INIT" \
     --report-json "$WORK_TMP/adapt_report_${CONTROL}.json"
 
-# Install the corrector finetune trainer into nnunetv2 so `-tr` can discover it.
-echo "[run_train] (6b) install corrector trainer -> nnunetv2 ($CORRECTOR_TRAINER)"
-python3 - "$HERE/engine/nnUNetTrainer_corrector.py" <<'PY'
+# Install the corrector runtime modules into nnunetv2 so `-tr` can discover the
+# trainer AND its sibling imports resolve. The OrbitalCascade trainer imports
+# `corrector_augment` + `corrector_stratified_loader` from its own package
+# (nnunetv2.training.nnUNetTrainer.*), so all four must land in that dir. Copying
+# is cheap + idempotent; missing files (e.g. on the stock-trainer path) are skipped.
+echo "[run_train] (6b) install corrector runtime modules -> nnunetv2 ($CORRECTOR_TRAINER)"
+python3 - "$HERE/engine" <<'PY'
 import sys, shutil, os
 import nnunetv2.training.nnUNetTrainer.nnUNetTrainer as m
-dst = os.path.join(os.path.dirname(m.__file__), "nnUNetTrainer_corrector.py")
-shutil.copyfile(sys.argv[1], dst)
-print(f"[run_train] installed trainer -> {dst}")
+pkg = os.path.dirname(m.__file__)
+eng = sys.argv[1]
+mods = ["nnUNetTrainer_corrector.py", "nnUNetTrainer_OrbitalCascade.py",
+        "corrector_augment.py", "corrector_stratified_loader.py"]
+for name in mods:
+    src = os.path.join(eng, name)
+    if os.path.isfile(src):
+        shutil.copyfile(src, os.path.join(pkg, name))
+        print(f"[run_train] installed {name} -> {pkg}")
+    else:
+        print(f"[run_train] (skip) {name} not present in {eng}")
 PY
 
 # The corrector trainer reads its schedule from these (corrector.yaml::finetune).

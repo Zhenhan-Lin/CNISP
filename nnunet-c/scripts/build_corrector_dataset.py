@@ -65,6 +65,41 @@ def _assemble_one(task):
     return cid, summary
 
 
+def _assemble_one_cascade(task):
+    """Assemble ONE (case,step) into the native-cascade (Route A) layout.
+
+    Writes TWO 1-channel nnUNet cases sharing the SAME ref_grid + the SAME CT:
+      * MAIN dataset  (control C = 845): ch0 CT (order 3) + GT label (order 0)
+      * PRIOR dataset (parallel, e.g. 846): ch0 CT (order 3) + the CNISP prior AS
+        the label ({1,2,3,4}, order 0)
+    Because the CT (hence nnUNet's nonzero crop) is identical, preprocessing BOTH
+    with the same finetune plan yields byte-aligned grids -> the prior's
+    ``{id}_seg.b2nd`` is a valid ``seg_prev`` once relocated into the main
+    dataset's ``predicted_next_stage/<cfg>/{id}.b2nd`` (see relocate_prevseg.py).
+
+    The prior is fed through ``assemble_case`` as the GT label; since it is already
+    in the nnUNet {1,2,3,4} scheme, ``remap_to_nnunet(.., NNUNET_LABELS)`` is the
+    identity. Top-level/picklable so it runs in a ProcessPoolExecutor worker.
+    """
+    from lib import channels as _ch
+    from lib.labels import NNUNET_LABELS
+    (cid, ct_path, prior_path, gt, ref_grid, experiment,
+     images_main, labels_main, images_prior, labels_prior, degraded_marker) = task
+    main = _ch.assemble_case(
+        case_id=cid, ct_path=ct_path, gt_path=gt, target_spacing=None,
+        n_channels=1, structures=STRUCTS, gt_struct_to_value=dict(NNUNET_LABELS),
+        images_dir=images_main, labels_dir=labels_main, experiment=experiment,
+        prelabel_path=None, ref_grid=ref_grid, degraded_marker=degraded_marker,
+    )
+    prior = _ch.assemble_case(
+        case_id=cid, ct_path=ct_path, gt_path=prior_path, target_spacing=None,
+        n_channels=1, structures=STRUCTS, gt_struct_to_value=dict(NNUNET_LABELS),
+        images_dir=images_prior, labels_dir=labels_prior, experiment=experiment,
+        prelabel_path=None, ref_grid=ref_grid, degraded_marker=degraded_marker,
+    )
+    return cid, {"main": main, "prior": prior}
+
+
 def _stage_iso_prelabel_nn(cfg, case_id: str, step: int, stage_dir: Path) -> Path:
     """TRAIN iso prelabel for (case,step) -> remapped BY NAME to nnUNet {1,2,3,4}.
 
@@ -127,6 +162,21 @@ def main() -> int:
                          "order-3 CT resampling across cores. Default 1 "
                          "(sequential; unchanged behaviour). Try 8-16 on a big "
                          "box; watch RAM (each worker holds a full-res volume).")
+    ap.add_argument("--layout", choices=["stacked", "cascade"], default="stacked",
+                    help="'stacked' (default) = the legacy 5-channel image (ch0 CT "
+                         "+ ch1..4 binary prior), unchanged. 'cascade' (Route A) = "
+                         "1-channel CT image + GT for the MAIN dataset, and a "
+                         "PARALLEL prior dataset (same CT + the CNISP prior AS the "
+                         "label); nnUNet then loads the prior as a per-case seg_prev "
+                         "and folds it in with MoveSegAsOneHot AFTER intensity aug. "
+                         "cascade requires control C (CNISP) + --prelabel-grid iso.")
+    ap.add_argument("--prior-dataset-id", type=int, default=None,
+                    help="(cascade only) nnUNet dataset id for the PARALLEL prior "
+                         "dataset. Default = control dataset_id + 1. Its preprocessed "
+                         "{id}_seg.b2nd become the seg_prev (relocate_prevseg.py).")
+    ap.add_argument("--prior-dataset-name", default=None,
+                    help="(cascade only) name for the parallel prior dataset. "
+                         "Default = <control dataset_name>_prior.")
     args = ap.parse_args()
 
     cfg = load_corrector_config(args.config, caller_file=__file__)
@@ -251,6 +301,76 @@ def main() -> int:
             print(f"[build] WARNING: only {len(candidates)} candidate(s) available "
                   f"< --max-samples {cap}; building all of them.", file=sys.stderr)
         candidates = candidates[:cap]
+
+    # ── Route A: native-cascade layout (main 1-ch dataset + parallel prior) ──
+    if args.layout == "cascade":
+        if not is_cnisp:
+            raise RuntimeError("--layout cascade is for control C (CNISP prior) only.")
+        if not use_iso:
+            raise RuntimeError(
+                "--layout cascade requires --prelabel-grid iso (the iso-direct CNISP "
+                "decode remapped by name to {1,2,3,4}); native masks not supported.")
+        prior_id = (int(args.prior_dataset_id) if args.prior_dataset_id is not None
+                    else int(control["dataset_id"]) + 1)
+        prior_name = args.prior_dataset_name or f"{control['dataset_name']}_prior"
+        prior_control = dict(control)
+        prior_control.update(dataset_id=prior_id, dataset_name=prior_name, n_channels=1)
+        ds846 = _dataset_dir(raw, prior_control)
+        images846 = ds846 / "imagesTr"
+        labels846 = ds846 / "labelsTr"
+        images846.mkdir(parents=True, exist_ok=True)
+        labels846.mkdir(parents=True, exist_ok=True)
+        print(f"[build] LAYOUT=cascade  main(1ch CT + GT)         -> {ds_dir}")
+        print(f"[build]                 prior(1ch CT + CNISP lbl) -> {ds846}")
+        print(f"[build]                 prior dataset = Dataset{prior_id:03d}_{prior_name}")
+
+        tasks = []
+        for case_id, step, gt in candidates:
+            stem = f"{case_id}_step{step:02d}"
+            ct_path = images_dir / f"{stem}_0000.nii.gz"
+            ref_grid = build_reference_grid(nib.load(str(ct_path)), iso_spacing)
+            cid = f"corr_{stem}"
+            prior_path = _stage_iso_prelabel_nn(cfg, case_id, step, stage_dir)
+            tasks.append((
+                cid, ct_path, prior_path, gt, ref_grid, cfg["experiment"],
+                images_out, labels_out, images846, labels846, f"/{images_dirname}/",
+            ))
+
+        main_sums, prior_sums = [], []
+        workers = max(1, int(args.workers))
+        if workers > 1:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            print(f"[build] assembling {len(tasks)} case(s) x2 (main+prior), {workers} workers")
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                futs = [ex.submit(_assemble_one_cascade, t) for t in tasks]
+                for fut in as_completed(futs):
+                    cid, s = fut.result()
+                    main_sums.append(s["main"]); prior_sums.append(s["prior"])
+                    print(f"  {cid}: main lbls={s['main']['label_values']} "
+                          f"prior lbls={s['prior']['label_values']}")
+        else:
+            for t in tasks:
+                cid, s = _assemble_one_cascade(t)
+                main_sums.append(s["main"]); prior_sums.append(s["prior"])
+                print(f"  {cid}: main lbls={s['main']['label_values']} "
+                      f"prior lbls={s['prior']['label_values']}")
+
+        n = len(main_sums)
+        _write_dataset_json(ds_dir, control, cfg, num_training=n, image_channels=1)
+        _write_dataset_json(ds846, prior_control, cfg, num_training=n, image_channels=1)
+        with open(ds_dir / "corrector_build_manifest.json", "w") as f:
+            json.dump({"control": args.control.upper(), "layout": "cascade", "n": n,
+                       "prior_dataset": f"Dataset{prior_id:03d}_{prior_name}",
+                       "cases": main_sums}, f, indent=2)
+        with open(ds846 / "corrector_build_manifest.json", "w") as f:
+            json.dump({"role": "cnisp_prior_prev_stage", "for_dataset": ds_dir.name,
+                       "n": n, "cases": prior_sums}, f, indent=2)
+        print(f"[build] wrote {n} case(s) x2; skipped {skipped} (missing files).")
+        print(f"[build] main  -> {ds_dir}")
+        print(f"[build] prior -> {ds846}")
+        print("[build] NEXT: preprocess BOTH datasets (finetune plan), then "
+              "relocate_prevseg.py  (run_train.sh handles this under cascade).")
+        return 0
 
     # ── Phase 2: assemble only the selected (case, step) ─────────────
     # Grid = the iso-mm grid built from THIS step's degraded-CT FOV -- IDENTICAL

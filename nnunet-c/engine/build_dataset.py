@@ -36,9 +36,16 @@ def _dataset_dir(raw_root: Path, control: Dict) -> Path:
 
 
 def _write_dataset_json(
-    ds_dir: Path, control: Dict, cfg: Dict, num_training: int
+    ds_dir: Path, control: Dict, cfg: Dict, num_training: int,
+    image_channels: Optional[int] = None,
 ) -> Path:
-    n = int(control["n_channels"])
+    # ``image_channels`` overrides the control's n_channels for the ON-DISK image
+    # channel count. The native-cascade (Route A) layout writes a 1-channel CT
+    # image (the CNISP prior rides a separate per-case seg_prev, folded in at
+    # runtime by MoveSegAsOneHot), so control C (n_channels=5) still needs a
+    # 1-channel dataset.json here -- nnUNet then reports num_input_channels =
+    # 1 CT + len(foreground_labels) via the config's previous_stage.
+    n = int(image_channels) if image_channels is not None else int(control["n_channels"])
     if n == 1:
         channel_names = {"0": "CT"}
     else:

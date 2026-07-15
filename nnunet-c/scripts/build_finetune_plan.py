@@ -63,6 +63,22 @@ def main() -> int:
                     action="store_false",
                     help="use nnUNet's default order-3 resampling for all channels "
                          "(ch1-N become soft).")
+    ap.add_argument("--cascade", action="store_true",
+                    help="native-cascade layout (Route A): set the config's "
+                         "`previous_stage` so nnUNet loads the CNISP prior as a "
+                         "per-case seg_prev and MoveSegAsOneHotToDataTransform folds "
+                         "it into the data AFTER intensity aug. The image is then a "
+                         "1-ch CT and nnUNet auto-computes num_input_channels = 1 + "
+                         "len(foreground_labels) = 5 (determine_num_input_channels "
+                         "keys on previous_stage_name). Pair with `build_corrector_"
+                         "dataset.py --layout cascade`. IMPLIES no per-channel data "
+                         "resampler (the prior rides the seg resampler, order 0).")
+    ap.add_argument("--previous-stage-name", default="cnisp_prior",
+                    help="config key recorded as `previous_stage` under --cascade "
+                         "(default %(default)s). Nothing in the train/preprocess/"
+                         "predict path calls get_configuration() on it, but we still "
+                         "materialise a matching config key so any stray call "
+                         "resolves; it also names the seg_prev folder.")
     ap.add_argument("--report-json", default=None)
     args = ap.parse_args()
 
@@ -104,11 +120,38 @@ def main() -> int:
     # Per-channel data resampling: ch0 order 3, binary ch1-N order 0. Requires the
     # custom fn installed under nnunetv2/preprocessing/resampling/ (see
     # nnunet-c/engine/corrector_resampling.py). The seg (label) resampler is left
-    # at nnUNet's default.
-    if args.binary_resampling:
+    # at nnUNet's default. NOT used under --cascade: the image is a single CT
+    # channel (order 3 is correct) and the prior rides the SEG resampler (order 0).
+    if args.binary_resampling and not args.cascade:
         cfgs[configuration]["resampling_fn_data"] = "resample_corrector_data_to_shape"
         overrides.append(
             f"configurations.{configuration}.resampling_fn_data=resample_corrector_data_to_shape")
+
+    # ── Route A: native-cascade wiring (previous_stage) ──────────────────────
+    if args.cascade:
+        prev = args.previous_stage_name
+        cfgs[configuration]["previous_stage"] = prev
+        overrides.append(f"configurations.{configuration}.previous_stage={prev}")
+        # Materialise the referenced config key so PlansManager.get_configuration(prev)
+        # resolves if ever called (nothing in our train/preprocess/predict path calls
+        # it -- the trainer only builds a folder-path string from previous_stage_name,
+        # determine_num_input_channels only reads the string -- but get_configuration
+        # RuntimeErrors on a missing key, so we mirror the fullres config to be safe).
+        # It is never preprocessed (run_train.sh preprocesses only the fullres config).
+        if prev not in cfgs:
+            import copy as _copy
+            cfgs[prev] = _copy.deepcopy(cfgs[configuration])
+            cfgs[prev].pop("previous_stage", None)
+            cfgs[prev]["next_stage"] = configuration
+            cfgs[prev]["data_identifier"] = f"{args.out_plan_name}_{prev}"
+            overrides.append(
+                f"configurations.{prev}=<mirror of {configuration}>, next_stage={configuration}")
+        if not args.binary_resampling:
+            pass  # already default; nothing to note
+        else:
+            overrides.append(
+                f"configurations.{configuration}.resampling_fn_data=<nnUNet default> "
+                f"(cascade: 1-ch CT image; prior rides the seg resampler)")
 
     out_path = target_dir / f"{args.out_plan_name}.json"
     save_plan(target, target_dir / "plan_before.json")
