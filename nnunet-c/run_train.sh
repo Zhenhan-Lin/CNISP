@@ -27,7 +27,7 @@ WORK_TMP="${WORK_TMP:-$HERE/staging/_finetune}"
 # CNISP/RUNBOOK.md; this script then reuses that preprocessed data
 # (SKIP_PREPROCESS=1) and only adds --cascade to the gate. Set CORRECTOR_TRAINER=
 # nnUNetTrainer_OrbitalCascade (corrector.yaml or env) to train the overhaul.
-CASCADE="${CASCADE:-0}"
+CASCADE="${CASCADE:-1}"          # default: native-cascade + OrbitalCascade aug (B AND C); CASCADE=0 = legacy stacked
 GATE_ARGS=""; [[ "$CASCADE" == "1" ]] && GATE_ARGS="--cascade"
 # torch.compile (nnUNet default ON) can produce broken forward passes on some
 # torch/CUDA combos -> all-background preds -> pseudo-dice stuck at 0. Default OFF;

@@ -26,7 +26,7 @@ PLAN_NAME="${PLAN_NAME:-nnUNetPlansFinetune}"
 # prevsegTs/ dir of {cid}.nii.gz CNISP prior masks, and pass that dir to
 # nnUNetv2_predict via -prev_stage_predictions (nnUNet one-hots the prior itself).
 # Set CORRECTOR_TRAINER=nnUNetTrainer_OrbitalCascade to match the trained model.
-CASCADE="${CASCADE:-0}"
+CASCADE="${CASCADE:-1}"   # default: cascade predict (1-ch CT + prevsegTs); CASCADE=0 = legacy 5-ch stacked
 # Two DIFFERENT checkpoints (do not conflate):
 #   CHK       = nnUNet-C predict checkpoint -> best (the finetuned corrector)
 #   CNISP_CHK = CNISP test-inference checkpoint -> latest, to MATCH the training

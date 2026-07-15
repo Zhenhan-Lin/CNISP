@@ -304,12 +304,12 @@ def main() -> int:
 
     # ── Route A: native-cascade layout (main 1-ch dataset + parallel prior) ──
     if args.layout == "cascade":
-        if not is_cnisp:
-            raise RuntimeError("--layout cascade is for control C (CNISP prior) only.")
-        if not use_iso:
+        # C (CNISP) and B (nnUNet pred) both supported -- same seg_prev machinery,
+        # only the prior label source differs. C requires the iso-direct decode.
+        if is_cnisp and not use_iso:
             raise RuntimeError(
-                "--layout cascade requires --prelabel-grid iso (the iso-direct CNISP "
-                "decode remapped by name to {1,2,3,4}); native masks not supported.")
+                "--layout cascade for control C (CNISP) requires --prelabel-grid iso "
+                "(the iso-direct decode remapped by name to {1,2,3,4}).")
         prior_id = (int(args.prior_dataset_id) if args.prior_dataset_id is not None
                     else int(control["dataset_id"]) + 1)
         prior_name = args.prior_dataset_name or f"{control['dataset_name']}_prior"
@@ -320,8 +320,8 @@ def main() -> int:
         labels846 = ds846 / "labelsTr"
         images846.mkdir(parents=True, exist_ok=True)
         labels846.mkdir(parents=True, exist_ok=True)
-        print(f"[build] LAYOUT=cascade  main(1ch CT + GT)         -> {ds_dir}")
-        print(f"[build]                 prior(1ch CT + CNISP lbl) -> {ds846}")
+        print(f"[build] LAYOUT=cascade  main(1ch CT + GT)          -> {ds_dir}")
+        print(f"[build]                 prior(1ch CT + {'CNISP' if is_cnisp else 'nnUNet'} lbl) -> {ds846}")
         print(f"[build]                 prior dataset = Dataset{prior_id:03d}_{prior_name}")
 
         tasks = []
@@ -330,7 +330,10 @@ def main() -> int:
             ct_path = images_dir / f"{stem}_0000.nii.gz"
             ref_grid = build_reference_grid(nib.load(str(ct_path)), iso_spacing)
             cid = f"corr_{stem}"
-            prior_path = _stage_iso_prelabel_nn(cfg, case_id, step, stage_dir)
+            # prior label: C -> CNISP iso-direct decode (staged, remapped by name);
+            # B -> the nnUNet pred ({1,2,3,4} already). Same seg_prev downstream.
+            prior_path = (_stage_iso_prelabel_nn(cfg, case_id, step, stage_dir)
+                          if use_iso else prelabel_dir / f"{stem}.nii.gz")
             tasks.append((
                 cid, ct_path, prior_path, gt, ref_grid, cfg["experiment"],
                 images_out, labels_out, images846, labels846, f"/{images_dirname}/",

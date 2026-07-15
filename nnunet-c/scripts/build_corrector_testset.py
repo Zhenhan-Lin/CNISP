@@ -252,8 +252,7 @@ def main() -> int:
     (images_out if not is_A else ctl_dir).mkdir(parents=True, exist_ok=True)
     cascade = (args.layout == "cascade")
     if cascade:
-        if not is_cnisp:
-            raise RuntimeError("--layout cascade is for control C (CNISP prior) only.")
+        # C (CNISP) and B (nnUNet pred) both supported; prevseg = the resolved prior.
         if not grid_iso:
             raise RuntimeError("--layout cascade requires --prelabel-grid iso.")
         prevseg_out.mkdir(parents=True, exist_ok=True)

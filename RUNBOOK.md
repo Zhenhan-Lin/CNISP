@@ -50,14 +50,14 @@ export nnUNet_compile=f
 
 ### Env-var quick reference
 `run_train.sh <B|C> <fold>`:
-`CASCADE`(0/1) · `SKIP_PREPROCESS`(default 1) · `PREPROCESS_NP` · `MASK_INIT`(zero) ·
+`CASCADE`(default 1) · `SKIP_PREPROCESS`(default 1) · `PREPROCESS_NP` · `MASK_INIT`(zero) ·
 `RESUME`(0/1) · `PLAN_NAME` · `CONFIG` · `CORRECTOR_TRAINER` · `CORRECTOR_EPOCHS/LR`
 (from config `finetune:`) · cascade trainer knobs `CORRECTOR_STRATIFIED`(1) ·
 `CORRECTOR_STRATA`("3,6,9") · `CORRECTOR_JITTER_VOXELS`("4,2,2") ·
 `CORRECTOR_DROP_ALL`(0.1) · `CORRECTOR_DROP_EACH`(0.25).
 
 `run_corrector_predict.sh <B|C> <fold>`:
-`CASCADE`(0/1) · `CHK`(checkpoint_best.pth) · `CNISP_CHK`(latest) · `GPUS` · `GRID`(iso) ·
+`CASCADE`(default 1) · `CHK`(checkpoint_best.pth) · `CNISP_CHK`(latest) · `GPUS` · `GRID`(iso) ·
 `RUN_CNISP`(auto) · `EMIT_ISO`(auto) · `ISO_MM` · `BUILD_STEPS`(auto) · `REBUILD_TESTSET` ·
 `FORCE` · `RUN_EVAL`(1) · `SOURCE`/`BUILD_CASEFILE` (single-case) · `RESUME_FROM_LATENT`.
 
@@ -167,14 +167,23 @@ python nnunet-c/diagnostics/eval_corrector.py --map $MAP --pred-dir $PRED \
 
 ---
 
-## 2. Arm B — stacked (5-ch, for the B-vs-C comparison)
-Same shape, WITHOUT `--cascade`/`CASCADE` (keeps the per-channel resampler + 5-ch image):
+## 2. Arm B — same cascade + aug as C (default; prior = nnUNet pred)
+Arm B trains with the **identical** native-cascade + OrbitalCascade aug as C (the
+default now) — only the prior source differs (nnUNet pred vs CNISP). Repeat §1
+Stages 1–7 with `--control B` (datasets `855` main + `856` prior; the prior label =
+the 835 nnUNet pred under `data/nnunet_pred/`, produced by the nnUNet sweep):
 ```bash
-python nnunet-c/scripts/build_corrector_dataset.py --control B --steps 3,6,9 --max-samples 200 --require-cnisp
-SKIP_PREPROCESS=0 bash nnunet-c/run_train.sh B 0     # builds plan+preprocess+gate+train in one go
+python nnunet-c/scripts/build_corrector_dataset.py --control B --layout cascade \
+    --steps 3,6,9 --max-samples 200 --require-cnisp
+# then §1 Stages 3-4 with --control B: build_finetune_plan --control B --cascade;
+# copy the plan to 856; preprocess 855 + 856; relocate_prevseg --control B;
+# check_preprocessed --control B --cascade
+bash nnunet-c/run_train.sh B 0                 # CASCADE=1 + OrbitalCascade are the defaults
 bash nnunet-c/run_corrector_predict.sh B 0
 ```
-(Arm B's `check_preprocessed` runs WITHOUT `--cascade`: it verifies ch1–4 are binary.)
+Legacy stacked B (old 5-ch image, no prior-aug): build WITHOUT `--layout cascade` and run
+`CASCADE=0 CORRECTOR_TRAINER=nnUNetTrainer_corrector bash nnunet-c/run_train.sh B 0`
+(its `check_preprocessed` then verifies ch1–4 are binary instead of seg_prev).
 
 ---
 

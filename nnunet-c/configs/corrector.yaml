@@ -57,7 +57,12 @@ reference_fold: 2
 # CORRECTOR_EPOCHS / CORRECTOR_LR env vars. We finetune each fold for a short
 # schedule from the 835 weights, with a gentler-than-default LR (stock is 1e-2).
 finetune:
-  trainer: nnUNetTrainer_corrector
+  # DEFAULT trainer for BOTH B and C = the cascade aug overhaul (prior-only
+  # jitter/dropout + stratified batching + periodic snapshots). B gets the SAME
+  # aug as C via the SAME native-cascade path (build with --layout cascade, train
+  # with CASCADE=1) -- only the prior source differs (nnUNet pred vs CNISP). For
+  # the legacy stacked path set trainer: nnUNetTrainer_corrector + CASCADE=0.
+  trainer: nnUNetTrainer_OrbitalCascade
   epochs: 300
   initial_lr: 0.01      # slightly below the stock 1e-2; tune here as needed
 
