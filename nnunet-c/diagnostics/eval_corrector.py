@@ -81,7 +81,29 @@ def main() -> int:
                          "otherwise their independent --steps auto discovery can "
                          "yield different case sets and the aggregate mean Dice is "
                          "not comparable. Repeatable.")
+    ap.add_argument("--full-metrics", action="store_true",
+                    help="also compute surface metrics (ASSD/HD95/NSD) + per-structure "
+                         "volume + signed volume bias %%, REUSING "
+                         "simulation.evaluation.metrics.surface_metrics (no new metric "
+                         "math). Adds columns to the per-case CSV; the by-step CSV "
+                         "schema is left unchanged (select_checkpoint.py reads it). "
+                         "Volume CoV across steps is left to "
+                         "simulation.evaluation.aggregate.stability on the emitted volumes.")
+    ap.add_argument("--tau-mm", type=float, default=1.0,
+                    help="Surface-Dice (NSD) tolerance in mm (default: %(default)s), "
+                         "matching simulation.evaluation.metrics.DEFAULT_TAU_MM.")
     args = ap.parse_args()
+
+    # Reuse the existing metrics module (no duplicate surface-distance code). Import
+    # lazily + guarded so the default Dice-only path never depends on it.
+    surface_metrics = None
+    if args.full_metrics:
+        try:
+            from simulation.evaluation.metrics import surface_metrics  # noqa: reuse
+        except Exception as e:  # noqa: BLE001
+            print(f"[eval] --full-metrics needs simulation.evaluation.metrics "
+                  f"({type(e).__name__}: {e})", file=sys.stderr)
+            return 2
 
     mp = json.load(open(args.map))
     structures = mp.get("structures", ["ON", "Recti", "Globe", "Fat"])
@@ -162,6 +184,25 @@ def main() -> int:
             per_struct[name].append(d)
             per_struct_by_step[c.get("step", "")][name].append(d)
         row["dice_mean"] = round(float(np.mean(dices)), 5)
+        # ── optional refinement metrics (ASSD/HD95/NSD + volume + signed bias) ──
+        # Computed on the SAME already-resampled (pred_nn, gt_nn) arrays on the GT
+        # grid, so they share the pinned resample; surface_metrics is the existing
+        # simulation.evaluation implementation (reused, not re-derived).
+        if surface_metrics is not None:
+            spacing = np.asarray(gt_img.header.get_zooms()[:3], dtype=float)
+            vv = float(np.prod(spacing))            # voxel volume (mm^3)
+            for name in structures:
+                lab = NNUNET_LABELS[name]
+                pm, gm = (pred_nn == lab), (gt_nn == lab)
+                sm = surface_metrics(pm, gm, spacing, args.tau_mm)
+                vp, vg = float(pm.sum()) * vv, float(gm.sum()) * vv
+                row[f"assd_{name}"] = round(float(sm["assd"]), 5)
+                row[f"hd95_{name}"] = round(float(sm["hd95"]), 5)
+                row[f"nsd_{name}"] = round(float(sm["nsd"]), 5)
+                row[f"vol_pred_{name}"] = round(vp, 3)
+                row[f"vol_gt_{name}"] = round(vg, 3)
+                row[f"signed_pct_{name}"] = (round(100.0 * (vp - vg) / vg, 3)
+                                             if vg > 0 else float("nan"))
         rows.append(row)
         detail = " ".join(f"{n}={d:.3f}" for n, d in zip(structures, dices))
         print(f"  {cid}: {detail}  mean={row['dice_mean']:.3f}")
@@ -184,6 +225,16 @@ def main() -> int:
         ms = [float(np.mean(per_struct_by_step[step][n])) for n in structures]
         print(f"    step={step}: " + " ".join(f"{n}={m:.3f}" for n, m in zip(structures, ms))
               + f"  mean={float(np.mean(ms)):.3f}")
+    if surface_metrics is not None:
+        def _nanmean(key):
+            vals = np.asarray([r.get(key, np.nan) for r in rows], dtype=float)
+            return float(np.nanmean(vals)) if np.isfinite(vals).any() else float("nan")
+        print("  refinement metrics (mean, NaN-skipped):")
+        for name in structures:
+            print(f"    {name:6s}: ASSD={_nanmean(f'assd_{name}'):.3f}mm "
+                  f"HD95={_nanmean(f'hd95_{name}'):.3f}mm "
+                  f"NSD={_nanmean(f'nsd_{name}'):.3f}  "
+                  f"volBias={_nanmean(f'signed_pct_{name}'):+.1f}%")
 
     # ── Always persist results (default path when --out-csv is unset) ──
     # Default: alongside the predictions (or the map when pred_dir is unset),
@@ -203,6 +254,9 @@ def main() -> int:
     # per-case long CSV
     fields = ["case_id", "source_id", "step"] + \
              [f"dice_{n}" for n in structures] + ["dice_mean"]
+    if args.full_metrics:
+        for m in ("assd", "hd95", "nsd", "vol_pred", "vol_gt", "signed_pct"):
+            fields += [f"{m}_{n}" for n in structures]
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
