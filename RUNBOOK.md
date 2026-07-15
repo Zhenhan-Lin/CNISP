@@ -52,7 +52,8 @@ export nnUNet_compile=f
 `run_train.sh <B|C> <fold>`:
 `CASCADE`(default 1) · `SKIP_PREPROCESS`(default 1) · `PREPROCESS_NP` · `MASK_INIT`(zero) ·
 `RESUME`(0/1) · `PLAN_NAME` · `CONFIG` · `CORRECTOR_TRAINER` · `CORRECTOR_EPOCHS/LR`
-(from config `finetune:`) · cascade trainer knobs `CORRECTOR_STRATIFIED`(1) ·
+(from config `finetune:`) · cascade trainer knobs `CORRECTOR_PRIOR_AUG`(default 1 =
+new prior-channel aug ON; `0` = stock cascade morph only) · `CORRECTOR_STRATIFIED`(1) ·
 `CORRECTOR_STRATA`("3,6,9") · `CORRECTOR_JITTER_VOXELS`("4,2,2") ·
 `CORRECTOR_DROP_ALL`(0.1) · `CORRECTOR_DROP_EACH`(0.25).
 

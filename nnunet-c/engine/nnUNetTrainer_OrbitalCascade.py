@@ -73,7 +73,11 @@ class nnUNetTrainer_OrbitalCascade(nnUNetTrainer_corrector):
         sv = os.environ.get("CORRECTOR_STRATA")
         if sv:
             self.STRATA = tuple(int(x) for x in sv.split(",") if x.strip())
-        # ── prior-aug hyperparameters (env-driven) ──
+        # ── prior-channel aug (jitter + dropout): OPTIONAL, DEFAULT ON ──
+        # The shared new-aug strategy for BOTH arms (B and C). CORRECTOR_PRIOR_AUG=0
+        # disables it (falls back to the stock cascade morph block only), e.g. for an
+        # ablation; anything else (default "1") keeps it on.
+        self._prior_aug = os.environ.get("CORRECTOR_PRIOR_AUG", "1") == "1"
         jv = os.environ.get("CORRECTOR_JITTER_VOXELS", "4,2,2")
         self._jitter_max = tuple(int(x) for x in jv.split(",") if x.strip())
         self._drop_all = _env_floats("CORRECTOR_DROP_ALL", 0.1)
@@ -102,17 +106,19 @@ class nnUNetTrainer_OrbitalCascade(nnUNetTrainer_corrector):
         )
         # after MoveSegAsOneHot the prior occupies image channels 1..len(fg); insert
         # jitter+dropout just BEFORE deep-supervision downsampling (last transform).
-        tfs = compose.transforms
-        insert_at = next((i for i, t in enumerate(tfs)
-                          if isinstance(t, DownsampleSegForDSTransform)), len(tfs))
-        n_prior = len(foreground_labels) if foreground_labels else 4
-        prior_idx = tuple(range(1, 1 + n_prior))
-        tfs[insert_at:insert_at] = [
-            PriorCentroidJitterTransform(prior_channel_indices=prior_idx,
-                                         max_shift_voxels=self._jitter_max),
-            PriorChannelDropoutTransform(prior_channel_indices=prior_idx,
-                                         p_all=self._drop_all, p_each=self._drop_each),
-        ]
+        # Gated by CORRECTOR_PRIOR_AUG (default on) -> stock cascade morph only when off.
+        if self._prior_aug:
+            tfs = compose.transforms
+            insert_at = next((i for i, t in enumerate(tfs)
+                              if isinstance(t, DownsampleSegForDSTransform)), len(tfs))
+            n_prior = len(foreground_labels) if foreground_labels else 4
+            prior_idx = tuple(range(1, 1 + n_prior))
+            tfs[insert_at:insert_at] = [
+                PriorCentroidJitterTransform(prior_channel_indices=prior_idx,
+                                             max_shift_voxels=self._jitter_max),
+                PriorChannelDropoutTransform(prior_channel_indices=prior_idx,
+                                             p_all=self._drop_all, p_each=self._drop_each),
+            ]
         return compose
 
     # ── (2) dataloaders: stratified TRAIN loader (stock body, loader swapped) ──
