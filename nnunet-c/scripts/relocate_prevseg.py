@@ -152,6 +152,14 @@ def main() -> int:
               f"(same build). Aborting.", file=sys.stderr)
         return 1
 
+    # The prior dataset stores its label as a preprocessed SEG -> shape (1, D, H, W)
+    # (leading channel dim). But nnUNet's cascade dataloader expects seg_prev WITHOUT
+    # the channel dim -> (D, H, W): it does crop_and_pad_nd(seg_prev, bbox, -1)[None]
+    # to re-add the channel before vstacking onto the GT seg. A raw copy of the (1,*)
+    # file makes that [None] produce a 5-D array -> vstack ValueError at train time.
+    # So we LOAD each prior seg, squeeze the channel dim, and re-write it as (D,H,W).
+    import numpy as np  # noqa: E402  (heavy; only needed here)
+    import blosc2  # noqa: E402
     n_done, n_skip = 0, 0
     for i in main_ids:
         src = prior_segs[i]
@@ -159,17 +167,23 @@ def main() -> int:
         if out.exists() and not args.overwrite:
             n_skip += 1
             continue
+        arr = np.asarray(blosc2.open(str(src), mode="r")[:])
+        if arr.ndim == 4 and arr.shape[0] == 1:
+            arr = arr[0]                       # (1, D, H, W) -> (D, H, W)
+        elif arr.ndim != 3:
+            raise RuntimeError(
+                f"{src}: seg_prev has unexpected shape {arr.shape}; want (D,H,W) or (1,D,H,W).")
         if out.exists():
             out.unlink()
+        blosc2.asarray(np.ascontiguousarray(arr.astype(np.uint8)),
+                       urlpath=str(out), mode="w")
         if args.move:
-            shutil.move(str(src), str(out))
-        else:
-            shutil.copyfile(str(src), str(out))
+            Path(src).unlink()
         n_done += 1
 
-    verb = "moved" if args.move else "copied"
-    print(f"[relocate] {verb} {n_done} seg_prev file(s); skipped {n_skip} existing "
-          f"(use --overwrite to replace).")
+    verb = "moved" if args.move else "wrote"
+    print(f"[relocate] {verb} {n_done} seg_prev file(s) as (D,H,W); skipped {n_skip} "
+          f"existing (use --overwrite to replace).")
     # sanity: every main id now has a seg_prev on disk
     have = sum(1 for i in main_ids if (dest / f"{i}.b2nd").is_file())
     print(f"[relocate] dest now has seg_prev for {have}/{len(main_ids)} main cases.")

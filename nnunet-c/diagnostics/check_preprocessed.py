@@ -235,6 +235,12 @@ def main() -> int:
                 sp_uniq = sorted(int(v) for v in np.unique(sp))
                 sp_spatial = tuple(sp.shape[-len(data.shape[1:]):])
                 print(f"[check] seg_prev: shape={sp.shape} values={sp_uniq}")
+                if sp.ndim != len(data.shape[1:]):
+                    failures.append(
+                        f"seg_prev ndim {sp.ndim} != {len(data.shape[1:])}: it has a "
+                        f"channel dim (shape {sp.shape}), but nnUNet's cascade expects "
+                        f"(D,H,W) -- it crop_and_pad_nd(seg_prev, bbox)[None]'s the channel "
+                        f"back. Re-run relocate_prevseg.py (it squeezes the channel dim).")
                 if sorted(set(sp_uniq) - {0, 1, 2, 3, 4}):
                     failures.append(f"seg_prev has values outside 0..4: {sp_uniq}")
                 if sp_spatial != tuple(data.shape[1:]):
