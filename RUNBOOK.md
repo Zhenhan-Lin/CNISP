@@ -100,6 +100,9 @@ Check: `python -c "import json;print(json.load(open('$nnUNet_raw/Dataset845_PHOT
 nnUNetv2_extract_fingerprint -d 845 --verify_dataset_integrity && nnUNetv2_plan_experiment -d 845
 nnUNetv2_extract_fingerprint -d 846 --verify_dataset_integrity && nnUNetv2_plan_experiment -d 846
 
+export PLAN=nnUNetPlansFinetune
+export CFG=3d_fullres
+
 python nnunet-c/scripts/build_finetune_plan.py --control C --cascade --out-plan-name "$PLAN"
 # give 846 the SAME plan (identical geometry):
 python3 - <<'PY'
@@ -111,8 +114,8 @@ d["configurations"]["3d_fullres"].pop("previous_stage", None)   # prior is not a
 json.dump(d, open(f"{pp}/Dataset846_PHOTON_CT_CORR_C_cnisp_prior/nnUNetPlansFinetune.json", "w"), indent=2)
 print("wrote 846 plan")
 PY
-nnUNetv2_preprocess -d 845 -plans_name "$PLAN" -c "$CFG" -np 2
-nnUNetv2_preprocess -d 846 -plans_name "$PLAN" -c "$CFG" -np 2
+nnUNetv2_preprocess -d 845 -plans_name "$PLAN" -c "$CFG"
+nnUNetv2_preprocess -d 846 -plans_name "$PLAN" -c "$CFG"
 ```
 Check: `plan_after.json` has `configurations.3d_fullres.previous_stage = cnisp_prior`
 and NO `resampling_fn_data`; the printed `overrides` list from build_finetune_plan.
