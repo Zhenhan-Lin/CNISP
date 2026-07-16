@@ -125,6 +125,11 @@ and NO `resampling_fn_data`; the printed `overrides` list from build_finetune_pl
 python nnunet-c/scripts/relocate_prevseg.py --control C --plan-name "$PLAN"   # add --move to free 846 disk
 python nnunet-c/diagnostics/check_preprocessed.py --control C --plan-name "$PLAN" --cascade
 ```
+The seg_prev folder is keyed by the **training trainer class name**:
+`$nnUNet_results/Dataset845_.../<TRAINER>__${PLAN}__cnisp_prior/predicted_next_stage/${CFG}/`.
+Both commands default `--trainer nnUNetTrainer_OrbitalCascade`; if you train with a
+different `-tr`, pass the SAME `--trainer` to both (else training reads a different
+folder and fails "seg_prev not found").
 Check: relocate prints `dest now has seg_prev for N/N main cases`; the gate prints
 **PASS** (1-ch data z-scored to 835 stats, seg_prev integer {0..4} on the data grid,
 labels ⊆ {0..4}).

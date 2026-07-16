@@ -59,42 +59,34 @@ def _resolve(config, control, plan_name, configuration, prior_id, prior_name):
     return cfg, ctrl, configuration, plan_name, main_dir, main_data, prior_data
 
 
-def _dest_folder(main_dir: Path, plan_name: str, configuration: str, fold: int):
-    """Return (dest_folder, how) for the cascade seg_prev.
+def _dest_folder(main_dir: Path, plan_name: str, configuration: str, trainer: str):
+    """Return (dest_folder, prev, how) for the cascade seg_prev.
 
-    Primary: build a live ``nnUNetTrainer`` and read
-    ``folder_with_segs_from_previous_stage`` (the exact path nnUNet's dataloader
-    will read at train time). Fallback (import failure): the documented join.
+    nnUNet builds ``folder_with_segs_from_previous_stage`` as
+        nnUNet_results/<dataset>/<TRAINER>__<plans_name>__<previous_stage>/
+            predicted_next_stage/<configuration>
+    -- crucially keyed by the TRAINING trainer's class name (not the base class).
+    We compute it with the ACTUAL training trainer (default nnUNetTrainer_Orbital-
+    Cascade), so relocate, the gate, and training all agree. (Instantiating a base
+    ``nnUNetTrainer`` here gave the WRONG class name -> a folder training never reads.)
     """
     import json
     plan_json = main_dir / f"{plan_name}.json"
-    ds_json = main_dir / "dataset.json"
-    for p in (plan_json, ds_json):
-        if not p.is_file():
-            raise FileNotFoundError(f"missing {p} (preprocess the main dataset first)")
+    if not plan_json.is_file():
+        raise FileNotFoundError(f"missing {plan_json} (preprocess the main dataset first)")
     plans = json.load(open(plan_json))
-    dataset_json = json.load(open(ds_json))
     prev = plans.get("configurations", {}).get(configuration, {}).get("previous_stage")
     if not prev:
         raise RuntimeError(
             f"plan {plan_json} has no configurations.{configuration}.previous_stage "
             f"-- rebuild it with build_finetune_plan.py --cascade.")
-
-    # Primary: ground-truth path from a real trainer instance (no heavy init).
-    try:
-        import torch  # lazy
-        from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer  # lazy
-        tr = nnUNetTrainer(plans, configuration, int(fold), dataset_json,
-                           device=torch.device("cpu"))
-        dest = Path(tr.folder_with_segs_from_previous_stage)
-        return dest, prev, "trainer"
-    except Exception as e:  # noqa: BLE001
-        print(f"[relocate] WARN: could not read the path from a trainer instance "
-              f"({type(e).__name__}: {e}); falling back to the computed join.",
-              file=sys.stderr)
-        pp = os.environ["nnUNet_preprocessed"]
-        dest = Path(pp) / main_dir.name / prev / "predicted_next_stage" / configuration
-        return dest, prev, "computed"
+    plans_name = plans.get("plans_name", plan_name)
+    results = os.environ.get("nnUNet_results")
+    if not results:
+        raise RuntimeError("$nnUNet_results unset (needed to locate the seg_prev folder).")
+    dest = (Path(results) / main_dir.name
+            / f"{trainer}__{plans_name}__{prev}" / "predicted_next_stage" / configuration)
+    return dest, prev, "results"
 
 
 def main() -> int:
@@ -105,9 +97,12 @@ def main() -> int:
     ap.add_argument("--control", required=True, choices=["B", "C", "b", "c"])
     ap.add_argument("--plan-name", default="nnUNetPlansFinetune")
     ap.add_argument("--configuration", default=None)
+    ap.add_argument("--trainer", default="nnUNetTrainer_OrbitalCascade",
+                    help="the trainer the model will be TRAINED with (default "
+                         "%(default)s). The seg_prev folder is keyed by this class "
+                         "name, so it MUST match run_train.sh's CORRECTOR_TRAINER.")
     ap.add_argument("--fold", default=0, type=int,
-                    help="fold (only used to instantiate the trainer for the dest "
-                         "path; the seg_prev folder is fold-independent).")
+                    help="(unused; the seg_prev folder is fold-independent).")
     ap.add_argument("--prior-dataset-id", type=int, default=None,
                     help="parallel prior dataset id (default: control id + 1).")
     ap.add_argument("--prior-dataset-name", default=None,
@@ -136,7 +131,7 @@ def main() -> int:
     if args.dest:
         dest, prev, how = Path(args.dest), "(override)", "override"
     else:
-        dest, prev, how = _dest_folder(main_dir, plan_name, configuration, args.fold)
+        dest, prev, how = _dest_folder(main_dir, plan_name, configuration, args.trainer)
     dest.mkdir(parents=True, exist_ok=True)
     print(f"[relocate] previous_stage={prev}  dest ({how}) = {dest}")
     print(f"[relocate] prior segs from = {prior_data}")

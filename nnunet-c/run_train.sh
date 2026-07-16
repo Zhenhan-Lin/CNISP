@@ -103,6 +103,9 @@ else
         -c "$CONFIGURATION" ${PREPROCESS_NP:+-np "$PREPROCESS_NP"}
 fi
 
+# the cascade seg_prev folder is keyed by the TRAINING trainer class name, so the
+# gate must look under the SAME trainer as the upcoming nnUNetv2_train (-tr).
+[[ "$CASCADE" == "1" ]] && GATE_ARGS="$GATE_ARGS --trainer $CORRECTOR_TRAINER"
 echo "[run_train] (5) POTHOLE-4 GATE: check_preprocessed ${GATE_ARGS:+($GATE_ARGS)}"
 python3 "$HERE/diagnostics/check_preprocessed.py" \
     --config "$CONFIG" --control "$CONTROL" --plan-name "$PLAN_NAME" $GATE_ARGS

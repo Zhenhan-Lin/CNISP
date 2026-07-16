@@ -124,7 +124,11 @@ def main() -> int:
                          "an integer {0..4} mask on the same grid.")
     ap.add_argument("--prevseg-dir", default=None,
                     help="(cascade) override the seg_prev folder (else computed from "
-                         "the plan's previous_stage).")
+                         "the plan's previous_stage + --trainer).")
+    ap.add_argument("--trainer", default="nnUNetTrainer_OrbitalCascade",
+                    help="(cascade) the TRAINING trainer -- the seg_prev folder is keyed "
+                         "by this class name, so it must match run_train.sh's "
+                         "CORRECTOR_TRAINER (default %(default)s).")
     args = ap.parse_args()
 
     cfg, ctrl, data_dir, ref_plan_json = _resolve_paths(
@@ -201,16 +205,23 @@ def main() -> int:
             prev_dir = Path(args.prevseg_dir)
         else:
             plan_json = ds_dir / f"{args.plan_name}.json"
-            prev = None
-            if plan_json.is_file():
-                prev = (json.load(open(plan_json)).get("configurations", {})
-                        .get(configuration, {}).get("previous_stage"))
+            plan = json.load(open(plan_json)) if plan_json.is_file() else {}
+            prev = plan.get("configurations", {}).get(configuration, {}).get("previous_stage")
+            results = os.environ.get("nnUNet_results")
             if not prev:
                 failures.append(
                     f"plan {plan_json} lacks configurations.{configuration}."
                     f"previous_stage -- rebuild with build_finetune_plan.py --cascade")
+            elif not results:
+                failures.append("$nnUNet_results unset (needed to locate seg_prev)")
             else:
-                prev_dir = ds_dir / prev / "predicted_next_stage" / configuration
+                # nnUNet reads seg_prev from nnUNet_results/<dataset>/<TRAINER>__
+                # <plans_name>__<previous_stage>/predicted_next_stage/<config> --
+                # keyed by the TRAINING trainer class name (must match relocate).
+                plans_name = plan.get("plans_name", args.plan_name)
+                prev_dir = (Path(results) / ds_dir.name
+                            / f"{args.trainer}__{plans_name}__{prev}"
+                            / "predicted_next_stage" / configuration)
         if prev_dir is not None:
             prev_file = prev_dir / f"{stem}.b2nd"
             print(f"[check] seg_prev dir = {prev_dir}")
