@@ -334,7 +334,12 @@ def main() -> int:
             # partial OR inconsistent channel set is treated as a miss + rebuilt.
             if args.skip_existing:
                 if cascade:
-                    _cache_ok = ((images_out / f"{cid}_0000.nii.gz").is_file()
+                    # A leftover _0001+ from a prior STACKED build means the cached
+                    # imagesTs is a mixed 5-ch set -> force a rebuild (+ cleanup below),
+                    # else nnUNet reads _0000.._0004 and chokes on the shape mismatch.
+                    _stale = (images_out / f"{cid}_0001.nii.gz").is_file()
+                    _cache_ok = (not _stale
+                                 and (images_out / f"{cid}_0000.nii.gz").is_file()
                                  and (prevseg_out / f"{cid}.nii.gz").is_file())
                 else:
                     _cache_ok = _cached_channels_ok(images_out, cid, N_CHANNELS)
@@ -400,6 +405,13 @@ def main() -> int:
                 pre_arr = np.asanyarray(pre_rs.dataobj).astype(np.uint8)
                 nib.save(nib.Nifti1Image(pre_arr, np.asarray(tgt_aff)),
                          str(prevseg_out / f"{cid}.nii.gz"))
+                # cascade imagesTs must be 1-channel: remove any stale prior channels
+                # ({cid}_0001+) left by a previous stacked build, else nnUNet reads
+                # _0000.._0004 for this case and errors on the shape mismatch.
+                for _c in range(1, N_CHANNELS):
+                    _stalep = images_out / f"{cid}_{_c:04d}.nii.gz"
+                    if _stalep.exists():
+                        _stalep.unlink()
                 assembled.append(cid)
                 print(f"  {cid}: shape={summary['shape']} (1ch CT + prevseg)")
             else:
