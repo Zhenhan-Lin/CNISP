@@ -187,6 +187,26 @@ python nnunet-c/scripts/build_corrector_dataset.py --control B --layout cascade 
 # then §1 Stages 3-4 with --control B: build_finetune_plan --control B --cascade;
 # copy the plan to 856; preprocess 855 + 856; relocate_prevseg --control B;
 # check_preprocessed --control B --cascade
+# Stage 3: fingerprint/plan 两个 + cascade plan + 复制 plan 给 856 + 预处理两个
+nnUNetv2_extract_fingerprint -d 855 --verify_dataset_integrity && nnUNetv2_plan_experiment -d 855
+nnUNetv2_extract_fingerprint -d 856 --verify_dataset_integrity && nnUNetv2_plan_experiment -d 856
+
+python nnunet-c/scripts/build_finetune_plan.py --control B --cascade --out-plan-name "$PLAN"
+python3 - <<'PY'
+import json, os
+pp = os.environ["nnUNet_preprocessed"]
+d = json.load(open(f"{pp}/Dataset855_PHOTON_CT_CORR_B_stacked/nnUNetPlansFinetune.json"))
+d["dataset_name"] = "Dataset856_PHOTON_CT_CORR_B_stacked_prior"
+d["configurations"]["3d_fullres"].pop("previous_stage", None)
+json.dump(d, open(f"{pp}/Dataset856_PHOTON_CT_CORR_B_stacked_prior/nnUNetPlansFinetune.json","w"), indent=2)
+print("wrote 856 plan")
+PY
+nnUNetv2_preprocess -d 855 -plans_name "$PLAN" -c 3d_fullres
+nnUNetv2_preprocess -d 856 -plans_name "$PLAN" -c 3d_fullres
+# Stage 4: relocate + gate（--control B）
+python nnunet-c/scripts/relocate_prevseg.py --control B --plan-name "$PLAN"
+python nnunet-c/diagnostics/check_preprocessed.py --control B --plan-name "$PLAN" --cascade
+
 bash nnunet-c/run_train.sh B 0                 # CASCADE=1 + OrbitalCascade are the defaults
 bash nnunet-c/run_corrector_predict.sh B 0
 ```

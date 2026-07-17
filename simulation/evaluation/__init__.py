@@ -24,4 +24,10 @@ Drivers (thin ``run(args)`` + CLI):
   * :mod:`simulation.evaluation.volume_stability_summary`  cross-resolution CoV figure
   * :mod:`simulation.evaluation.volume_agreement_summary`  Bland-Altman figure
   * :mod:`simulation.evaluation.surface_quality_summary`   ASSD/HD95/Surface-Dice figure
+
+Anatomical plausibility sub-module (two-layer topology / continuity / shape):
+  computation   :mod:`simulation.evaluation.plausibility`             per-eye topology + continuity + shape reg
+  aggregation   :mod:`simulation.evaluation.plausibility_aggregate`   bucket stats, Wilson CI, paired tests
+  rendering     :mod:`simulation.evaluation.plausibility_plots`       Figures A-E
+  driver        :mod:`simulation.evaluation.plausibility_summary`     CLI entry point
 """
