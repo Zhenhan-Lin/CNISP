@@ -32,6 +32,11 @@ nnunet-c/lib/__pycache__
 nnunet-c/engine/__pycache__
 nnunet-c/scripts/__pycache__
 nnunet-c/diagnostics/__pycache__
+nnunet-c/data/*
+nnunet-c/test_input/*
+nnunet-c/test_input_single/*
+nnunet-c/predictions/*
+nnunet-c/predictions_single/*
 review_checklist_part2.csv
 .cursor
 .DS_Store
