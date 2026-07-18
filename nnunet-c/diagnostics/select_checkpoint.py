@@ -20,9 +20,11 @@ aggregation), so selection is scored identically to final evaluation.
 Prerequisites (GPU box):
   * The corrector trainer + per-channel resampler are already installed into
     nnunetv2 (run_train.sh / run_corrector_predict.sh do this once).
-  * A fixed validation set with balanced step_size exists: its 5-ch inputs under
-    ``--images-ts`` and its map (``test_cases_map.json``, each case carrying a
-    ``step`` field) under ``--map`` -- both produced by build_corrector_testset.py.
+  * A fixed validation set with balanced step_size exists, produced by
+    build_corrector_testset.py: its inputs under ``--images-ts`` (cascade: 1-ch CT
+    + a sibling ``prevsegTs`` of CNISP prior masks, auto-detected here; legacy: 5-ch
+    image) and its map (``test_cases_map.json``, each case carrying a ``step``
+    field) under ``--map``.
   * Periodic checkpoint snapshots exist. nnUNet overwrites checkpoint_latest.pth,
     so either (a) a save-every-N hook on the trainer writes checkpoint_epochXXX.pth,
     or (b) you copy checkpoint_latest.pth aside at intervals. Point --checkpoints
@@ -74,7 +76,8 @@ def _resolve_checkpoints(spec: str) -> list[Path]:
     return uniq
 
 
-def _predict(images_ts: Path, out_dir: Path, args, chk: Path) -> None:
+def _predict(images_ts: Path, out_dir: Path, args, chk: Path,
+             prev_stage: str | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         "nnUNetv2_predict",
@@ -83,7 +86,13 @@ def _predict(images_ts: Path, out_dir: Path, args, chk: Path) -> None:
         "-tr", args.trainer, "-p", args.plan_name, "-f", str(args.fold),
         "-chk", chk.name,
     ]
-    print(f"    [predict] -chk {chk.name} -> {out_dir}")
+    # Cascade (Route A): the config has previous_stage=cnisp_prior, so nnUNet
+    # asserts a prev-stage seg folder is supplied. Pass the prevsegTs dir (the
+    # per-case CNISP prior masks) exactly as run_corrector_predict.sh does.
+    if prev_stage:
+        cmd += ["-prev_stage_predictions", str(prev_stage)]
+    print(f"    [predict] -chk {chk.name} -> {out_dir}"
+          f"{'  (+prev_stage)' if prev_stage else ''}")
     subprocess.run(cmd, check=True)
 
 
@@ -109,7 +118,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--map", required=True, help="fixed val set test_cases_map.json (step per case)")
-    ap.add_argument("--images-ts", required=True, help="the val set's 5-ch imagesTs dir")
+    ap.add_argument("--images-ts", required=True,
+                    help="the val set's imagesTs dir (cascade: 1-ch CT; legacy: 5-ch)")
+    ap.add_argument("--prev-stage-predictions", default=None,
+                    help="cascade (Route A): folder of {caseid}.nii.gz CNISP prior masks "
+                         "passed to nnUNetv2_predict -prev_stage_predictions. DEFAULT: "
+                         "auto-detect the sibling 'prevsegTs' next to --images-ts (present "
+                         "for a cascade testset); omit/absent -> legacy stacked path.")
     ap.add_argument("--checkpoints", required=True,
                     help="comma list of .pth paths and/or globs (periodic snapshots)")
     ap.add_argument("--dataset-id", required=True)
@@ -136,7 +151,19 @@ def main() -> int:
     if not ckpts:
         print(f"[select] no checkpoints matched: {args.checkpoints!r}", file=sys.stderr)
         return 2
-    print(f"[select] {len(ckpts)} checkpoint(s); criterion={args.criterion}")
+
+    # Cascade prev-stage folder: explicit --prev-stage-predictions wins; else
+    # auto-detect the sibling prevsegTs the cascade testset build writes next to
+    # imagesTs. None -> legacy stacked layout (prior baked into the 5-ch image).
+    prev_stage = args.prev_stage_predictions
+    if prev_stage is None:
+        cand = images_ts.parent / "prevsegTs"
+        prev_stage = str(cand) if cand.is_dir() else None
+    if prev_stage and not Path(prev_stage).is_dir():
+        print(f"[select] --prev-stage-predictions not a dir: {prev_stage}", file=sys.stderr)
+        return 2
+    print(f"[select] {len(ckpts)} checkpoint(s); criterion={args.criterion}; "
+          f"prev_stage={'(cascade) ' + prev_stage if prev_stage else '(none/stacked)'}")
 
     rows = []                       # per-checkpoint summary
     all_steps: set[str] = set()
@@ -144,7 +171,7 @@ def main() -> int:
         stem = chk.stem
         pred_dir = work / f"pred_{stem}"
         if not (args.skip_existing and pred_dir.is_dir() and any(pred_dir.glob("*.nii.gz"))):
-            _predict(images_ts, pred_dir, args, chk)
+            _predict(images_ts, pred_dir, args, chk, prev_stage)
         by_step = _eval(map_json, pred_dir, work / f"eval_{stem}.csv")
         per_step = _read_by_step(by_step)
         if not per_step:
