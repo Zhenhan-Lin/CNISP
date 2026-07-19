@@ -277,12 +277,20 @@ Notes:
 | 7 | `--full-metrics` summary | ASSD/HD95/NSD/volBias per structure |
 
 ---
-
 ## 6. Config variants
 `--config nnunet-c/configs/<name>.yaml` (and `CONFIG=…` for the wrappers) switches the
 whole identity/schedule set — used for rollback / buggy-mapping ablations
 (`corrector_rollback*.yaml`, `corrector_*_buggy*.yaml`). The dataset ids/names,
 `data_root`, `steps`, and `finetune:` schedule all come from the chosen config, so a
 variant runs the identical pipeline against its own datasets/outputs.
-
-## 7. FOV-truncation experiment → `RUNBOOK_FOV.md`.
+## 7. Visualization
+```bash
+IDX=comparison/viz/evaluation__thick/mask_index.json
+OUT=comparison/viz/evaluation__thick; CSV=$OUT/metrics_long.csv
+python3 simulation/evaluation/build_metrics.py           --mask-index $IDX --out-csv $CSV
+python3 simulation/evaluation/surface_quality_summary.py  --out $OUT --mode thick --metrics-csv $CSV
+python3 simulation/evaluation/volume_agreement_summary.py --out $OUT --mode thick --ba-structure Globe --metrics-csv $CSV
+python3 simulation/evaluation/volume_stability_summary.py --out $OUT --mode thick --metrics-csv $CSV
+python3 simulation/evaluation/plausibility_summary.py     --mask-index $IDX --out $OUT/plausibility
+```
+## 8. FOV-truncation experiment → `RUNBOOK_FOV.md`.
