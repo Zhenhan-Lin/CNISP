@@ -108,9 +108,19 @@ def run(args) -> int:
     import pandas as pd
     csv_path = out / "plausibility_long.csv"
 
+    # Resume order: explicit --plausibility-csv, else auto-reuse the default-path
+    # CSV if it already exists (the per-mask table is HOURS to build, so a plain
+    # re-run must NOT silently recompute it). --recompute forces a rebuild.
+    src_csv = None
     if args.plausibility_csv and Path(args.plausibility_csv).is_file():
-        print(f"[plausibility] loading prebuilt CSV: {args.plausibility_csv}")
-        df = pd.read_csv(args.plausibility_csv)
+        src_csv = args.plausibility_csv
+    elif csv_path.is_file() and not args.recompute:
+        src_csv = str(csv_path)
+        print(f"[plausibility] reusing existing {csv_path} "
+              f"(pass --recompute to rebuild it from the masks).")
+    if src_csv:
+        print(f"[plausibility] loading prebuilt CSV: {src_csv}")
+        df = pd.read_csv(src_csv)
     else:
         df = build_plausibility_table(
             index,
@@ -296,7 +306,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", required=True,
                     help="output directory for figures + CSVs.")
     ap.add_argument("--plausibility-csv", default=None,
-                    help="prebuilt plausibility_long.csv (skip recompute).")
+                    help="prebuilt plausibility_long.csv (skip recompute). If "
+                         "omitted, an existing <out>/plausibility_long.csv is "
+                         "reused automatically unless --recompute is given.")
+    ap.add_argument("--recompute", action="store_true",
+                    help="force rebuilding plausibility_long.csv from the masks "
+                         "(hours) even if it already exists at the default path.")
     ap.add_argument("--min-cc-voxels", type=int, default=5,
                     help="minimum CC size to count as a topology violation "
                          "(default 5; filters CNISP rasterization artifacts).")

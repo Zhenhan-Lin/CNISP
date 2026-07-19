@@ -92,8 +92,13 @@ def topology_violation_figure(
                 else:
                     r = row.iloc[0]
                     rates.append(r["rate"])
-                    ci_lo.append(r["rate"] - r["ci_lo"])
-                    ci_hi.append(r["ci_hi"] - r["rate"])
+                    # Error-bar HALF-LENGTHS (distance from the plotted rate to
+                    # each CI bound). A Wilson-type CI is not centered on the raw
+                    # rate, so near 0/1 a bound can cross the rate and make a
+                    # half-length negative -- matplotlib rejects yerr < 0. Clamp
+                    # to 0 (the whisker just doesn't extend past the bar).
+                    ci_lo.append(max(0.0, r["rate"] - r["ci_lo"]))
+                    ci_hi.append(max(0.0, r["ci_hi"] - r["rate"]))
 
             offset = (i - (n_bars - 1) / 2.0) * w
             yerr = [ci_lo, ci_hi]
