@@ -188,19 +188,38 @@ def run(args) -> int:
         if lbl in present and lbl not in methods:
             methods.append(lbl)
 
-    print(f"[combined_summary] experiment={exp}  methods overlaid: {methods}")
-    print(f"[combined_summary] delta panel: {delta_label} - "
-          f"{NNUNET_METHOD_LABEL}")
+    # ── DISPLAY-ONLY A–E relabel ────────────────────────────────────────
+    # config ``arm_display_labels: {<internal method_label>: "A (nnUNet)", ...}``
+    # remaps the legend/title text to the 5-arm A–E scheme WITHOUT touching the
+    # data keys or colors (the internal ``nnUNet-C (C)`` is arm D=Proposed, etc.).
+    # When set, the overlay is reordered by the display label so the legend reads
+    # A→E. Empty (default) => internal labels, unchanged behaviour.
+    display_map = dict(cfg.get("arm_display_labels", {}) or {})
+    if display_map:
+        methods = sorted(methods, key=lambda m: display_map.get(m, m))
+        missing = [m for m in methods if m not in display_map]
+        if missing:
+            print(f"[combined_summary] note: no arm_display_labels entry for "
+                  f"{missing} (shown with their internal label).", file=sys.stderr)
+
+    def _disp(m: str) -> str:
+        return display_map.get(m, m)
+
+    print(f"[combined_summary] experiment={exp}  methods overlaid: "
+          f"{[_disp(m) for m in methods]}")
+    print(f"[combined_summary] delta panel: {_disp(delta_label)} - "
+          f"{_disp(NNUNET_METHOD_LABEL)}")
 
     # ── Stand-alone panels ───────────────────────────────────────
     overall_path = out_dir / "combined_overall_dice_vs_eff_res.png"
     save_standalone(overall_path, (11, 5), lambda ax: draw_paired_overall(
-        ax, methods, bucket_order, by_method_bucket, eff_by_bucket))
+        ax, methods, bucket_order, by_method_bucket, eff_by_bucket,
+        label_map=display_map))
 
     per_class_path = out_dir / "combined_per_class_dice_vs_eff_res.png"
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     draw_paired_per_class(axes, methods, bucket_order, by_method_bucket,
-                          eff_by_bucket)
+                          eff_by_bucket, label_map=display_map)
     fig.suptitle("Per-class Dice vs effective resolution", fontsize=12,
                  fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -209,7 +228,8 @@ def run(args) -> int:
 
     delta_path = out_dir / "combined_delta_dice_vs_eff_res.png"
     save_standalone(delta_path, (11, 5), lambda ax: draw_delta(
-        ax, delta_label, bucket_order, by_method_bucket, eff_by_bucket))
+        ax, delta_label, bucket_order, by_method_bucket, eff_by_bucket,
+        label_map=display_map))
 
     # ── Combined 3-row figure (the requested single image) ───────
     combined_path = out_dir / "combined_dice_vs_eff_res.png"
@@ -218,7 +238,7 @@ def run(args) -> int:
 
     ax0 = fig.add_subplot(gs[0])
     draw_paired_overall(ax0, methods, bucket_order, by_method_bucket,
-                        eff_by_bucket)
+                        eff_by_bucket, label_map=display_map)
 
     inner_gs = gs[1].subgridspec(2, 2, hspace=0.5, wspace=0.25)
     inner_axes = [
@@ -226,16 +246,16 @@ def run(args) -> int:
         [fig.add_subplot(inner_gs[1, 0]), fig.add_subplot(inner_gs[1, 1])],
     ]
     draw_paired_per_class(inner_axes, methods, bucket_order, by_method_bucket,
-                          eff_by_bucket)
+                          eff_by_bucket, label_map=display_map)
 
     ax2 = fig.add_subplot(gs[2])
     draw_delta(ax2, delta_label, bucket_order, by_method_bucket,
-               eff_by_bucket)
+               eff_by_bucket, label_map=display_map)
 
     fig.suptitle(
         f"{exp}: Dice vs effective resolution -- "
-        + " / ".join(methods)
-        + f"  (delta = {delta_label} - {NNUNET_METHOD_LABEL})",
+        + " / ".join(_disp(m) for m in methods)
+        + f"  (delta = {_disp(delta_label)} - {_disp(NNUNET_METHOD_LABEL)})",
         fontsize=12, fontweight="bold", y=0.92,
     )
     fig.savefig(str(combined_path), dpi=150, bbox_inches="tight")

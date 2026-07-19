@@ -54,6 +54,20 @@ nnunet_c_runs:
 nnunet_c_method_label: "nnUNet-C (C)"
 nnunet_c_eval_csv: nnunet-c/predictions/PHOTON_CT_CORR_C_cnisp/eval_C_fold0.csv
 
+# ── combined_summary A–E display labels (legend/title only) ───────
+# Maps each internal method_label to its A–E arm name for combined_summary's
+# legend, titles, and A→E overlay order. Data keys + colors are untouched (this
+# is display-only). NOTE the internal names are misleading on purpose-of-history:
+# "nnUNet-C (C)" is arm D (Proposed, the CNISP-prelabel corrector, Dataset845)
+# and "nnUNet-C (B)" is arm B (Cascade, the nnUNet-prelabel corrector, 855); the
+# plain CNISP run corrector_gt is arm C. This mapping fixes exactly that.
+arm_display_labels:
+  nnUNet-sparse: "A (nnUNet)"
+  "nnUNet-C (B)": "B (Cascade UNet)"
+  CNISP-v6.5-gt: "C (CNISP)"
+  "nnUNet-C (C)": "D (Proposed)"
+  CNISP-v6.5-gt-atlasGT: "E (Oracle)"
+
 # ── Source CT discovery ───────────────────────────────────────────
 atlas_image_dir: /fs5/p_masi/linz18/data/atlas_megadocker_export/CTONS_atlas_TBI/atlas_images
 pivot_csv: /fs5/p_masi/linz18/QA_record/table_collection/PHOTON_CP_QA_pivot_table.csv

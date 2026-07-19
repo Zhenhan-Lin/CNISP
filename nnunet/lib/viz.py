@@ -491,7 +491,12 @@ def draw_paired_overall(
     bucket_order: List[str],
     by_method_bucket,
     eff_by_bucket,
+    label_map=None,
 ) -> None:
+    # label_map: DISPLAY-ONLY method -> legend label remap (e.g. internal
+    # "nnUNet-C (C)" -> "D (Proposed)"). Data keys and colors stay on the
+    # internal method string; only the legend text changes. Default = identity.
+    lm = label_map or {}
     for idx, m in enumerate(methods):
         xs, ys, es, ns = series_for(
             m, "mean", bucket_order, by_method_bucket, eff_by_bucket,
@@ -499,7 +504,7 @@ def draw_paired_overall(
         if not xs:
             continue
         c = method_color(m, idx)
-        ax.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color=c, label=m)
+        ax.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color=c, label=lm.get(m, m))
         # Stagger the per-point labels by method index so the (up to 4)
         # near-coincident markers at each eff_res bucket don't pile their
         # annotations on top of each other: alternate above/below the marker
@@ -525,8 +530,13 @@ def draw_paired_per_class(
     bucket_order: List[str],
     by_method_bucket,
     eff_by_bucket,
+    label_map=None,
 ) -> None:
-    """Fill a 2x2 grid of axes (one per foreground class) with paired curves."""
+    """Fill a 2x2 grid of axes (one per foreground class) with paired curves.
+
+    ``label_map`` is a DISPLAY-ONLY legend remap (data keys/colors unchanged).
+    """
+    lm = label_map or {}
     for i, c in enumerate(STRUCT_ORDER):
         ax = axes[i // 2][i % 2]
         for idx, m in enumerate(methods):
@@ -537,7 +547,7 @@ def draw_paired_per_class(
                 continue
             ax.errorbar(
                 xs, ys, yerr=es, fmt="o-", capsize=3,
-                color=method_color(m, idx), label=m,
+                color=method_color(m, idx), label=lm.get(m, m),
             )
         ax.set_title(c)
         ax.set_xlabel("effective resolution (mm)")
@@ -572,6 +582,7 @@ def draw_delta(
     bucket_order: List[str],
     by_method_bucket,
     eff_by_bucket,
+    label_map=None,
 ) -> None:
     """Bar chart of (CNISP - nnUNet) on the mean Dice row, per shared bucket.
 
@@ -579,14 +590,20 @@ def draw_delta(
     plotted; otherwise the bar would be meaningless. eff_res mean of the
     CNISP rows is used for the x-axis (CNISP is the bucket reference
     because all eff_res values come from CNISP's sweep_results.pkl).
+
+    ``label_map`` remaps ONLY the title/axis text (data keys unchanged), so the
+    baseline lookup below still keys on the internal ``NNUNET_METHOD_LABEL``.
     """
+    lm = label_map or {}
+    cn_disp = lm.get(cnisp_method, cnisp_method)
+    nn_disp = lm.get(NNUNET_METHOD_LABEL, NNUNET_METHOD_LABEL)
     nn = bucket_means(NNUNET_METHOD_LABEL, bucket_order,
                       by_method_bucket, eff_by_bucket)
     cn = bucket_means(cnisp_method, bucket_order,
                       by_method_bucket, eff_by_bucket)
     shared = [b for b in bucket_order if b in nn and b in cn]
     if not shared:
-        ax.set_title(f"{cnisp_method} - {NNUNET_METHOD_LABEL}  (no shared buckets)")
+        ax.set_title(f"{cn_disp} - {nn_disp}  (no shared buckets)")
         ax.axis("off")
         return
 
@@ -621,10 +638,10 @@ def draw_delta(
             ha="center", fontsize=7, color="#222",
         )
     ax.set_xlabel("effective resolution (mm, CNISP bucket mean)")
-    ax.set_ylabel(f"Dice delta  ({cnisp_method} - {NNUNET_METHOD_LABEL})")
+    ax.set_ylabel(f"Dice delta  ({cn_disp} - {nn_disp})")
     ax.set_title(
-        f"Head-to-head: {cnisp_method} - {NNUNET_METHOD_LABEL}  "
-        f"(positive => {cnisp_method} wins)"
+        f"Head-to-head: {cn_disp} - {nn_disp}  "
+        f"(positive => {cn_disp} wins)"
     )
     ax.grid(True, axis="y", alpha=0.3)
 
