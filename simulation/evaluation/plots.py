@@ -192,5 +192,94 @@ def surface_figure(metrics: Dict[str, Dict[str, np.ndarray]],
     fig.savefig(str(out_path)); plt.close(fig)
 
 
+def _dice_series(arm, structure, bucket_order, by_arm_bucket, eff_by_bucket):
+    """(xs, ys, es, ns) sorted by eff_res for one (arm, structure) across buckets."""
+    xs, ys, es, ns = [], [], [], []
+    for bkt in bucket_order:
+        vals = by_arm_bucket.get((arm, bkt), {}).get(structure, [])
+        effs = eff_by_bucket.get((arm, bkt), [])
+        if not vals or not effs:
+            continue
+        arr = np.asarray(vals, dtype=float)
+        xs.append(float(np.mean(effs)))
+        ys.append(float(arr.mean()))
+        es.append(float(arr.std()))
+        ns.append(int(arr.size))
+    if xs:
+        order = np.argsort(xs)
+        xs = [xs[i] for i in order]; ys = [ys[i] for i in order]
+        es = [es[i] for i in order]; ns = [ns[i] for i in order]
+    return xs, ys, es, ns
+
+
+def dice_vs_eff_res_figure(bucket_order, by_arm_bucket, eff_by_bucket, out_path,
+                           delta_arm: str = "Proposed", baseline: str = "nnUNet",
+                           legend_map=None, synthetic: bool = False) -> None:
+    """5-arm Dice-vs-effective-resolution: overall + per-class 2x2 + delta panel.
+
+    Single-source-of-truth replacement for the old comparison-track combined__thick
+    figure, driven purely by metrics_long (native-mask Dice for every arm). Colors
+    + display names come from this module's COLOR/LEGEND (already A-E); pass
+    ``legend_map`` (arm -> str) to override the legend from a config.
+    """
+    lg = dict(LEGEND)
+    if legend_map:
+        lg.update(legend_map)
+    fig = plt.figure(figsize=(12, 16))
+    gs = gridspec.GridSpec(3, 1, hspace=0.32, height_ratios=[1, 1.9, 1])
+
+    ax0 = fig.add_subplot(gs[0])
+    for m in METHODS:
+        xs, ys, es, _ = _dice_series(m, "mean", bucket_order, by_arm_bucket, eff_by_bucket)
+        if not xs:
+            continue
+        ax0.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color=COLOR[m], label=lg.get(m, m))
+    ax0.set_xlabel("effective resolution (mm, through-plane)")
+    ax0.set_ylabel("mean Dice (4 fg classes)")
+    ax0.set_title("(a)  Overall mean Dice vs effective resolution", loc="left")
+    ax0.set_ylim(0, 1); ax0.grid(True, alpha=0.3); ax0.legend(fontsize=8, loc="lower left")
+
+    inner = gs[1].subgridspec(2, 2, hspace=0.4, wspace=0.22)
+    for i, struct in enumerate(STRUCTURES):
+        ax = fig.add_subplot(inner[i // 2, i % 2])
+        for m in METHODS:
+            xs, ys, es, _ = _dice_series(m, struct, bucket_order, by_arm_bucket, eff_by_bucket)
+            if not xs:
+                continue
+            ax.errorbar(xs, ys, yerr=es, fmt="o-", capsize=3, color=COLOR[m], label=lg.get(m, m))
+        ax.set_title(struct, loc="left"); ax.set_xlabel("eff. res (mm)")
+        ax.set_ylabel("Dice"); ax.set_ylim(0, 1); ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=7, loc="lower left")
+
+    ax2 = fig.add_subplot(gs[2])
+    xs, ds = [], []
+    for b in bucket_order:
+        base = by_arm_bucket.get((baseline, b), {}).get("mean", [])
+        dl = by_arm_bucket.get((delta_arm, b), {}).get("mean", [])
+        effs = eff_by_bucket.get((delta_arm, b), [])
+        if not base or not dl or not effs:
+            continue
+        xs.append(float(np.mean(effs)))
+        ds.append(float(np.mean(dl) - np.mean(base)))
+    if xs:
+        order = np.argsort(xs); xs = [xs[i] for i in order]; ds = [ds[i] for i in order]
+        colors = [COLOR[delta_arm] if d >= 0 else COLOR[baseline] for d in ds]
+        ax2.bar(xs, ds, width=0.4, color=colors, alpha=0.85, edgecolor="#444", lw=0.6)
+    ax2.axhline(0, color="#444", lw=0.8)
+    ax2.set_xlabel("effective resolution (mm)")
+    ax2.set_ylabel(f"Dice Δ ({lg.get(delta_arm, delta_arm)} − {lg.get(baseline, baseline)})")
+    ax2.set_title(f"(c)  Head-to-head: {lg.get(delta_arm, delta_arm)} − "
+                  f"{lg.get(baseline, baseline)}  (positive → {delta_arm} wins)", loc="left")
+    ax2.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("Dice vs effective resolution — 5-arm (from metrics_long)",
+                 fontsize=12, fontweight="bold", y=0.905)
+    _foot(fig, synthetic)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path)); plt.close(fig)
+
+
 __all__ = ["stability_figure", "volume_agreement_figure",
-           "single_bland_altman_figure", "surface_figure", "LEGEND", "COLOR"]
+           "single_bland_altman_figure", "surface_figure",
+           "dice_vs_eff_res_figure", "LEGEND", "COLOR"]

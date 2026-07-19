@@ -9,10 +9,15 @@
 #
 # Stages (all write under the mask_index's own directory):
 #   1. build_metrics.py          -> metrics_long.csv   (the shared interface)
-#   2. surface_quality_summary   -> ASSD / HD95 / NSD figures
-#   3. volume_agreement_summary  -> Bland-Altman (per --ba-structure)
-#   4. volume_stability_summary  -> volume CoV across steps
-#   5. plausibility_summary      -> anatomical-plausibility figures (from masks)
+#   2. dice_quality_summary      -> Dice vs eff-res, 5-arm (replaces combined__thick)
+#   3. surface_quality_summary   -> ASSD / HD95 / NSD figures
+#   4. volume_agreement_summary  -> Bland-Altman (per --ba-structure)
+#   5. volume_stability_summary  -> volume CoV across steps
+#   6. plausibility_summary      -> anatomical-plausibility figures
+#
+# RESUME by default: an existing metrics_long.csv (stage 1) and plausibility_long.csv
+# (stage 6) are reused instead of recomputed -- a re-run only re-renders figures.
+# Force rebuilds with REBUILD_METRICS=1 / PLAUS_ARGS="--recompute".
 #
 # Env overrides:
 #   MODE=thick            sweep mode; MUST match the mask_index 'mode' field.
@@ -45,22 +50,34 @@ echo "[figs] index=$IDX"
 echo "[figs] mode=$MODE  ba-structure=$BA_STRUCTURE  out=$OUT"
 echo "================================================================"
 
-echo "[figs] (1) build_metrics -> $CSV"
-python3 "$EVAL/build_metrics.py" --mask-index "$IDX" --out-csv "$CSV" $TAU
+# (1) metrics_long.csv -- RESUME by default: reuse an existing one so a re-run
+# never recomputes the (slow) per-mask metrics. REBUILD_METRICS=1 forces a rebuild.
+if [[ -f "$CSV" && "${REBUILD_METRICS:-0}" != "1" ]]; then
+    echo "[figs] (1) reuse existing $CSV (set REBUILD_METRICS=1 to rebuild)"
+else
+    echo "[figs] (1) build_metrics -> $CSV"
+    python3 "$EVAL/build_metrics.py" --mask-index "$IDX" --out-csv "$CSV" $TAU
+fi
 
-echo "[figs] (2) surface quality (ASSD / HD95 / NSD)"
+echo "[figs] (2) Dice vs effective resolution (5-arm; replaces combined__thick)"
+python3 "$EVAL/dice_quality_summary.py"     --out "$OUT" --mode "$MODE" \
+    --metrics-csv "$CSV" $COMMON $TAU ${DICE_ARGS:-}
+
+echo "[figs] (3) surface quality (ASSD / HD95 / NSD)"
 python3 "$EVAL/surface_quality_summary.py"  --out "$OUT" --mode "$MODE" \
     --metrics-csv "$CSV" $COMMON $TAU
 
-echo "[figs] (3) volume agreement (Bland-Altman: $BA_STRUCTURE)"
+echo "[figs] (4) volume agreement (Bland-Altman: $BA_STRUCTURE)"
 python3 "$EVAL/volume_agreement_summary.py" --out "$OUT" --mode "$MODE" \
     --ba-structure "$BA_STRUCTURE" --metrics-csv "$CSV" $COMMON $TAU
 
-echo "[figs] (4) volume stability (CoV across steps)"
+echo "[figs] (5) volume stability (CoV across steps)"
 python3 "$EVAL/volume_stability_summary.py" --out "$OUT" --mode "$MODE" \
     --metrics-csv "$CSV" $COMMON $TAU
 
-echo "[figs] (5) plausibility (from masks)"
+# (6) plausibility -- auto-reuses an existing <out>/plausibility/plausibility_long.csv
+# (the hours-long per-mask table); pass PLAUS_ARGS="--recompute" to force a rebuild.
+echo "[figs] (6) plausibility (reuses plausibility_long.csv if present)"
 python3 "$EVAL/plausibility_summary.py" --mask-index "$IDX" \
     --out "$OUT/plausibility" ${PLAUS_ARGS:-}
 

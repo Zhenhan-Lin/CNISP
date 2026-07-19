@@ -187,6 +187,45 @@ def surface(df, mode: str = DEFAULT_MODE) -> Dict[str, Dict[str, np.ndarray]]:
             "Surface Dice @1mm": {m: g[g.arm == m]["nsd"].dropna().values for m in METHODS}}
 
 
+def dice_vs_eff_res(df, mode: str = DEFAULT_MODE, edges=None):
+    """Per-(arm, eff_res bucket) Dice for the Dice-vs-effective-resolution figure.
+
+    Buckets each (case, arm, step) by its ``eff_res`` and accumulates, per
+    (arm, bucket): the 4-class MEAN Dice (``"mean"`` key) and each per-structure
+    Dice. Uses the native-mask ``dice`` already in metrics_long -- all 5 arms incl
+    Oracle, same native-grid order-0 convention as every other evaluation figure.
+    This is the single-source-of-truth replacement for the old comparison-track
+    paired-CSV Dice curves.
+
+    Returns ``(bucket_order, by_arm_bucket, eff_by_bucket)``:
+      * ``by_arm_bucket[(arm, bucket)]`` = ``{"mean": [...], "<structure>": [...]}``
+      * ``eff_by_bucket[(arm, bucket)]`` = ``[eff_res, ...]``
+    """
+    from nnunet.helpers.buckets import (  # KEEP: shared eff_res bucketing helper
+        assign_bucket, bucket_sort_key, DEFAULT_BUCKET_EDGES_MM)
+    edges = list(edges) if edges else list(DEFAULT_BUCKET_EDGES_MM)
+    sub = df[df["mode"] == mode]
+    by_arm_bucket: Dict = {}
+    eff_by_bucket: Dict = {}
+    seen = set()
+    for (arm, _case, _step), g in sub.groupby(["arm", "case", "step"]):
+        eff_vals = g["eff_res"].dropna()
+        if eff_vals.empty:
+            continue
+        eff = float(eff_vals.iloc[0])
+        bkt = assign_bucket(eff, edges)[1]          # (index, label) -> label
+        seen.add(bkt)
+        key = (arm, bkt)
+        d = by_arm_bucket.setdefault(key, {})
+        for structure, dv in zip(g["structure"], g["dice"]):
+            d.setdefault(str(structure), []).append(float(dv))
+        d.setdefault("mean", []).append(float(g["dice"].mean()))  # 4-class mean
+        eff_by_bucket.setdefault(key, []).append(eff)
+    bucket_order = sorted(seen, key=bucket_sort_key)
+    return bucket_order, by_arm_bucket, eff_by_bucket
+
+
 __all__ = ["stability", "stability_table", "volume_agreement",
-           "volume_agreement_per_arm", "surface", "restrict_to_common",
-           "METHODS", "STRUCTURES", "DEFAULT_MODE", "DEFAULT_BA_STRUCTURE"]
+           "volume_agreement_per_arm", "surface", "dice_vs_eff_res",
+           "restrict_to_common", "METHODS", "STRUCTURES",
+           "DEFAULT_MODE", "DEFAULT_BA_STRUCTURE"]
