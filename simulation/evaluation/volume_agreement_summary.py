@@ -50,6 +50,51 @@ def run(args) -> int:
     p = out / "volume_agreement_bland_altman.png"
     plots.volume_agreement_figure(per_arm, signed, p, synthetic=synth)
     print(f"[volume_agreement_summary] wrote {p}")
+
+    # ── per-arm Bland-Altman bias table (ALL 5 arms) + one panel per arm ──
+    # The combined figure above only draws nnUNet + Proposed; here we quantify
+    # every arm's volume bias (on the SAME restricted sample as the figure) so
+    # e.g. Proposed's +bias can be read off next to the other arms, print it to
+    # stdout, dump it to CSV, and render a standalone panel per arm in a subdir.
+    if not synth:
+        import csv as _csv
+        per_all, stats = aggregate.volume_agreement_per_arm(df, args.ba_structure)
+        cols = ["arm", "structure", "n", "bias_mm3", "sd_diff_mm3",
+                "loa_lo_mm3", "loa_hi_mm3", "ccc",
+                "mean_vol_pred_mm3", "mean_vol_gt_mm3", "mean_signed_pct"]
+        tbl = out / "bland_altman_bias_by_arm.csv"
+        with open(tbl, "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            for row in stats:
+                w.writerow({k: row[k] for k in cols})
+        print(f"[volume_agreement_summary] per-arm Bland-Altman bias "
+              f"({args.ba_structure}), same sample as the figure:")
+        print(f"    {'arm':<14}{'n':>5}{'bias(mm³)':>12}{'±LoA(mm³)':>12}"
+              f"{'CCC':>7}{'signed%':>9}")
+        for row in stats:
+            n = row["n"]
+            if n:
+                print(f"    {row['arm']:<14}{n:>5}{row['bias_mm3']:>12.1f}"
+                      f"{1.96*row['sd_diff_mm3']:>12.1f}{row['ccc']:>7.2f}"
+                      f"{row['mean_signed_pct']:>9.1f}")
+            else:
+                print(f"    {row['arm']:<14}{n:>5}{'(no rows)':>12}")
+        sub = out / "bland_altman_per_arm"
+        sub.mkdir(parents=True, exist_ok=True)
+        drawn, skipped = [], []
+        for m in aggregate.METHODS:
+            d = per_all[m]
+            fn = sub / f"bland_altman_{m.replace(' ', '_')}.png"
+            if plots.single_bland_altman_figure(
+                    d["v_pred"], d["v_gt"], d["thickness"], m, args.ba_structure, fn):
+                drawn.append(m)
+            else:
+                skipped.append((m, len(d["v_pred"])))
+        print(f"[volume_agreement_summary] bias table -> {tbl}")
+        print(f"[volume_agreement_summary] per-arm panels ({len(drawn)}) -> {sub}/")
+        for m, n in skipped:
+            print(f"    [skip panel] {m}: n={n} (<2 points)")
     return 0
 
 

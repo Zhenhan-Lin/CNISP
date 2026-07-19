@@ -51,6 +51,41 @@ def run(args) -> int:
     p = out / "volume_stability_by_resolution.png"
     plots.stability_figure(cov_mean, cov_sd, on_range, p, synthetic=synth)
     print(f"[volume_stability_summary] wrote {p}")
+
+    # ── persist the CoV / ON-range numbers behind the figure ──────────────
+    # The figure keeps CoV only in memory; dump it so per-(arm, structure) CoV,
+    # the per-case detail, and the sample counts are inspectable (e.g. how many
+    # cases -- and how many step_sizes per case -- feed each Oracle/Optic-nerve
+    # value). n_steps==1 => CoV/range 0 (population std of one sample), not dropped.
+    if not synth:
+        import csv as _csv
+        cov_detail, cov_summary, rng_detail = aggregate.stability_table(df, args.mode)
+
+        def _dump(path, rows, cols):
+            with open(path, "w", newline="") as f:
+                w = _csv.DictWriter(f, fieldnames=cols)
+                w.writeheader()
+                for r in rows:
+                    w.writerow({k: r.get(k) for k in cols})
+
+        f_sum = out / "volume_stability_cov_summary.csv"
+        f_det = out / "volume_stability_cov_detail.csv"
+        f_rng = out / "volume_stability_on_range_detail.csv"
+        _dump(f_sum, cov_summary, ["arm", "structure", "n_cases", "cov_mean_pct", "cov_sd_pct"])
+        _dump(f_det, cov_detail, ["arm", "structure", "case", "n_steps", "mean_vol_mm3", "cov_pct"])
+        _dump(f_rng, rng_detail, ["arm", "case", "n_steps", "mean_vol_mm3", "range_pct"])
+
+        # spotlight the coverage the user asked about (Oracle x Optic nerve).
+        for r in cov_summary:
+            if r["arm"] == "Oracle" and r["structure"] == "Optic nerve":
+                n1 = sum(1 for d in cov_detail
+                         if d["arm"] == "Oracle" and d["structure"] == "Optic nerve"
+                         and d["n_steps"] == 1)
+                print(f"[volume_stability_summary] Oracle × Optic nerve: "
+                      f"n_cases={r['n_cases']} (each = CoV over that case's step_sizes; "
+                      f"{n1} of them single-step → CoV 0), CoV mean={r['cov_mean_pct']:.2f}%. "
+                      f"Per-case step counts in {f_det.name}.")
+        print(f"[volume_stability_summary] CoV tables -> {f_sum} , {f_det} , {f_rng}")
     return 0
 
 

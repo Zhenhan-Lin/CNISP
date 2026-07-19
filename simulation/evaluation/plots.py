@@ -146,6 +146,31 @@ def volume_agreement_figure(per_arm: Dict, signed: Dict,
     fig.savefig(str(out_path)); plt.close(fig)
 
 
+def single_bland_altman_figure(v_pred, v_gt, thickness, arm: str, structure: str,
+                               out_path: Path, synthetic: bool = False) -> bool:
+    """One standalone Bland-Altman panel for a single arm (per-arm subfolder).
+
+    Reuses ``_bland_altman`` (same bias/LoA/CCC as the combined figure). Returns
+    True if it drew (>=2 paired points), False if skipped (too few points for a
+    meaningful cloud / for ``np.cov``).
+    """
+    v_pred = np.asarray(v_pred, dtype=float)
+    v_gt = np.asarray(v_gt, dtype=float)
+    if v_pred.size < 2:
+        return False
+    fig = plt.figure(figsize=(5.4, 4.6))
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_ylabel("V$_{pred}$ − V$_{GT}$  (mm³)")
+    _bland_altman(ax, fig, v_pred=v_pred, v_gt=v_gt, thickness=thickness,
+                  title=f"Bland–Altman — {arm} ({structure})",
+                  col=COLOR.get(arm, "#333333"), colorbar=True)
+    ax.axhline(0, color="0.55", ls=":", lw=0.9)
+    _foot(fig, synthetic)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path)); plt.close(fig)
+    return True
+
+
 def surface_figure(metrics: Dict[str, Dict[str, np.ndarray]],
                    out_path: Path, synthetic: bool = False) -> None:
     """Surface quality: ASSD / HD95 / Surface-Dice boxplots per method."""
@@ -167,5 +192,5 @@ def surface_figure(metrics: Dict[str, Dict[str, np.ndarray]],
     fig.savefig(str(out_path)); plt.close(fig)
 
 
-__all__ = ["stability_figure", "volume_agreement_figure", "surface_figure",
-           "LEGEND", "COLOR"]
+__all__ = ["stability_figure", "volume_agreement_figure",
+           "single_bland_altman_figure", "surface_figure", "LEGEND", "COLOR"]
