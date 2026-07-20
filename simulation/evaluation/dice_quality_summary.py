@@ -68,7 +68,7 @@ def run(args) -> int:
     p = out / "dice_vs_eff_res.png"
     plots.dice_vs_eff_res_figure(bucket_order, by_arm_bucket, eff_by_bucket, p,
                                  delta_arm=args.delta_arm, baseline=args.baseline,
-                                 legend_map=legend_map)
+                                 legend_map=legend_map, ymin=args.ymin)
     print(f"[dice_quality_summary] wrote {p}  "
           f"(arms={sorted({a for a, _ in by_arm_bucket})}, buckets={len(bucket_order)})")
     return 0
@@ -86,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="arm for the head-to-head delta panel (default Proposed).")
     ap.add_argument("--baseline", default="nnUNet",
                     help="baseline arm the delta is measured against (default nnUNet).")
+    ap.add_argument("--ymin", type=float, default=0.5,
+                    help="Dice y-axis lower bound for the overall + per-class panels "
+                         "(default 0.5, so the curves aren't squashed together; set "
+                         "lower if any arm dips below it at coarse resolution).")
     ap.add_argument("--config", default=None,
                     help="optional YAML with 'eval_arm_labels' (arm -> legend str).")
     ap.add_argument("--bucket-edges", default=None,

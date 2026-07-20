@@ -212,9 +212,21 @@ def _dice_series(arm, structure, bucket_order, by_arm_bucket, eff_by_bucket):
     return xs, ys, es, ns
 
 
+def _annotate_nodes(ax, xs, ys, color, idx, fs=6.0):
+    """Label each (x, y) node with its Dice, staggered above/below by arm idx so
+    the (up to 5) near-coincident markers at each eff_res don't overlap."""
+    sign = 1 if (idx % 2 == 0) else -1
+    dy = sign * (6 + (idx // 2) * 11)
+    va = "bottom" if sign > 0 else "top"
+    for x, y in zip(xs, ys):
+        ax.annotate(f"{y:.3f}", (x, y), textcoords="offset points",
+                    xytext=(0, dy), ha="center", va=va, fontsize=fs, color=color)
+
+
 def dice_vs_eff_res_figure(bucket_order, by_arm_bucket, eff_by_bucket, out_path,
                            delta_arm: str = "Proposed", baseline: str = "nnUNet",
-                           legend_map=None, synthetic: bool = False) -> None:
+                           legend_map=None, ymin: float = 0.5,
+                           synthetic: bool = False) -> None:
     """5-arm Dice-vs-effective-resolution: overall + per-class 2x2 + delta panel.
 
     Single-source-of-truth replacement for the old comparison-track combined__thick
@@ -229,26 +241,28 @@ def dice_vs_eff_res_figure(bucket_order, by_arm_bucket, eff_by_bucket, out_path,
     gs = gridspec.GridSpec(3, 1, hspace=0.32, height_ratios=[1, 1.9, 1])
 
     ax0 = fig.add_subplot(gs[0])
-    for m in METHODS:
+    for j, m in enumerate(METHODS):
         xs, ys, es, _ = _dice_series(m, "mean", bucket_order, by_arm_bucket, eff_by_bucket)
         if not xs:
             continue
         ax0.errorbar(xs, ys, yerr=es, fmt="o-", capsize=4, color=COLOR[m], label=lg.get(m, m))
+        _annotate_nodes(ax0, xs, ys, COLOR[m], j, fs=6.5)
     ax0.set_xlabel("effective resolution (mm, through-plane)")
     ax0.set_ylabel("mean Dice (4 fg classes)")
     ax0.set_title("(a)  Overall mean Dice vs effective resolution", loc="left")
-    ax0.set_ylim(0, 1); ax0.grid(True, alpha=0.3); ax0.legend(fontsize=8, loc="lower left")
+    ax0.set_ylim(ymin, 1.0); ax0.grid(True, alpha=0.3); ax0.legend(fontsize=8, loc="lower left")
 
     inner = gs[1].subgridspec(2, 2, hspace=0.4, wspace=0.22)
     for i, struct in enumerate(STRUCTURES):
         ax = fig.add_subplot(inner[i // 2, i % 2])
-        for m in METHODS:
+        for j, m in enumerate(METHODS):
             xs, ys, es, _ = _dice_series(m, struct, bucket_order, by_arm_bucket, eff_by_bucket)
             if not xs:
                 continue
             ax.errorbar(xs, ys, yerr=es, fmt="o-", capsize=3, color=COLOR[m], label=lg.get(m, m))
+            _annotate_nodes(ax, xs, ys, COLOR[m], j, fs=5.5)
         ax.set_title(struct, loc="left"); ax.set_xlabel("eff. res (mm)")
-        ax.set_ylabel("Dice"); ax.set_ylim(0, 1); ax.grid(True, alpha=0.3)
+        ax.set_ylabel("Dice"); ax.set_ylim(ymin, 1.0); ax.grid(True, alpha=0.3)
         if i == 0:
             ax.legend(fontsize=7, loc="lower left")
 
@@ -266,6 +280,10 @@ def dice_vs_eff_res_figure(bucket_order, by_arm_bucket, eff_by_bucket, out_path,
         order = np.argsort(xs); xs = [xs[i] for i in order]; ds = [ds[i] for i in order]
         colors = [COLOR[delta_arm] if d >= 0 else COLOR[baseline] for d in ds]
         ax2.bar(xs, ds, width=0.4, color=colors, alpha=0.85, edgecolor="#444", lw=0.6)
+        for x, d in zip(xs, ds):
+            ax2.annotate(f"{d:+.3f}", (x, d), textcoords="offset points",
+                         xytext=(0, 3 if d >= 0 else -10), ha="center",
+                         fontsize=6, color="#222")
     ax2.axhline(0, color="#444", lw=0.8)
     ax2.set_xlabel("effective resolution (mm)")
     ax2.set_ylabel(f"Dice Δ ({lg.get(delta_arm, delta_arm)} − {lg.get(baseline, baseline)})")
