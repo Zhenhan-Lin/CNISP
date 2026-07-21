@@ -1,13 +1,16 @@
 # FOV-Truncation Experiment Runbook (Part 2, "isolate FOV")
 
 Companion to `RUNBOOK.md`. Studies whether the CNISP-conditioned corrector recovers
-anatomy in an **imaged-but-empty** region: the native CT is FOV-truncated along z (a
-contiguous fraction blanked with air), **with no slice thickening** — so the only
+anatomy in an **imaged-but-empty** region: the native CT is FOV-truncated (a
+contiguous region blanked with air), **with no slice thickening** — so the only
 degradation is the missing field of view, and the corrector must defer to the
 **completed** CNISP prior where ch0 has no evidence.
 
 **Locked design choices:**
 - ch0 = truncation-only (native CT truncated, NOT thickened) → isolates the FOV variable.
+- Two truncation geometries (`--mode`): **slab** (type-1) blanks a through-plane slab;
+  **box** (type-2) keeps one axis-aligned FOV box — globe/anterior axis kept, the
+  up/down + left/right axes corner-clipped (mis-centred acquisition). See §1.
 - Truncation level is encoded as a **pseudo-step** `PP = round(keep_fraction*100)`
   (keep 0.5→`_step50`), so the ENTIRE cascade pipeline + stratified loader are reused
   unchanged — now stratifying by FOV severity. Set `CORRECTOR_STRATA="50,65,80"`.
@@ -17,7 +20,7 @@ degradation is the missing field of view, and the corrector must defer to the
 **What is new vs reused**
 | New (Part 2 code) | Reused unchanged |
 |---|---|
-| `nnunet/sparsify_inputs.py::_truncate_one_ct` | `build_corrector_dataset.py --layout cascade`, `build_finetune_plan.py --cascade`, `relocate_prevseg.py`, `run_train.sh`, `run_corrector_predict.sh` |
+| `nnunet/sparsify_inputs.py::_truncate_one_ct` (slab, type-1) + `_truncate_one_ct_box` (box, type-2) | `build_corrector_dataset.py --layout cascade`, `build_finetune_plan.py --cascade`, `relocate_prevseg.py`, `run_train.sh`, `run_corrector_predict.sh` |
 | `nnunet-c/scripts/build_fov_truncated_data.py` | the CNISP deployment flow (alignment + 835 stage-1 + CNISP 032) |
 | `CORRECTOR_STRATA` env on the trainer | `eval_corrector.py` (extended with `--region`) |
 | `eval_corrector.py --region visible\|truncated` | |
@@ -35,14 +38,39 @@ Copy `nnunet-c/configs/corrector.yaml` → `nnunet-c/configs/corrector_fov.yaml`
 Pass `--config nnunet-c/configs/corrector_fov.yaml` (and `CONFIG=…` to wrappers) everywhere.
 
 ## 1. Build the truncated CTs (new)
+Two geometries via `--mode`:
 ```bash
+# type-1 (slab, default): blank a through-plane slab (top/bottom of FOV cut off)
 python nnunet-c/scripts/build_fov_truncated_data.py \
-    --keep-fractions 0.5,0.65,0.8 --side end     # --side random for mixed cut ends; --side both = centred FOV
+    --keep-fractions 0.5,0.65,0.8 --side end     # --side random/both also available
+
+# type-2 (box): keep one axis-aligned FOV box; globe/anterior axis never cut, the
+# up/down + left/right axes corner-clipped -> a mis-centred acquisition where the
+# eye pokes out of the scanner box on two faces.
+python nnunet-c/scripts/build_fov_truncated_data.py \
+    --keep-fractions 0.5,0.65,0.8 --mode box --corner SL   # SL|SR|IL|IR (S/I x L/R) or random
 ```
 Writes `nnunet-c/data_fov/images/{case}_step{PP}_0000.nii.gz`, a
 `corrector_data_manifest.json` (→ build_corrector_dataset), and a
-`fov_truncation_manifest.json` sidecar (per (case,PP): trunc axis + visible range +
-source shape, for the region eval).
+`fov_truncation_manifest.json` sidecar (per (case,PP): `source_shape` + the visible
+window — **slab**: `trunc_axis` + `visible_range`; **box**: `visible_box` (per-axis
+`[lo,hi]`) + `corner` + `cut_axes` + `retained_fraction`/`retained_per_structure`).
+The region eval reads whichever is present.
+
+**Box specifics:**
+- The globe/anterior axis is found from the CT affine (`aff2axcodes` → the A/P axis)
+  and kept in full; the two orthogonal axes are the ones clipped.
+- `keep_fraction` = TOTAL retained orbit-volume fraction (split `sqrt` across the two
+  cut axes), so `_step50` ≈ half the eye out of FOV — comparable to the slab pseudo-step.
+- The cut is anchored on the orbit bbox (from `gt_candidate_pred`, mapped through
+  world coords so gt/CT grids need not match), so it reliably bites into the eye.
+- `retained_per_structure` in the sidecar is the ">= half of every structure visible"
+  QC — check it before training; raise `keep_fraction` if a structure drops too low.
+- NOTE (deferred): under box truncation the observed globe centroid the CNISP
+  re-fit estimates (§2) drifts more than under slab, since part of the globe is
+  removed. We are running the pipeline with the existing observed-alignment
+  estimator as-is; a truncation-robust globe-centre estimate is a later refinement.
+
 Check: `ls nnunet-c/data_fov/images | head`; the sidecar has an entry per case/pseudo-step.
 
 ## 2. Re-fit the CNISP prior on the truncated CTs (reused box flow)

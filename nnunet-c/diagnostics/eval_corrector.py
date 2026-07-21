@@ -206,11 +206,15 @@ def main() -> int:
                 print(f"  {cid}: no trunc info / grid mismatch for --region; skip")
                 missing += 1
                 continue
-            ax = int(info["trunc_axis"])
-            vlo, vhi = int(info["visible_range"][0]), int(info["visible_range"][1])
             visible = np.zeros(gt_nn.shape, dtype=bool)
             sl = [slice(None)] * gt_nn.ndim
-            sl[ax] = slice(vlo, vhi)
+            if "visible_box" in info:                    # box (type-2): per-axis window
+                for ax, (lo, hi) in enumerate(info["visible_box"]):
+                    sl[int(ax)] = slice(int(lo), int(hi))
+            else:                                        # slab (type-1): single axis
+                ax = int(info["trunc_axis"])
+                sl[ax] = slice(int(info["visible_range"][0]),
+                               int(info["visible_range"][1]))
             visible[tuple(sl)] = True
             keep = visible if args.region == "visible" else ~visible
             gt_nn = np.where(keep, gt_nn, 0)

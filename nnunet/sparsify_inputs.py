@@ -344,6 +344,57 @@ def _truncate_one_ct(
     return arr, affine, (int(vis_lo), int(vis_hi))
 
 
+def _truncate_one_ct_box(
+    ct_path: Path,
+    keep_windows: Dict[int, Tuple[int, int]],
+    pad_value: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
+    """FOV-truncate a CT to an axis-aligned BOX: keep only voxels inside the
+    half-open window ``[lo, hi)`` on every axis in ``keep_windows``; blank the
+    rest with ``pad_value`` (air). Axes absent from ``keep_windows`` are kept in
+    full. Returns ``(array, affine, visible_box)`` where ``visible_box[ax] ==
+    (lo, hi)`` is the retained window for EVERY axis (full extent on the
+    un-truncated axes) -- the region-restricted eval rebuilds its mask from it.
+
+    Multi-axis generalisation of ``_truncate_one_ct`` (which blanks a slab on ONE
+    axis). It models a mis-centred acquisition FOV: the scanner box is offset so
+    the head (and part of the orbit) pokes out on MORE THAN ONE face -- e.g. a
+    corner clip along the two axes orthogonal to the globe (anterior) axis. As in
+    ``_truncate_one_ct`` the grid (shape + affine) is PRESERVED and only voxels
+    OUTSIDE the box are replaced with air, so the truncated region stays
+    "imaged-but-empty" (no evidence) and the FOV variable is isolated from slice
+    thickness.
+
+    Parameters
+    ----------
+    keep_windows : ``{axis: (lo, hi)}`` half-open retained window per truncated
+        axis. Typically the two axes orthogonal to the anterior/globe axis.
+    pad_value : fill for blanked voxels; None -> the CT's own min (air/background).
+    """
+    img = nib.load(str(ct_path))
+    arr = np.asarray(img.dataobj).copy()
+    affine = img.affine.copy()
+    pv = float(arr.min()) if pad_value is None else float(pad_value)
+
+    visible: List[Tuple[int, int]] = [(0, int(arr.shape[ax])) for ax in range(arr.ndim)]
+    for ax, win in keep_windows.items():
+        ax = int(ax)
+        lo, hi = max(0, int(win[0])), min(int(arr.shape[ax]), int(win[1]))
+        if hi <= lo:
+            raise ValueError(
+                f"_truncate_one_ct_box: empty keep window [{lo},{hi}) on axis {ax}")
+        # Blank the two complementary slabs outside [lo, hi). Per-axis blanking
+        # (union of the outside-slabs) yields the box complement without ever
+        # materialising a full 3-D mask.
+        for a, b in ((0, lo), (hi, int(arr.shape[ax]))):
+            if b > a:
+                sl = [slice(None)] * arr.ndim
+                sl[ax] = slice(a, b)
+                arr[tuple(sl)] = pv
+        visible[ax] = (lo, hi)
+    return arr, affine, visible
+
+
 def _eff_res_from_affine(affine: np.ndarray, axis: int) -> float:
     """Norm of the affine's column for ``axis`` = new physical spacing."""
     return float(np.linalg.norm(affine[:3, axis]))
