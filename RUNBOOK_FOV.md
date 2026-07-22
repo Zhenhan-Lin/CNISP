@@ -73,6 +73,47 @@ The region eval reads whichever is present.
 
 Check: `ls nnunet-c/data_fov/images | head`; the sidecar has an entry per case/pseudo-step.
 
+## 1b. Extreme-case scout test of the CNISP output (box mode)
+Before a full training run, sanity-check **how the CNISP-completed prior behaves under
+extreme box truncations** — aggressive `keep_fraction` and every corner — with
+`nnunet-c/diagnostics/fov_extreme_test.py`. It targets the failure modes from the design
+review: does CNISP complete the blanked FOV, does its centroid drift, does the eye run off
+the fixed decode patch.
+
+```bash
+# (0) logic check, no model/data needed:
+python nnunet-c/diagnostics/fov_extreme_test.py --self-test
+
+# (1) build the extremes (reuses the box builder; small --max-cases to keep it a scout):
+for C in SL SR IL IR; do
+  python nnunet-c/scripts/build_fov_truncated_data.py --mode box --corner "$C" \
+    --keep-fractions 0.25,0.35,0.5 --max-cases 3 \
+    --out-data-root "nnunet-c/data_fov_extreme_${C}"
+done
+# (2) run the CNISP re-fit (Step 2 below) on each data_fov_extreme_* root to emit the
+#     completed iso prior per (case, pseudo-step).
+# (3) analyze one (case, step) at a time (append rows to a CSV):
+python nnunet-c/diagnostics/fov_extreme_test.py --analyze \
+    --ref  <untruncated gt_candidate_pred / prior for SRC, on the source grid> \
+    --cnisp <CNISP completed iso prior for SRC step 35> \
+    --trunc-manifest nnunet-c/data_fov_extreme_SL/fov_truncation_manifest.json \
+    --source-id SRC --step 35 --out-csv /tmp/fov_extreme.csv
+```
+
+Diagnostics per case (JSON + a one-line `flag`):
+- `recovery_trunc` — of the reference anatomy the box **blanked**, fraction the CNISP prior
+  reproduced. **Low (< 0.5) = CNISP did not complete the missing FOV.**
+- `globe_drift_mm` / `centroid_drift_mm` — mm between the CNISP prior's globe / all-fg
+  centroid and the reference's. **Large = mislocated** (TTO cannot fix large drift).
+- `extent_ratio` (per axis) + `cnisp_touches_boundary` — CNISP fg bbox extent vs reference;
+  `< 1` = under-covers, and a `true` boundary flag = the prior likely ran off the fixed
+  64 mm decode patch (the silent clip of a large / drifted eye — see the alignment note).
+- `per_structure` — `vol_ratio` + `recovery_trunc` per ON/Recti/Globe/Fat.
+
+`--ref` must be on the truncation **source grid** (== the sidecar `source_shape`, same guard
+as `eval_corrector --region`); otherwise the box mask can't be applied and the case is
+skipped. Use this scout to pick a sane `keep_fraction` floor before Step 3.
+
 ## 2. Re-fit the CNISP prior on the truncated CTs (reused box flow)
 Same CNISP deployment path as the thickness run, pointed at the truncated CTs and the
 pseudo-steps (it aligns each case, runs the 835 stage-1 model on the truncated CT for the
