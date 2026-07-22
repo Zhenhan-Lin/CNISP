@@ -1,0 +1,103 @@
+# ── nnUNet-C "corrector" configuration -- FOV-TRUNCATION experiment ──
+# Copy of corrector.yaml with only the FOV-experiment deltas changed (marked
+# "FOV:" below): experiment tag, pseudo-step severities, data_root, control-C
+# dataset id/name. Everything else is identical so the whole cascade pipeline
+# (build_corrector_dataset --layout cascade, stratified loader, run_train,
+# run_corrector_predict, eval_corrector) is reused unchanged. See RUNBOOK_FOV.md.
+
+nnunet_config_yaml: nnunet/configs_v7.yaml
+
+# ── Experiment / degradation mode ────────────────────────────────────
+experiment: fov                    # FOV: was `thick` (separates runs/<experiment>/ artifacts)
+
+# ── CNISP retrain (Stage 2, GT observations) ─────────────────────────
+cnisp_model_name: orbital_ad_v6_5_gt
+cnisp_train_yaml: train_v6_5_gt.yaml
+cnisp_test_yaml: test_corrector.yaml
+run_tag: corrector_gt
+
+nnunet_pred_root: null
+degraded_ct_root: null
+
+# ── Reference (Dataset835) for finetune weight transfer + plan merge ──
+reference_dataset_id: 835
+reference_dataset_name: PHOTON_CT_QAfiltered
+reference_plan: nnUNetPlans
+reference_plan_json: nnUNetPlans_iso05
+configuration: 3d_fullres
+trainer: nnUNetTrainer
+reference_fold: 2
+
+# ── Corrector finetune schedule (controls B/C) ───────────────────────
+finetune:
+  trainer: nnUNetTrainer_OrbitalCascade
+  epochs: 300
+  initial_lr: 0.01
+
+# ── Prediction defaults (run_corrector_predict.sh) ───────────────────
+predict:
+  grid: iso
+  iso_mm: 0.5
+  run_cnisp: auto
+  emit_iso: auto
+
+target_spacing: null
+
+# ── Label scheme (fixed channel order for ch1..ch4) ──────────────────
+structures: [ON, Recti, Globe, Fat]
+labels:
+  background: 0
+  optic_nerve: 1
+  recti_muscles: 2
+  globe: 3
+  orbital_fat: 4
+
+# ── Splits ───────────────────────────────────────────────────────────
+corrector_train_split: nnunet-c/splits/corrector_train.txt
+corrector_train_casefile: corrector_train_cases.txt
+
+# ── Corrector training data generation ───────────────────────────────
+corrector_data:
+  checklist_csv: /fs5/p_masi/linz18/QA_record/QA/PHOTON_CP/new_check/review_checklist_part2.csv
+  select:
+    keep: false
+    qa_status: yes
+  target_samples: 320
+  n: 320
+  # FOV: pseudo-steps encode the per-eye retention floor T (round(T*100)); these
+  # are FOV-severity levels, not thick slice steps. The thick_threshold_* gate
+  # never fires for them (kept empty).
+  steps: [50, 65, 80]              # FOV: was [3, 6, 9, 12]
+  thick_threshold_mm: 10.0
+  thick_threshold_steps: []        # FOV: was [9, 12] (thickness-only; N/A for FOV)
+  modality: ct
+  # FOV: separate data root so the thickness experiment tree is untouched. Point
+  # this at the tree written by build_fov_truncated_data.py --min-retains.
+  data_root: nnunet-c/data_fov_min_retain   # FOV: was nnunet-c/data
+  images_dirname: images
+  nnunet_pred_dirname: nnunet_pred
+  cnisp_pred_dirname: cnisp_pred
+  cnisp_iso_pred_dirname: cnisp_pred_test_iso
+  cnisp_train_iso_pred_dirname: cnisp_pred_train_iso
+  aligned_patch_dirname: aligned_patch
+
+# ── Controls ─────────────────────────────────────────────────────────
+controls:
+  A:
+    dataset_id: 835
+    dataset_name: PHOTON_CT_QAfiltered
+    prelabel_source: none
+    n_channels: 1
+    external: true
+  B:
+    dataset_id: 855
+    dataset_name: PHOTON_CT_CORR_B_stacked
+    prelabel_source: nnunet
+    n_channels: 5
+    external: false
+  C:
+    dataset_id: 847                          # FOV: was 845
+    dataset_name: PHOTON_CT_CORR_C_fov       # FOV: was PHOTON_CT_CORR_C_cnisp
+    prelabel_source: cnisp
+    n_channels: 5
+    external: false

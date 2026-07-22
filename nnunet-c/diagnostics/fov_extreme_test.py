@@ -69,6 +69,14 @@ def _truncated_mask(shape, visible_box) -> np.ndarray:
     return ~vis
 
 
+def _dice(a: np.ndarray, b: np.ndarray) -> float:
+    """Dice of two boolean masks (1.0 when both are empty, by convention)."""
+    sa, sb = int(a.sum()), int(b.sum())
+    if sa + sb == 0:
+        return 1.0
+    return 2.0 * int(np.logical_and(a, b).sum()) / (sa + sb)
+
+
 def analyze_case(cnisp_nn: np.ndarray, ref_nn: np.ndarray, visible_box,
                  spacing, labels) -> dict:
     """Diagnostics for one extreme case. ``cnisp_nn`` and ``ref_nn`` are same-shape
@@ -85,6 +93,7 @@ def analyze_case(cnisp_nn: np.ndarray, ref_nn: np.ndarray, visible_box,
                                 / max(1, int((fg_c & T).sum())), 3),
         "n_ref_trunc_vox": int(ref_T.sum()),
     }
+    vis = ~T                                            # imaged (visible) region
     per = {}
     for name, L in labels.items():
         rm, cm = ref_nn == L, cnisp_nn == L
@@ -92,8 +101,17 @@ def analyze_case(cnisp_nn: np.ndarray, ref_nn: np.ndarray, visible_box,
         per[name] = {
             "vol_ratio": round(float(cm.sum()) / max(1, int(rm.sum())), 3),
             "recovery_trunc": round(float((cm & rmT).sum()) / max(1, int(rmT.sum())), 3),
+            # Dice of CNISP vs reference: whole volume, and split by FOV region.
+            "dice": round(_dice(cm, rm), 4),
+            "dice_visible": round(_dice(cm & vis, rm & vis), 4),
+            "dice_truncated": round(_dice(cm & T, rm & T), 4),
         }
     out["per_structure"] = per
+    out["dice_mean"] = round(float(np.mean([per[n]["dice"] for n in labels])), 4)
+    out["dice_mean_visible"] = round(
+        float(np.mean([per[n]["dice_visible"] for n in labels])), 4)
+    out["dice_mean_truncated"] = round(
+        float(np.mean([per[n]["dice_truncated"] for n in labels])), 4)
 
     sp = np.asarray(spacing, dtype=float)
 
@@ -167,6 +185,11 @@ def run_analyze(args) -> int:
           f"->  {d['flag']}")
     print(f"  recovery(trunc)={d['recovery_trunc']}  globe_drift={d['globe_drift_mm']}mm  "
           f"extent_ratio={d.get('extent_ratio')}  boundary={d.get('cnisp_touches_boundary')}")
+    print(f"  DICE(CNISP vs ref)  mean={d['dice_mean']}  "
+          f"visible={d['dice_mean_visible']}  truncated={d['dice_mean_truncated']}")
+    for name, s in d["per_structure"].items():
+        print(f"    {name:6s}: dice={s['dice']:.4f}  visible={s['dice_visible']:.4f}  "
+              f"truncated={s['dice_truncated']:.4f}")
     for name, pe in (info.get("per_eye") or {}).items():        # built per-eye retention (QC)
         print(f"  built eye {name}: ret_total={pe.get('ret_total')} "
               f"ret_ON={pe.get('ret_ON')} bind={pe.get('binding_constraint')}")
@@ -175,6 +198,8 @@ def run_analyze(args) -> int:
         for name, s in d["per_structure"].items():
             flat[f"vol_ratio_{name}"] = s["vol_ratio"]
             flat[f"recovery_trunc_{name}"] = s["recovery_trunc"]
+            flat[f"dice_{name}"] = s["dice"]
+            flat[f"dice_truncated_{name}"] = s["dice_truncated"]
         write_header = not Path(args.out_csv).exists()
         with open(args.out_csv, "a", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(flat))
@@ -214,6 +239,13 @@ def run_self_test() -> int:
     # per-structure recovery separates the two
     assert dg["per_structure"]["Globe"]["recovery_trunc"] > 0.95
     assert db["per_structure"]["Globe"]["recovery_trunc"] < 0.05
+    # Dice: perfect recovery -> ~1 everywhere. Visible-only fill -> the truncated-region
+    # Dice of the CLIPPED structures is ~0 (absent structures Dice=1.0 by the both-empty
+    # convention, so check present structures, not the mean).
+    assert dg["dice_mean"] > 0.99 and dg["dice_mean_truncated"] > 0.99, dg
+    assert db["per_structure"]["Globe"]["dice_truncated"] < 0.05, db
+    assert db["per_structure"]["ON"]["dice_truncated"] < 0.05, db
+    assert db["dice_mean_visible"] > 0.99, db        # visible region is perfect for both
 
     _self_test_min_retain_calibration()
     print("\nSELF-TEST PASSED")
