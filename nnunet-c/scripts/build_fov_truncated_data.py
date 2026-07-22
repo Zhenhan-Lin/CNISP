@@ -193,14 +193,33 @@ def _retained_fraction(gt_arr: np.ndarray, gt_axcodes, corner: str,
 # (union of ON+Globe+Recti+Fat) AND on ON retention, calibrated by binary search on
 # the retained fraction k of each cut axis's extent. The globe/anterior axis is not cut.
 _NN = {"ON": 1, "Recti": 2, "Globe": 3, "Fat": 4}   # fixed Dataset835 / nnUNet scheme
+_SEPARATE_EYES = None
+
+
+def _separate_eyes_fn():
+    """Load ``canonical_align.separate_eyes`` by FILE PATH (cached). We can't
+    ``from data_prep... import`` because ``add_repo_to_syspath`` deliberately keeps
+    ``orbital_shape_prior_st1`` off sys.path (its top-level ``lib``/``engine`` would
+    shadow nnunet-c's), and the package ``data_prep/__init__`` pulls a heavy chain.
+    Loading the single module by path reuses the one true ``separate_eyes`` with
+    neither side effect."""
+    global _SEPARATE_EYES
+    if _SEPARATE_EYES is None:
+        import importlib.util
+        ca = (Path(__file__).resolve().parents[2]
+              / "orbital_shape_prior_st1" / "data_prep" / "canonical_align.py")
+        spec = importlib.util.spec_from_file_location("_fov_canonical_align", ca)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SEPARATE_EYES = mod.separate_eyes
+    return _SEPARATE_EYES
 
 
 def _split_eyes(gt_arr, gt_affine):
     """Split ALL foreground into ``{"OD": mask, "OS": mask}`` by the L-R midline between
     the two globe-CC centroids (reuses ``canonical_align.separate_eyes``). One globe -> a
     single eye; empty -> {}."""
-    from data_prep.canonical_align import separate_eyes    # scipy; lazy import
-    eyes = separate_eyes(gt_arr, gt_affine, _NN["Globe"])
+    eyes = _separate_eyes_fn()(gt_arr, gt_affine, _NN["Globe"])
     if not eyes:
         return {}
     fg = gt_arr > 0
