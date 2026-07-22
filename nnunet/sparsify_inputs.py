@@ -395,52 +395,6 @@ def _truncate_one_ct_box(
     return arr, affine, visible
 
 
-def _blank_notches(
-    arr: np.ndarray,
-    blank_regions: List[Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]],
-    pad_value: Optional[float] = None,
-) -> np.ndarray:
-    """In-place per-region CORNER-NOTCH blanking (Option-2, per-eye FOV truncation).
-
-    Each region is ``(outer_box, kept_box)`` -- two per-axis half-open windows
-    ``[(lo, hi), (lo, hi), (lo, hi)]`` with ``kept_box`` contained in ``outer_box``.
-    Voxels INSIDE ``outer_box`` but OUTSIDE ``kept_box`` (the notch = ``outer_box`` minus
-    ``kept_box``) are set to ``pad_value``; everything OUTSIDE every ``outer_box`` is left
-    untouched. The union of the notches is the removed FOV. Operates on ``arr`` directly
-    (used for both the CT and its label volume). ``pad_value`` None -> ``arr.min()``.
-    """
-    pv = float(arr.min()) if pad_value is None else float(pad_value)
-    ndim = arr.ndim
-    for outer, kept in blank_regions:
-        ob = [(max(0, int(lo)), min(int(arr.shape[a]), int(hi)))
-              for a, (lo, hi) in enumerate(outer)]
-        kb = [(max(0, int(lo)), min(int(arr.shape[a]), int(hi)))
-              for a, (lo, hi) in enumerate(kept)]
-        # outer \ kept = union over axes of the two outside-slabs on that axis, each
-        # bounded to `outer` on the OTHER axes -> only this region's corner is removed.
-        for ax in range(ndim):
-            for a0, b0 in ((ob[ax][0], kb[ax][0]), (kb[ax][1], ob[ax][1])):
-                if b0 > a0:
-                    sl = [slice(ob[k][0], ob[k][1]) for k in range(ndim)]
-                    sl[ax] = slice(a0, b0)
-                    arr[tuple(sl)] = pv
-    return arr
-
-
-def _truncate_one_ct_boxes(
-    ct_path: Path,
-    blank_regions: List[Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]],
-    pad_value: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Load a CT and apply per-eye corner-notch truncation (see ``_blank_notches``).
-    Grid (shape + affine) preserved; only the notch voxels become air. Returns
-    ``(array, affine)``."""
-    img = nib.load(str(ct_path))
-    arr = np.asarray(img.dataobj).copy()
-    _blank_notches(arr, blank_regions, pad_value)
-    return arr, img.affine.copy()
-
-
 def _eff_res_from_affine(affine: np.ndarray, axis: int) -> float:
     """Norm of the affine's column for ``axis`` = new physical spacing."""
     return float(np.linalg.norm(affine[:3, axis]))

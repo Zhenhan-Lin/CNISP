@@ -49,20 +49,21 @@ python nnunet-c/scripts/build_fov_truncated_data.py \
 python nnunet-c/scripts/build_fov_truncated_data.py \
     --keep-fractions 0.5,0.65,0.8 --mode box --corner SL   # SL|SR|IL|IR (S/I x L/R) or random
 
-# type-2 PER-EYE (Option 2, RECOMMENDED for the real experiment): each orbit is split
-# (OD/OS) and clipped INDEPENDENTLY to a guaranteed per-eye retention FLOOR, so BOTH
-# eyes stay >= T of foreground AND >= T_on of ON. --min-retains gives the floor levels.
+# min-retain (RECOMMENDED for the real experiment): the SAME single global corner box,
+# but sized by binary search so BOTH orbits stay >= T of foreground AND >= T_on of ON
+# (worst-eye binding). Physically a mis-centred FOV -> the near eye is clipped more, the
+# floor keeps even it >= half visible. --min-retains gives the floor levels.
 python nnunet-c/scripts/build_fov_truncated_data.py \
-    --min-retains 0.5,0.65,0.8 --corner SL --min-retain-on 0.5   # per-eye floors -> steps 50,65,80
+    --min-retains 0.5,0.65,0.8 --corner SL --min-retain-on 0.5   # floors -> steps 50,65,80
 ```
 Writes `nnunet-c/data_fov/images/{case}_step{PP}_0000.nii.gz`, a
 `corrector_data_manifest.json` (→ build_corrector_dataset), and a
 `fov_truncation_manifest.json` sidecar (per (case,PP): `source_shape` + the visible
-window — **slab**: `trunc_axis` + `visible_range`; **box**: `visible_box` (per-axis
-`[lo,hi]`) + `corner` + `retained_*`; **per-eye**: `per_eye.{OD,OS}` with
-`eye_bbox`/`kept_box` (source-grid) + `k` + `ret_total`/`ret_ON` +
-`ret_per_structure` + `binding_constraint`). The region eval reads whichever is
-present. Per-eye also writes a truncated-GT volume under `gt_trunc/` for QC/viz.
+window — **slab**: `trunc_axis` + `visible_range`; **box** / **box_min_retain**:
+`visible_box` (per-axis `[lo,hi]`) + `corner`. box also has `retained_*`;
+box_min_retain also has `keep_fraction` (the calibrated global fraction) + `per_eye.{OD,OS}`
+retention QC (`ret_total`/`ret_ON`/`ret_per_structure`/`binding_constraint`)). The region
+eval reads `visible_box` (single box) for both box variants.
 
 **Box specifics:**
 - The globe/anterior axis is found from the CT affine (`aff2axcodes` → the A/P axis)
@@ -78,17 +79,20 @@ present. Per-eye also writes a truncated-GT volume under `gt_trunc/` for QC/viz.
   removed. We are running the pipeline with the existing observed-alignment
   estimator as-is; a truncation-robust globe-centre estimate is a later refinement.
 
-**Per-eye (`--min-retains`) specifics:**
-- Eyes are split via `canonical_align.separate_eyes` (globe CC → OD/OS) + the L-R
-  midline; a case is skipped if either eye's ON has `< --min-on-vox` voxels (default 10).
-- For each eye, the cut depth `k` (retained fraction of the eye bbox extent per cut axis)
-  is **binary-searched** to the DEEPEST cut still holding `ret_total >= T` and
-  `ret_ON >= T_on` on that eye's real foreground — so the floor is a hard guarantee, and
-  `_step50` means "each eye keeps >= 50%" (vs box's combined-both-eyes ~50%).
-- The removed FOV is the union of the two per-eye corner notches (Option A, localized to
-  each orbit; the rest of the head is untouched). It is NOT a single physical FOV box —
-  it is a controlled per-orbit truncation so both orbits stay evaluable.
-- `binding_constraint` in the sidecar names the structure that hit the floor first.
+**min-retain (`--min-retains`) specifics:**
+- It is the **same single global corner box** as `--mode box` (blanked corner extends to
+  the image edge → a real truncation, NOT an interior hole); only the sizing differs.
+- Eyes are split via `canonical_align.separate_eyes` (globe CC → OD/OS) + the L-R midline
+  **only to MEASURE** per-eye retention; a case is skipped if either eye's ON has
+  `< --min-on-vox` voxels (default 10).
+- The global `keep_fraction` is **binary-searched** to the DEEPEST single box still holding
+  `ret_total >= T` and `ret_ON >= T_on` for **both** eyes (worst-eye binding), so `_step50`
+  means "both eyes keep >= 50%" as a hard floor.
+- Because it is ONE global cut plane, the eye nearer the clipped corner loses more; the far
+  eye retains more (both >= T). That asymmetry is physically correct for a mis-centred FOV —
+  if you need the two eyes truncated symmetrically, use a superior/inferior **slab** instead.
+- `per_eye.{OD,OS}` in the sidecar reports each eye's achieved `ret_total`/`ret_ON`/per-structure
+  and `binding_constraint`; check them (Stage 2) — all should be >= T.
 
 Check: `ls nnunet-c/data_fov/images | head`; the sidecar has an entry per case/pseudo-step.
 
