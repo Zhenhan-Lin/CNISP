@@ -38,24 +38,31 @@ Copy `nnunet-c/configs/corrector.yaml` → `nnunet-c/configs/corrector_fov.yaml`
 Pass `--config nnunet-c/configs/corrector_fov.yaml` (and `CONFIG=…` to wrappers) everywhere.
 
 ## 1. Build the truncated CTs (new)
-Two geometries via `--mode`:
+Three geometries:
 ```bash
 # type-1 (slab, default): blank a through-plane slab (top/bottom of FOV cut off)
 python nnunet-c/scripts/build_fov_truncated_data.py \
     --keep-fractions 0.5,0.65,0.8 --side end     # --side random/both also available
 
-# type-2 (box): keep one axis-aligned FOV box; globe/anterior axis never cut, the
-# up/down + left/right axes corner-clipped -> a mis-centred acquisition where the
-# eye pokes out of the scanner box on two faces.
+# type-2 (box): keep one GLOBAL axis-aligned FOV box; globe/anterior axis never cut,
+# the up/down + left/right axes corner-clipped -> a mis-centred acquisition.
 python nnunet-c/scripts/build_fov_truncated_data.py \
     --keep-fractions 0.5,0.65,0.8 --mode box --corner SL   # SL|SR|IL|IR (S/I x L/R) or random
+
+# type-2 PER-EYE (Option 2, RECOMMENDED for the real experiment): each orbit is split
+# (OD/OS) and clipped INDEPENDENTLY to a guaranteed per-eye retention FLOOR, so BOTH
+# eyes stay >= T of foreground AND >= T_on of ON. --min-retains gives the floor levels.
+python nnunet-c/scripts/build_fov_truncated_data.py \
+    --min-retains 0.5,0.65,0.8 --corner SL --min-retain-on 0.5   # per-eye floors -> steps 50,65,80
 ```
 Writes `nnunet-c/data_fov/images/{case}_step{PP}_0000.nii.gz`, a
 `corrector_data_manifest.json` (→ build_corrector_dataset), and a
 `fov_truncation_manifest.json` sidecar (per (case,PP): `source_shape` + the visible
 window — **slab**: `trunc_axis` + `visible_range`; **box**: `visible_box` (per-axis
-`[lo,hi]`) + `corner` + `cut_axes` + `retained_fraction`/`retained_per_structure`).
-The region eval reads whichever is present.
+`[lo,hi]`) + `corner` + `retained_*`; **per-eye**: `per_eye.{OD,OS}` with
+`eye_bbox`/`kept_box` (source-grid) + `k` + `ret_total`/`ret_ON` +
+`ret_per_structure` + `binding_constraint`). The region eval reads whichever is
+present. Per-eye also writes a truncated-GT volume under `gt_trunc/` for QC/viz.
 
 **Box specifics:**
 - The globe/anterior axis is found from the CT affine (`aff2axcodes` → the A/P axis)
@@ -70,6 +77,18 @@ The region eval reads whichever is present.
   re-fit estimates (§2) drifts more than under slab, since part of the globe is
   removed. We are running the pipeline with the existing observed-alignment
   estimator as-is; a truncation-robust globe-centre estimate is a later refinement.
+
+**Per-eye (`--min-retains`) specifics:**
+- Eyes are split via `canonical_align.separate_eyes` (globe CC → OD/OS) + the L-R
+  midline; a case is skipped if either eye's ON has `< --min-on-vox` voxels (default 10).
+- For each eye, the cut depth `k` (retained fraction of the eye bbox extent per cut axis)
+  is **binary-searched** to the DEEPEST cut still holding `ret_total >= T` and
+  `ret_ON >= T_on` on that eye's real foreground — so the floor is a hard guarantee, and
+  `_step50` means "each eye keeps >= 50%" (vs box's combined-both-eyes ~50%).
+- The removed FOV is the union of the two per-eye corner notches (Option A, localized to
+  each orbit; the rest of the head is untouched). It is NOT a single physical FOV box —
+  it is a controlled per-orbit truncation so both orbits stay evaluable.
+- `binding_constraint` in the sidecar names the structure that hit the floor first.
 
 Check: `ls nnunet-c/data_fov/images | head`; the sidecar has an entry per case/pseudo-step.
 

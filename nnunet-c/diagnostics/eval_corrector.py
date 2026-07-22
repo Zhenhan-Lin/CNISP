@@ -207,15 +207,26 @@ def main() -> int:
                 missing += 1
                 continue
             visible = np.zeros(gt_nn.shape, dtype=bool)
-            sl = [slice(None)] * gt_nn.ndim
-            if "visible_box" in info:                    # box (type-2): per-axis window
+            if "per_eye" in info:                        # box_per_eye (Option 2): union of notches
+                truncated = np.zeros(gt_nn.shape, dtype=bool)
+                for eye in info["per_eye"].values():
+                    notch = np.zeros(gt_nn.shape, dtype=bool)
+                    notch[tuple(slice(int(lo), int(hi)) for lo, hi in eye["eye_bbox"])] = True
+                    kept = np.zeros(gt_nn.shape, dtype=bool)
+                    kept[tuple(slice(int(lo), int(hi)) for lo, hi in eye["kept_box"])] = True
+                    truncated |= notch & ~kept           # this eye's clipped corner
+                visible = ~truncated
+            elif "visible_box" in info:                  # box (Option 1): per-axis window
+                sl = [slice(None)] * gt_nn.ndim
                 for ax, (lo, hi) in enumerate(info["visible_box"]):
                     sl[int(ax)] = slice(int(lo), int(hi))
+                visible[tuple(sl)] = True
             else:                                        # slab (type-1): single axis
+                sl = [slice(None)] * gt_nn.ndim
                 ax = int(info["trunc_axis"])
                 sl[ax] = slice(int(info["visible_range"][0]),
                                int(info["visible_range"][1]))
-            visible[tuple(sl)] = True
+                visible[tuple(sl)] = True
             keep = visible if args.region == "visible" else ~visible
             gt_nn = np.where(keep, gt_nn, 0)
             pred_nn = np.where(keep, pred_nn, 0)

@@ -18,6 +18,17 @@ prior exactly where ch0 has no evidence). Two truncation geometries:
       cut is anchored on the orbit bbox (from gt_candidate_pred) so it reliably
       bites into the eye, and each (case,step) records the per-structure retained
       fraction as a QC of the ">= half of every structure visible" property.
+      NOTE: box uses a single GLOBAL corner box over BOTH orbits, so the eye nearer
+      the corner loses more (combined ret != per-eye ret) -- use --min-retains for a
+      guaranteed per-eye floor.
+  --min-retains T1,T2,...  (Option 2, per-eye): the RECOMMENDED "both eyes stay
+      evaluable" mode. Each orbit is split (OD/OS) and clipped INDEPENDENTLY to the
+      DEEPEST corner cut that still holds ret_total>=T AND ret_ON>=T_on for THAT eye
+      (binary-searched on real foreground), so BOTH eyes keep >= T of their
+      foreground and >= T_on of their ON. T is a hard floor (not a geometric knob);
+      pseudo-step = round(T*100). Writes a truncated-GT volume per case (gt_trunc/)
+      and a per_eye sidecar (eye_bbox/kept_box + ret_total/ret_ON/per-structure +
+      binding_constraint). Replaces --keep-fractions/--mode when given.
 
 To reuse the ENTIRE existing corrector pipeline unchanged (`build_corrector_dataset
 --layout cascade`, the stratified loader, by-step eval), each truncation level is
@@ -176,6 +187,110 @@ def _retained_fraction(gt_arr: np.ndarray, gt_axcodes, corner: str,
     return overall, per
 
 
+# ── Per-eye (Option 2) min-retain geometry ────────────────────────────────────
+# Each orbit is clipped INDEPENDENTLY to a controlled retention floor so BOTH eyes
+# stay evaluable: --min-retain T is a hard floor on per-eye foreground retention
+# (union of ON+Globe+Recti+Fat) AND on ON retention, calibrated by binary search on
+# the retained fraction k of each cut axis's extent. The globe/anterior axis is not cut.
+_NN = {"ON": 1, "Recti": 2, "Globe": 3, "Fat": 4}   # fixed Dataset835 / nnUNet scheme
+
+
+def _split_eyes(gt_arr, gt_affine):
+    """Split ALL foreground into ``{"OD": mask, "OS": mask}`` by the L-R midline between
+    the two globe-CC centroids (reuses ``canonical_align.separate_eyes``). One globe -> a
+    single eye; empty -> {}."""
+    from data_prep.canonical_align import separate_eyes    # scipy; lazy import
+    eyes = separate_eyes(gt_arr, gt_affine, _NN["Globe"])
+    if not eyes:
+        return {}
+    fg = gt_arr > 0
+    axcodes = nib.aff2axcodes(gt_affine)
+    lr_axis = next((i for i, c in enumerate(axcodes) if c in ("R", "L")), 0)
+    if len(eyes) == 1:
+        return {eyes[0]["eye"]: fg}
+    mid = (float(eyes[0]["centroid_voxel"][lr_axis])
+           + float(eyes[1]["centroid_voxel"][lr_axis])) / 2.0
+    shp = [1] * gt_arr.ndim
+    shp[lr_axis] = gt_arr.shape[lr_axis]
+    low = np.arange(gt_arr.shape[lr_axis]).reshape(shp) < mid
+    out = {}
+    for e in eyes[:2]:
+        out[e["eye"]] = fg & (low if float(e["centroid_voxel"][lr_axis]) < mid else ~low)
+    return out
+
+
+def _eye_bbox_of(mask):
+    """Per-axis bbox of a boolean mask as half-open windows ``[(lo, hi)...]``, or None."""
+    idx = np.argwhere(mask)
+    if idx.size == 0:
+        return None
+    return [(int(idx[:, a].min()), int(idx[:, a].max()) + 1) for a in range(mask.ndim)]
+
+
+def _kept_box_from_k(eye_bbox, cut_sides, k):
+    """``eye_bbox`` shrunk to fraction ``k`` of its extent on each cut axis, from the
+    truncated corner. ``cut_sides``: list of (axis, at_high). Anterior axis (absent from
+    cut_sides) stays full. Returns per-axis half-open windows."""
+    kb = [tuple(w) for w in eye_bbox]
+    for ax, at_high in cut_sides:
+        lo, hi = eye_bbox[ax]
+        ext = hi - lo
+        keep_len = max(1, min(ext, int(round(float(k) * ext))))
+        kb[ax] = (lo, lo + keep_len) if at_high else (hi - keep_len, hi)
+    return kb
+
+
+def _ret_in_box(mask, kept_box):
+    """Fraction of ``mask`` foreground inside ``kept_box`` (1.0 when mask is empty)."""
+    tot = int(mask.sum())
+    if tot == 0:
+        return 1.0
+    sl = tuple(slice(int(lo), int(hi)) for lo, hi in kept_box)
+    return int(mask[sl].sum()) / tot
+
+
+def _calibrate_eye_cut(eye_fg, struct_masks, on_mask, cut_sides, T, T_on, iters=26):
+    """Binary-search the DEEPEST cut (smallest ``k``) whose kept_box still holds
+    ret_total >= T AND ret_ON >= T_on (ret is monotone in k, so k=1 is always feasible).
+    Returns the calibration dict (eye_bbox, kept_box, k, ret_total, ret_ON, per-structure,
+    binding_constraint)."""
+    eye_bbox = _eye_bbox_of(eye_fg)
+
+    def _ok(k):
+        kb = _kept_box_from_k(eye_bbox, cut_sides, k)
+        return _ret_in_box(eye_fg, kb) >= T and _ret_in_box(on_mask, kb) >= T_on
+
+    lo, hi = 0.0, 1.0
+    if _ok(hi):
+        for _ in range(iters):
+            mid = 0.5 * (lo + hi)
+            if _ok(mid):
+                hi = mid                 # feasible -> cut deeper (smaller k)
+            else:
+                lo = mid
+    kb = _kept_box_from_k(eye_bbox, cut_sides, hi)
+    ret_per = {n: round(_ret_in_box(m, kb), 4) for n, m in struct_masks.items()}
+    return {"eye_bbox": [list(w) for w in eye_bbox], "kept_box": [list(w) for w in kb],
+            "k": round(float(hi), 4),
+            "ret_total": round(_ret_in_box(eye_fg, kb), 4),
+            "ret_ON": round(_ret_in_box(on_mask, kb), 4),
+            "ret_per_structure": ret_per,
+            "binding_constraint": (min(ret_per, key=ret_per.get) if ret_per else None)}
+
+
+def _map_box_gt_to_ct(box, gt_affine, ct_affine):
+    """Map a per-axis half-open GT-voxel box to CT-voxel half-open windows (orthogonal
+    affines: map the 8 corners through world coords, take per-axis min/max)."""
+    lo = np.array([w[0] for w in box], dtype=float)
+    hi = np.array([w[1] - 1 for w in box], dtype=float)      # inclusive corner
+    corners = _bbox_corners(lo, hi)
+    world = (gt_affine @ np.c_[corners, np.ones(len(corners))].T).T[:, :3]
+    ctv = (np.linalg.inv(ct_affine) @ np.c_[world, np.ones(len(world))].T).T[:, :3]
+    lo_ct = np.floor(ctv.min(0)).astype(int)
+    hi_ct = np.ceil(ctv.max(0)).astype(int) + 1              # half-open
+    return [(int(lo_ct[a]), int(hi_ct[a])) for a in range(3)]
+
+
 def _pseudo_step(keep_fraction: float) -> int:
     pp = int(round(float(keep_fraction) * 100))
     if not (1 <= pp <= 99):
@@ -183,6 +298,120 @@ def _pseudo_step(keep_fraction: float) -> int:
             f"keep_fraction {keep_fraction} -> pseudo-step {pp}; must map into "
             f"1..99 (keep_fraction in (0.01, 0.99]); 1.0 = no truncation, skip it.")
     return pp
+
+
+def _run_per_eye(args, src, out_root, images_dir, cd) -> int:
+    """Option 2: per-eye min-retain truncation. Each orbit is split (OD/OS), clipped
+    independently to the deepest corner cut still holding ret_total>=T and ret_ON>=T_on,
+    and the union of the two corner notches is blanked in the CT (and mirrored in a
+    truncated-GT volume for QC/viz). Writes the FOV data tree + per_eye sidecar."""
+    from nnunet.sparsify_inputs import _truncate_one_ct_boxes, _blank_notches  # noqa: E402
+
+    Ts = [float(x) for x in args.min_retains.split(",") if x.strip()]
+    steps = [_pseudo_step(T) for T in Ts]
+    T_on_fixed = float(args.min_retain_on) if args.min_retain_on is not None else None
+    gt_dir = out_root / cd.get("gt_trunc_dirname", "gt_trunc")
+    gt_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.RandomState(int(args.seed))
+    print(f"[fov] out={out_root}  min_retains={Ts} -> pseudo-steps {steps}  "
+          f"mode=box_per_eye  corner={args.corner}  min_on_vox={args.min_on_vox}")
+
+    manifest = {"experiment": "fov_truncation", "mode": "box_per_eye",
+                "min_retains": Ts, "pseudo_steps": steps, "steps": steps,
+                "corner": args.corner, "min_retain_on": args.min_retain_on, "cases": {}}
+    sidecar: dict = {}
+    n_cases = n_written = n_skipped = 0
+
+    for case_id, sentry in sorted(src.get("cases", {}).items()):
+        if args.max_cases and n_cases >= args.max_cases:
+            break
+        source_image = sentry.get("source_image", "")
+        gt = sentry.get("gt_candidate_pred", "")
+        if (not source_image or not Path(source_image).exists()
+                or not gt or not Path(gt).exists()):
+            n_skipped += 1
+            continue
+        gt_img = nib.load(str(gt))
+        gt_arr = np.asarray(gt_img.dataobj)
+        gt_affine = gt_img.affine
+        gt_ax = nib.aff2axcodes(gt_affine)
+        ct_img = nib.load(str(source_image))
+        ct_affine = ct_img.affine
+        ct_shape = tuple(int(s) for s in ct_img.shape)
+
+        eyes = _split_eyes(gt_arr, gt_affine)
+        if not eyes:
+            n_skipped += 1
+            print(f"  {case_id}: no globe / empty foreground; skip")
+            continue
+        # Per-eye masks + ON floor gate (independent of T) -- precompute once.
+        eye_data, bad = {}, False
+        for name, fg in eyes.items():
+            if int(fg.sum()) == 0:
+                continue
+            on = fg & (gt_arr == _NN["ON"])
+            if int(on.sum()) < args.min_on_vox:
+                bad = True
+                break
+            eye_data[name] = {"fg": fg, "on": on,
+                              "structs": {s: fg & (gt_arr == lab) for s, lab in _NN.items()}}
+        if bad or not eye_data:
+            n_skipped += 1
+            print(f"  {case_id}: ON < {args.min_on_vox} vox in an eye (atypical); skip")
+            continue
+        n_cases += 1
+
+        corner = str(rng.choice(_CORNERS)) if args.corner == "random" else args.corner
+        cut_sides = [_axis_for_dir(gt_ax, d) for d in corner]
+        entry = {"source_image": source_image, "gt_candidate_pred": gt,
+                 "step_axis": sentry.get("step_axis"), "mode": "box_per_eye",
+                 "corner": corner, "steps": {}}
+        sidecar[case_id] = {}
+        summ = []
+        for T, pp in zip(Ts, steps):
+            T_on = T_on_fixed if T_on_fixed is not None else T
+            per_eye, regions_ct, regions_gt = {}, [], []
+            for name, d in eye_data.items():
+                cal = _calibrate_eye_cut(d["fg"], d["structs"], d["on"], cut_sides, T, T_on)
+                eb_ct = _map_box_gt_to_ct(cal["eye_bbox"], gt_affine, ct_affine)
+                kb_ct = _map_box_gt_to_ct(cal["kept_box"], gt_affine, ct_affine)
+                regions_gt.append((cal["eye_bbox"], cal["kept_box"]))
+                regions_ct.append((eb_ct, kb_ct))
+                per_eye[name] = {"eye_bbox": [list(w) for w in eb_ct],
+                                 "kept_box": [list(w) for w in kb_ct], "k": cal["k"],
+                                 "ret_total": cal["ret_total"], "ret_ON": cal["ret_ON"],
+                                 "ret_per_structure": cal["ret_per_structure"],
+                                 "binding_constraint": cal["binding_constraint"]}
+            out_ct = images_dir / f"{case_id}_step{pp:02d}_0000.nii.gz"
+            if not (out_ct.exists() and not args.force):
+                arr_ct, aff_ct = _truncate_one_ct_boxes(
+                    Path(source_image), regions_ct, pad_value=args.pad_value)
+                nib.save(nib.Nifti1Image(arr_ct.astype(np.float32), aff_ct), str(out_ct))
+                n_written += 1
+            gt_trunc = _blank_notches(gt_arr.copy(), regions_gt, pad_value=0)
+            out_gt = gt_dir / f"{case_id}_step{pp:02d}.nii.gz"
+            nib.save(nib.Nifti1Image(gt_trunc.astype(gt_arr.dtype), gt_affine), str(out_gt))
+
+            geom = {"mode": "box_per_eye", "corner": corner,
+                    "min_retain": T, "min_retain_on": T_on, "per_eye": per_eye}
+            entry["steps"][str(pp)] = {"kept": True, "image": str(out_ct),
+                                       "gt_trunc": str(out_gt), **geom}
+            sidecar[case_id][str(pp)] = {"source_shape": list(ct_shape), **geom}
+            worst = min(min(e["ret_total"], e["ret_ON"]) for e in per_eye.values())
+            summ.append(f"step{pp:02d}(T{T:.2f},worst{worst:.2f})")
+        manifest["cases"][case_id] = entry
+        print(f"  {case_id}: per-eye {corner} eyes={list(eye_data)} -> " + " ".join(summ))
+
+    with open(out_root / "corrector_data_manifest.json", "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    with open(out_root / "fov_truncation_manifest.json", "w") as fh:
+        json.dump(sidecar, fh, indent=2)
+    print(f"[fov] cases={n_cases} images_written={n_written} skipped={n_skipped}")
+    print(f"[fov] manifest -> {out_root / 'corrector_data_manifest.json'}")
+    print(f"[fov] sidecar  -> {out_root / 'fov_truncation_manifest.json'}  (+ gt_trunc/, per_eye QC)")
+    print("[fov] NEXT: 835 stage-1 on each truncated CT -> CNISP 032 "
+          f"(--steps {','.join(str(s) for s in steps)}) -> build_corrector_dataset. See RUNBOOK_FOV.md.")
+    return 0
 
 
 def main() -> int:
@@ -209,6 +438,18 @@ def main() -> int:
     ap.add_argument("--corner", choices=_CORNERS + ["random"], default="SL",
                     help="[box mode] the two faces the head EXITS (blanked), one of "
                          f"{_CORNERS} (S/I superior/inferior x L/R left/right) or random.")
+    ap.add_argument("--min-retains", default=None,
+                    help="[per-eye box, Option 2] comma list of per-eye retention FLOORS T "
+                         "(e.g. 0.5,0.65,0.8). Each T -> pseudo-step round(T*100). Triggers "
+                         "the per-eye path: each orbit is clipped INDEPENDENTLY to the "
+                         "deepest cut still holding ret_total>=T AND ret_ON>=T_on for BOTH "
+                         "eyes (guarantees both eyes stay >= half visible). Replaces "
+                         "--keep-fractions/--mode when given.")
+    ap.add_argument("--min-retain-on", type=float, default=None,
+                    help="[per-eye] separate ON retention floor (default: = each T).")
+    ap.add_argument("--min-on-vox", type=int, default=10,
+                    help="[per-eye] skip a case if either eye's ON has < this many voxels "
+                         "(atypical anatomy / bad split). Default %(default)s.")
     ap.add_argument("--pad-value", type=float, default=None,
                     help="fill HU for vised slices (default: each CT's own min = air).")
     ap.add_argument("--max-cases", type=int, default=0, help="cap number of cases (0=all).")
@@ -241,6 +482,10 @@ def main() -> int:
     images_dir.mkdir(parents=True, exist_ok=True)
     (out_root / cd.get("nnunet_pred_dirname", "nnunet_pred")).mkdir(parents=True, exist_ok=True)
     (out_root / cd.get("cnisp_pred_dirname", "cnisp_pred")).mkdir(parents=True, exist_ok=True)
+
+    # Option 2 (per-eye min-retain) is a distinct path -- delegate and return.
+    if args.min_retains:
+        return _run_per_eye(args, src, out_root, images_dir, cd)
 
     fracs = [float(x) for x in args.keep_fractions.split(",") if x.strip()]
     steps = [_pseudo_step(f) for f in fracs]
