@@ -231,6 +231,7 @@ def run_real(args) -> int:
                               _build_label_obs_loader, _meta_path_for_case,
                               device as INFER_DEVICE)
     from engine.test_label_sources import build_run_layout, step_input_patch_path
+    from data_prep.fov_pair import align_fov_pair, _pad_or_crop
 
     device = INFER_DEVICE
 
@@ -282,6 +283,30 @@ def run_real(args) -> int:
             print(f"[fov-ab] WARNING: {tm} missing; M_i falls back to all-ones "
                   f"(baseline==A). Pass --trunc-manifest to fix.", file=sys.stderr)
 
+    # ── co-framed source segs: obs = nnunet_pred, GT = gt_candidate_pred ──
+    # align_fov_pair crops BOTH at the OBS centroid so obs and GT share the
+    # frame (fixes the misalignment from independently-aligned patches). Needs
+    # the corrector manifest (gt_candidate_pred) + the nnunet_pred dir.
+    coframed = (str(args.experiment).lower() == "fov") and not args.no_coframed
+    cdm = None
+    nnunet_pred_dir = None
+    if coframed:
+        if corrector_cfg is None:
+            print("[fov-ab] co-framed OFF: needs --config (corrector cfg)", file=sys.stderr)
+            coframed = False
+        else:
+            dr = _corrector_data_root()
+            cd = corrector_cfg.get("corrector_data", {}) or {}
+            nnunet_pred_dir = dr / cd.get("nnunet_pred_dirname", "nnunet_pred")
+            cdmp = dr / "corrector_data_manifest.json"
+            if cdmp.is_file():
+                cdm = json.load(open(cdmp))
+                print(f"[fov-ab] co-framed obs/GT: ON  (manifest {cdmp.name}, "
+                      f"nnunet_pred {nnunet_pred_dir})")
+            else:
+                print(f"[fov-ab] co-framed OFF: {cdmp} missing", file=sys.stderr)
+                coframed = False
+
     # model
     model_dir = Path(params["model_basedir"]) / params["model_name"]
     model_state, _ = load_model_checkpoint(model_dir, args.checkpoint, verbose=True)
@@ -319,25 +344,81 @@ def run_real(args) -> int:
     csv_rows = []
     summary = {"config": args.config, "model": args.model_name, "cases": []}
 
+    def _coframed_pair(cn, step, ci, src_stem):
+        """Co-framed (obs, GT, valid) 64 mm sub-patch via align_fov_pair on the
+        SOURCE segs: crop both at the OBS centroid so they share the frame.
+        Returns (sub_obs, sub_gt, inner, spacing, fov_mask, gt_captured) or None."""
+        import torch
+        case_id = _source_of(cn)
+        low = cn.lower()
+        eye = "OD" if low.endswith("_od") else ("OS" if low.endswith("_os") else None)
+        if eye is None:
+            return None
+        obs_seg = nnunet_pred_dir / f"{case_id}_step{step:02d}.nii.gz"
+        gt_seg = ((cdm.get("cases", {}) or {}).get(case_id, {}) or {}).get(
+            "gt_candidate_pred", "")
+        if not obs_seg.exists() or not gt_seg or not Path(gt_seg).exists():
+            print(f"  {cn} step={step:02d}: co-framed skip (obs {obs_seg.exists()}, "
+                  f"gt '{gt_seg}')", file=sys.stderr)
+            return None
+        vbox = None
+        if trunc is not None:
+            for key in (src_stem, case_id, cn):
+                e = (trunc.get(str(key), {}) or {}).get(str(step))
+                if e and "visible_box" in e:
+                    vbox = e["visible_box"]
+                    break
+        ps = float(labels_dense[ci].shape[0]) * float(spacings_dense[ci][0])
+        try:
+            pairs = align_fov_pair(str(obs_seg), str(gt_seg), patch_size_mm=ps,
+                                   visible_box=vbox)
+        except Exception as e:  # noqa: BLE001
+            print(f"  {cn} step={step:02d}: align_fov_pair failed: {e}", file=sys.stderr)
+            return None
+        pr = next((p for p in pairs if p["eye"] == eye), None)
+        if pr is None:
+            return None
+        obs80 = torch.from_numpy(pr["obs_patch"].astype(np.float32))
+        gt80 = torch.from_numpy(pr["gt_patch"].astype(np.float32))
+        spacing = torch.from_numpy(np.asarray(pr["spacing"], dtype=np.float32))
+        offset = spacing / 2.0
+        inner = inner_crop_64mm(obs80, spacing, offset, gt80, spacing, offset,
+                                keep_all=True)
+        lo = np.asarray(inner["sub_crop_lo_vox_dense"], int)
+        shp = np.asarray(inner["sub_crop_shape_vox_dense"], int)
+        sub_valid = _pad_or_crop(pr["valid_mask"], lo, shp, fill=False).astype(bool)
+        return (inner["sub_sparse"], inner["sub_dense"], inner, spacing,
+                sub_valid, pr["gt_captured_frac"])
+
     for ci, cn in enumerate(casenames):
         meta = json.load(open(meta_for(cn))) if Path(meta_for(cn)).is_file() else {}
         src_stem = Path(meta.get("original_nifti_path", cn)).name
         src_stem = src_stem.replace(".nii.gz", "").replace(".nii", "")
         for step in steps_list:
-            ov = label_obs_loader(cn, step, 0)
-            if ov is None:
-                print(f"  {cn} step={step:02d}: SKIP (no obs patch)")
-                continue
-            label_obs, spacing_obs, offset_obs = ov
-            spacing_dense = spacings_dense[ci]
-            offset_dense = spacing_dense / 2.0
-            # FOV: centre the 64 mm crop on the whole visible-eye centroid, not
-            # the largest fragment (truncation can split the eye).
-            inner = inner_crop_64mm(label_obs, spacing_obs, offset_obs,
-                                    labels_dense[ci], spacing_dense, offset_dense,
-                                    keep_all=True)
-            sub_obs = inner["sub_sparse"]
-            sub_gt = inner["sub_dense"]
+            fov_mask = None
+            gt_captured = None
+            if coframed:
+                cf = _coframed_pair(cn, step, ci, src_stem)
+                if cf is None:
+                    print(f"  {cn} step={step:02d}: SKIP (no co-framed pair)")
+                    continue
+                sub_obs, sub_gt, inner, spacing_dense, fov_mask, gt_captured = cf
+                spacing_obs = spacing_dense
+            else:
+                ov = label_obs_loader(cn, step, 0)
+                if ov is None:
+                    print(f"  {cn} step={step:02d}: SKIP (no obs patch)")
+                    continue
+                label_obs, spacing_obs, offset_obs = ov
+                spacing_dense = spacings_dense[ci]
+                offset_dense = spacing_dense / 2.0
+                # FOV: centre the 64 mm crop on the whole visible-eye centroid,
+                # not the largest fragment (truncation can split the eye).
+                inner = inner_crop_64mm(label_obs, spacing_obs, offset_obs,
+                                        labels_dense[ci], spacing_dense, offset_dense,
+                                        keep_all=True)
+                sub_obs = inner["sub_sparse"]
+                sub_gt = inner["sub_dense"]
             if tuple(sub_obs.shape) != tuple(sub_gt.shape):
                 print(f"  {cn} step={step:02d}: sparse/dense sub shapes differ "
                       f"{sub_obs.shape} vs {sub_gt.shape}; FOV expects equal. skip",
@@ -353,26 +434,34 @@ def run_real(args) -> int:
             labels_fit = sub_obs.reshape(-1).long().to(device)
             gt_dec = sub_gt.cpu().numpy().astype(np.int16)
 
-            # ── M_i : project visible_box into the sub-patch grid ──
-            fov_mask = np.ones(dec_shape, bool)
-            info = None
-            if trunc is not None:
-                for key in (src_stem, _source_of(cn), cn):
-                    info = (trunc.get(str(key), {}) or {}).get(str(step))
-                    if info:
-                        break
-                if info and "visible_box" in info:
-                    obs_path = step_input_patch_path(layout, cn, step, 0)
-                    A_disk = nib.load(str(obs_path)).affine
-                    A_sub = subpatch_affine(A_disk, inner["sub_crop_lo_vox_dense"])
-                    A_src = np.asarray(meta.get("original_affine"), dtype=np.float64)
-                    fov_mask = source_box_to_grid_mask(dec_shape, A_sub, A_src,
-                                                       info["visible_box"])
-                    frac = float(fov_mask.mean())
-                    print(f"  {cn} step={step:02d}: M_i visible frac={frac:.3f}")
-                else:
-                    print(f"  {cn} step={step:02d}: no sidecar entry "
-                          f"(keys tried: {src_stem},{_source_of(cn)}); M_i=ones")
+            if coframed:
+                # co-framed valid mask is already in this 64 mm sub-frame.
+                if tuple(fov_mask.shape) != dec_shape:
+                    fov_mask = np.ones(dec_shape, bool)
+                print(f"  {cn} step={step:02d}: co-framed valid frac="
+                      f"{float(fov_mask.mean()):.3f}  gt_captured={gt_captured}"
+                      + ("  [WARN patch clips GT]" if (gt_captured or 1) < 0.99 else ""))
+            else:
+                # ── M_i : project visible_box into the sub-patch grid ──
+                fov_mask = np.ones(dec_shape, bool)
+                info = None
+                if trunc is not None:
+                    for key in (src_stem, _source_of(cn), cn):
+                        info = (trunc.get(str(key), {}) or {}).get(str(step))
+                        if info:
+                            break
+                    if info and "visible_box" in info:
+                        obs_path = step_input_patch_path(layout, cn, step, 0)
+                        A_disk = nib.load(str(obs_path)).affine
+                        A_sub = subpatch_affine(A_disk, inner["sub_crop_lo_vox_dense"])
+                        A_src = np.asarray(meta.get("original_affine"), dtype=np.float64)
+                        fov_mask = source_box_to_grid_mask(dec_shape, A_sub, A_src,
+                                                           info["visible_box"])
+                        frac = float(fov_mask.mean())
+                        print(f"  {cn} step={step:02d}: M_i visible frac={frac:.3f}")
+                    else:
+                        print(f"  {cn} step={step:02d}: no sidecar entry "
+                              f"(keys tried: {src_stem},{_source_of(cn)}); M_i=ones")
 
             preds, rows, taus = run_one_case(
                 net, latent_dim, num_classes, coords_fit, labels_fit, coords_dec,
@@ -582,6 +671,10 @@ def main() -> int:
     ap.add_argument("--iters", type=int, default=None,
                     help="total latent iterations (default: config latent_num_iters, ~3000).")
     ap.add_argument("--out-root", default="nnunet-c/data_fov_pereye_test")
+    ap.add_argument("--no-coframed", action="store_true",
+                    help="disable the co-framed obs/GT pair (align_fov_pair on the "
+                         "source segs) and fall back to the independently-aligned "
+                         "patches (obs and GT in different frames -- misaligned).")
     args = ap.parse_args()
 
     if args.self_test:
