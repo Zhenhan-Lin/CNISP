@@ -156,9 +156,21 @@ def load_model_checkpoint(model_dir: Path, which: str = "best", verbose: bool = 
 def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
                     lat_reg_lambda, num_iters, max_num_const_dsc,
                     device, verbose=True, soft=False, label_smoothing=0.1,
-                    delta=None):
+                    delta=None, valid_mask=None):
     """
     Test-time latent optimization for one case.
+
+    FOV valid mask (``valid_mask`` not None)
+    ----------------------------------------
+    Under FOV truncation the observation is background (0) in the imaged-but-empty
+    region, and BOTH loss terms would otherwise pull the fit toward background
+    there -- the CE directly, and the (foreground) Dice by penalising any prior
+    extrapolation into it (the prediction's foreground there has no matching
+    target, so it only inflates the Dice denominator). That collapses the shape.
+    When ``valid_mask`` [B,*] (1 = inside the acquired FOV) is given, the loss is
+    the MASKED CE + masked soft-Dice over valid voxels only (engine.pose_opt), so
+    the truncated region contributes nothing and the prior is free to complete it.
+    ``valid_mask=None`` keeps the original full-patch loss bit-for-bit (thin/thick).
 
     Denoise framework (``delta`` not None)
     --------------------------------------
@@ -197,6 +209,12 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
     metric = MultiClassDiceMetric(net.num_classes).to(device)
     optimizer = torch.optim.Adam([latent], lr=lr)
 
+    # FOV masked-loss path: both CE and Dice restricted to the acquired FOV.
+    import torch.nn.functional as _F
+    from engine.pose_opt import masked_cross_entropy, masked_soft_dice_loss
+    vmask = None if valid_mask is None else valid_mask.reshape(-1).float().to(device)
+    n_classes = int(net.num_classes)
+
     net.eval()
 
     use_amp = device.type == "cuda" and _AUTOCAST_DTYPE != torch.float32
@@ -224,7 +242,15 @@ def optimize_latent(net, labels_sparse, coords, latent_dim, lr,
                             dtype=_AUTOCAST_DTYPE,
                             enabled=use_amp):
             logits = net(latent, coords)
-            loss = criterion(logits, labels_sparse)
+            if vmask is None:
+                loss = criterion(logits, labels_sparse)
+            else:
+                lf = logits.reshape(-1, n_classes)
+                tf = labels_sparse.reshape(-1).long()
+                probs = torch.softmax(lf, dim=-1)
+                onehot = _F.one_hot(tf, n_classes).to(lf.dtype)
+                loss = (masked_cross_entropy(lf, tf, vmask)
+                        + masked_soft_dice_loss(probs, onehot, vmask))
             if lat_reg_lambda > 0:
                 lat_reg = torch.mean(torch.sum(latent ** 2, dim=1))
                 loss = loss + min(1.0, i / 100.0) * lat_reg_lambda * lat_reg

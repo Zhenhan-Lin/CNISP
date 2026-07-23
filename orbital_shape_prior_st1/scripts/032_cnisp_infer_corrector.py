@@ -496,6 +496,46 @@ def main() -> int:
             _stem_cache[s] = stem
         return _stem_cache[s]
 
+    # ── FOV valid mask (default ON for experiment=fov) ───────────────────────
+    # The latent fit must ignore the imaged-but-empty truncated region, else the
+    # loss collapses the shape into it. Load the truncation sidecar (under the
+    # corrector data_root = aligned_dir's parent) and, per (case, step), hand
+    # eval_case_at_resolution the visible_box + affines to build M_i. Gated on
+    # experiment=fov + FOV_VALID_MASK!=0, so thin/thick are untouched.
+    _fov_trunc = None
+    if args.experiment == "fov" and os.environ.get("FOV_VALID_MASK", "1") != "0":
+        _sc = Path(params["aligned_dir"]).parent / "fov_truncation_manifest.json"
+        if _sc.is_file():
+            _fov_trunc = json.load(open(_sc))
+            print(f"[032] FOV valid mask ON  (sidecar: {_sc})")
+        else:
+            print(f"[032] experiment=fov but sidecar missing ({_sc}); "
+                  f"valid mask OFF -> fit will collapse in the truncated region",
+                  file=sys.stderr)
+
+    def _fov_mask_inputs(casename: str, step: int):
+        """(visible_box, source_affine, obs_patch_affine) for M_i, or (None,)*3."""
+        if _fov_trunc is None:
+            return None, None, None
+        info = None
+        for key in (_source_stem(casename), _source_of(casename), casename):
+            if key is None:
+                continue
+            info = (_fov_trunc.get(str(key), {}) or {}).get(str(int(step)))
+            if info:
+                break
+        if not info or "visible_box" not in info:
+            return None, None, None
+        mp = Path(meta_for(casename))
+        if not mp.exists():
+            return None, None, None
+        src_aff = json.load(open(mp)).get("original_affine")
+        obs_path = step_input_patch_path(layout, casename, int(step), 0)
+        if src_aff is None or not Path(obs_path).exists():
+            return None, None, None
+        obs_aff = nib.load(str(obs_path)).affine
+        return info["visible_box"], np.asarray(src_aff, float), np.asarray(obs_aff, float)
+
     # group eyes by source so both eyes of a (source, step) merge together
     src_cases: "OrderedDict[str, list]" = OrderedDict()
     for ci, cn in enumerate(casenames):
@@ -532,6 +572,7 @@ def main() -> int:
                 if label_obs_loader is not None and override is None:
                     print(f"  {cn} step={step:02d}: SKIP (no input patch)")
                     continue
+                _vb, _sa, _oa = _fov_mask_inputs(cn, step)
                 r = eval_case_at_resolution(
                     net=net, optimize_fn=optimize_fn,
                     label_dense=labels_dense[ci], spacing_dense=spacings_dense[ci],
@@ -544,6 +585,7 @@ def main() -> int:
                     num_classes=params.get("num_classes", 5),
                     start=0,
                     latent_override=lat_override,
+                    fov_visible_box=_vb, fov_source_affine=_sa, fov_obs_affine=_oa,
                 )
                 r["casename"] = cn
                 src_results.append(r)

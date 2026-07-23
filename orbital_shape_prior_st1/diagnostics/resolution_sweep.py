@@ -141,6 +141,9 @@ def eval_case_at_resolution(
     num_classes: int = 5,
     start: int = 0,
     latent_override: Optional[np.ndarray] = None,
+    fov_visible_box: Optional[list] = None,
+    fov_source_affine: Optional[np.ndarray] = None,
+    fov_obs_affine: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Sparsify → optimize latent → predict dense → Dice vs GT.
@@ -239,6 +242,21 @@ def eval_case_at_resolution(
               ).unsqueeze(0).to(device)
     labels_batch = label_obs.unsqueeze(0).to(device)
 
+    # ── FOV valid mask (M_i): project the sidecar visible_box into THIS 64 mm
+    # sub-patch, so the latent fit ignores the imaged-but-empty truncated region
+    # (else the CE + Dice pull the shape toward background there -> collapse).
+    fov_valid_mask = None
+    if (fov_visible_box is not None and fov_obs_affine is not None
+            and fov_source_affine is not None):
+        from engine.fov_mask import source_box_to_grid_mask, subpatch_affine
+        a_sub = subpatch_affine(np.asarray(fov_obs_affine, float),
+                                sub_crop_lo_vox_dense)
+        m_np = source_box_to_grid_mask(
+            tuple(int(s) for s in label_obs.shape), a_sub,
+            np.asarray(fov_source_affine, float), fov_visible_box)
+        fov_valid_mask = torch.as_tensor(
+            m_np.reshape(-1).astype(np.float32), device=device)
+
     if latent_override is not None:
         # Resume-from-latent: reuse a previously optimized latent and skip the
         # (expensive) test-time optimization entirely. The saved latent is
@@ -263,6 +281,7 @@ def eval_case_at_resolution(
             device=device,
             soft=bool(params.get("latent_fit_soft", False)),
             label_smoothing=float(params.get("latent_fit_label_smoothing", 0.1)),
+            valid_mask=fov_valid_mask,
         )
 
     # ── Dense prediction with adaptive bounding box ─────────────
