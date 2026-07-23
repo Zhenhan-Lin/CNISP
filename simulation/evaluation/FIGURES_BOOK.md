@@ -71,13 +71,17 @@ leaves the driver default on unless you pass `COMMON_SAMPLES=…`; drivers accep
 
 ---
 
-## 2. Volume agreement — `volume_agreement_bland_altman.png`  (+ per-arm table & panels)
+## 2. Volume veracity — `signed_volume_error.png`  (default; `--bland-altman` for the BA figure)
 
 - **Driver:** `volume_agreement_summary.py` → `plots.volume_agreement_figure`.
-- **Structure:** `--ba-structure` (default **Globe**).
-- **Panels:** (a) Bland–Altman for **nnUNet**, (b) Bland–Altman for **Proposed**,
-  (c) signed-volume-error violins for **all 5 arms**. Panels (a)/(b) **share one
-  y-axis** (`plots.py:129`) so they're directly comparable.
+- **Default (no `--bland-altman`):** `signed_volume_error.png` — the signed-volume-error
+  violins for **all 5 arms** only (`plots.signed_volume_error_figure`). This is the
+  default volume-veracity figure; Bland–Altman is opt-in.
+- **`--bland-altman`** (or `BLAND_ALTMAN=1` in `make_eval_figures.sh`): instead writes
+  `volume_agreement_bland_altman.png` with (a) Bland–Altman for **nnUNet**, (b)
+  Bland–Altman for **Proposed**, (c) the signed-error violins. Panels (a)/(b) **share
+  one y-axis** so they're directly comparable, and the per-arm BA panels are drawn.
+- **Structure (BA only):** `--ba-structure` (default **Globe**).
 - **Bland–Altman math** (`plots._bland_altman`, `plots.py:104-118`):
   - x = `(V_pred + V_GT)/2`, y = `diff = V_pred − V_GT` (mm³).
   - **bias** = `mean(diff)`; **LoA** = `±1.96·std(diff)` (population std, ddof=0);
@@ -99,7 +103,32 @@ the **same restricted sample as the figure**:
   (`aggregate.volume_agreement_per_arm`; same ddof/CCC conventions as the plot).
 - **stdout table** — `arm | n | bias(mm³) | ±LoA | CCC | signed%` for all 5 arms.
 - **`bland_altman_per_arm/bland_altman_<arm>.png`** — a standalone BA panel per arm
-  (arms with < 2 paired points are skipped and reported).
+  (arms with < 2 paired points are skipped and reported). **Only with `--bland-altman`**;
+  the bias CSV + stdout table are always written.
+
+---
+
+## 2c. Cross-resolution Dice heatmaps (per method) — `cross_resolution/`
+
+- **Driver:** `cross_resolution_summary.py` → `cross_resolution.render`, which reuses
+  the CNISP `engine/visualize._plot_heatmap` / `_compute_pairwise_dice` core (pulled in
+  by file path — numpy+matplotlib only, no engine `__init__`).
+- **What it shows:** for **every arm**, the pairwise Dice of that method's own mask at
+  one resolution/step vs another (self-consistency across resolution), meaned over
+  sources. A resolution-*stable* method stays green off-diagonal; an unstable one (e.g.
+  the Oracle's per-scan volume swings) drops. Complements the volume-stability CoV /
+  per-scan-range figure by localizing *which resolution pairs* disagree.
+- **Masks per (arm, source, step)** come straight from the MASK_INDEX, resampled onto
+  each source's reference grid (order 0) and remapped to the canonical
+  `{Globe,Optic nerve,Recti,Fat}={1..4}` scheme so arms with different native schemes
+  are comparable.
+- **Outputs** under `<out>/cross_resolution/`:
+  - `by_method_overview.png` — one mean heatmap per method, side by side.
+  - `<arm>/cross_res_dice_mean.png` + `cross_res_dice_<structure>.png`.
+  - `<arm>/cross_res_dice_matrix.csv` — the mean + per-structure matrices.
+- **Note:** an arm/source needs `>= --min-steps` (default 2) distinct steps to appear.
+  Both-empty structure pairs score Dice 0 (the reused `_dice_per_class` convention),
+  same as the CNISP self-consistency figure.
 
 ---
 
@@ -184,8 +213,9 @@ For the clean 5-arm A–E comparison, prefer the `evaluation__thick/` figures ab
 | Figure PNG | Driver | Aggregate fn | Added CSV(s) |
 |---|---|---|---|
 | `surface_quality_metrics.png` | `surface_quality_summary.py` | `aggregate.surface` | — |
-| `volume_agreement_bland_altman.png` | `volume_agreement_summary.py` | `aggregate.volume_agreement` + `volume_agreement_per_arm` | `bland_altman_bias_by_arm.csv`, `bland_altman_per_arm/*.png` |
+| `signed_volume_error.png`  (`--bland-altman` → `volume_agreement_bland_altman.png`) | `volume_agreement_summary.py` | `aggregate.volume_agreement` + `volume_agreement_per_arm` | `bland_altman_bias_by_arm.csv` (always); `bland_altman_per_arm/*.png` (`--bland-altman`) |
 | `volume_stability_by_resolution.png` | `volume_stability_summary.py` | `aggregate.stability` + `stability_table` | `volume_stability_cov_summary.csv`, `..._cov_detail.csv`, `..._on_range_detail.csv` |
+| `cross_resolution/by_method_overview.png` + `cross_resolution/<arm>/*.png` | `cross_resolution_summary.py` | `cross_resolution.render` (reuses `engine/visualize._plot_heatmap`) | `cross_resolution/<arm>/cross_res_dice_matrix.csv` |
 | `plausibility/*.png` | `plausibility_summary.py` | `plausibility.py` | `--plausibility-csv` (opt) |
 | `combined__thick/*.png` | `simulation/comparison/combined_summary.py` | (paired CSVs) | — |
 </content>

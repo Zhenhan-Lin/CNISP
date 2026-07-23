@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Driver: volume-agreement figure (Bland-Altman + signed volume error).
+"""Driver: volume-veracity figure.
 
 Reads the metrics CSV (or builds it from a MASK_INDEX; or renders the synthetic
 illustrative layout), aggregates per-arm volume agreement for one structure, and
-writes ``volume_agreement_bland_altman.png``.
+writes ``signed_volume_error.png`` by default (signed volume error across methods
+only). Pass ``--bland-altman`` to instead write the full ``volume_agreement_bland_altman.png``
+(Bland-Altman for nnU-Net + Proposed + the signed-error violins) plus the per-arm
+BA panels. The per-arm bias CSV is always written.
 
 Sibling of ``simulation/comparison/paired_summary.py``.
 
@@ -47,15 +50,21 @@ def run(args) -> int:
         per_arm, signed = synthetic.volume_agreement()
     else:
         per_arm, signed = aggregate.volume_agreement(df, args.ba_structure)
-    p = out / "volume_agreement_bland_altman.png"
-    plots.volume_agreement_figure(per_arm, signed, p, synthetic=synth)
+    # Default: signed volume error only (no Bland-Altman). --bland-altman restores
+    # the full 3-panel BA figure + the per-arm BA panels.
+    p = (out / "volume_agreement_bland_altman.png" if args.bland_altman
+         else out / "signed_volume_error.png")
+    plots.volume_agreement_figure(per_arm, signed, p, synthetic=synth,
+                                  bland_altman=args.bland_altman)
     print(f"[volume_agreement_summary] wrote {p}")
 
     # ── per-arm Bland-Altman bias table (ALL 5 arms) + one panel per arm ──
     # The combined figure above only draws nnUNet + Proposed; here we quantify
     # every arm's volume bias (on the SAME restricted sample as the figure) so
     # e.g. Proposed's +bias can be read off next to the other arms, print it to
-    # stdout, dump it to CSV, and render a standalone panel per arm in a subdir.
+    # stdout, dump it to CSV, and (with --bland-altman) render a standalone panel
+    # per arm in a subdir. The bias CSV is cheap numbers and always written; the
+    # BA PNG panels are gated behind --bland-altman (they are "the BA plots").
     if not synth:
         import csv as _csv
         per_all, stats = aggregate.volume_agreement_per_arm(df, args.ba_structure)
@@ -80,21 +89,22 @@ def run(args) -> int:
                       f"{row['mean_signed_pct']:>9.1f}")
             else:
                 print(f"    {row['arm']:<14}{n:>5}{'(no rows)':>12}")
-        sub = out / "bland_altman_per_arm"
-        sub.mkdir(parents=True, exist_ok=True)
-        drawn, skipped = [], []
-        for m in aggregate.METHODS:
-            d = per_all[m]
-            fn = sub / f"bland_altman_{m.replace(' ', '_')}.png"
-            if plots.single_bland_altman_figure(
-                    d["v_pred"], d["v_gt"], d["thickness"], m, args.ba_structure, fn):
-                drawn.append(m)
-            else:
-                skipped.append((m, len(d["v_pred"])))
         print(f"[volume_agreement_summary] bias table -> {tbl}")
-        print(f"[volume_agreement_summary] per-arm panels ({len(drawn)}) -> {sub}/")
-        for m, n in skipped:
-            print(f"    [skip panel] {m}: n={n} (<2 points)")
+        if args.bland_altman:
+            sub = out / "bland_altman_per_arm"
+            sub.mkdir(parents=True, exist_ok=True)
+            drawn, skipped = [], []
+            for m in aggregate.METHODS:
+                d = per_all[m]
+                fn = sub / f"bland_altman_{m.replace(' ', '_')}.png"
+                if plots.single_bland_altman_figure(
+                        d["v_pred"], d["v_gt"], d["thickness"], m, args.ba_structure, fn):
+                    drawn.append(m)
+                else:
+                    skipped.append((m, len(d["v_pred"])))
+            print(f"[volume_agreement_summary] per-arm panels ({len(drawn)}) -> {sub}/")
+            for m, n in skipped:
+                print(f"    [skip panel] {m}: n={n} (<2 points)")
     return 0
 
 
@@ -106,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--mask-index", default=None, help="MASK_INDEX json (built on the fly).")
     ap.add_argument("--ba-structure", default=aggregate.DEFAULT_BA_STRUCTURE,
                     help=f"structure for Bland-Altman (default {aggregate.DEFAULT_BA_STRUCTURE}).")
+    ap.add_argument("--bland-altman", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="Draw the Bland-Altman figure + per-arm BA panels. Default "
+                         "OFF: only 'signed_volume_error.png' is written (the bias CSV "
+                         "is always written).")
     ap.add_argument("--mode", default=aggregate.DEFAULT_MODE)
     ap.add_argument("--common-samples", action=argparse.BooleanOptionalAction,
                     default=True,

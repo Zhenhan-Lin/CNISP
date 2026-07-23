@@ -118,9 +118,38 @@ def _bland_altman(ax, fig, v_pred, v_gt, thickness, title, col, colorbar=False):
         cb = fig.colorbar(sc, ax=ax, pad=0.02); cb.set_label("slice thickness / eff. res (mm)", fontsize=8.5)
 
 
+def signed_volume_error_figure(signed: Dict, out_path: Path,
+                               synthetic: bool = False) -> None:
+    """Signed volume error across methods (violins only; no Bland-Altman).
+
+    This is the default volume-veracity figure: the same panel (c) that
+    ``volume_agreement_figure`` draws, rendered standalone.
+    """
+    fig = plt.figure(figsize=(6.2, 4.6))
+    ax = fig.add_subplot(1, 1, 1)
+    _violin(ax, signed, widths=0.85, rotation=25)
+    ax.axhline(0, color="0.55", ls=":", lw=0.9)
+    ax.set_ylabel("signed volume error (%)")
+    ax.set_title("Signed volume error across methods", loc="left")
+    ax.text(-0.09, 0.98, "over\nestimate", transform=ax.transAxes, fontsize=7.5,
+            color="0.4", va="top")
+    ax.text(-0.09, 0.02, "under\nestimate", transform=ax.transAxes, fontsize=7.5,
+            color="0.4", va="bottom")
+    _foot(fig, synthetic)
+    fig.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path)); plt.close(fig)
+
+
 def volume_agreement_figure(per_arm: Dict, signed: Dict,
-                            out_path: Path, synthetic: bool = False) -> None:
-    """Volume veracity: Bland-Altman (nnU-Net vs Proposed) + signed-error violins."""
+                            out_path: Path, synthetic: bool = False,
+                            bland_altman: bool = False) -> None:
+    """Volume veracity. Default (``bland_altman=False``): signed volume error across
+    methods only. ``bland_altman=True``: the full 3-panel figure (Bland-Altman for
+    nnU-Net + Proposed, then signed-error violins)."""
+    if not bland_altman:
+        signed_volume_error_figure(signed, out_path, synthetic=synthetic)
+        return
     fig = plt.figure(figsize=(13, 4.4))
     gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1.12, 1.05], wspace=0.33)
     ax_a = fig.add_subplot(gs[0]); ax_a.set_ylabel("V$_{pred}$ \u2212 V$_{GT}$  (mm\u00b3)")
@@ -299,5 +328,5 @@ def dice_vs_eff_res_figure(bucket_order, by_arm_bucket, eff_by_bucket, out_path,
 
 
 __all__ = ["stability_figure", "volume_agreement_figure",
-           "single_bland_altman_figure", "surface_figure",
-           "dice_vs_eff_res_figure", "LEGEND", "COLOR"]
+           "signed_volume_error_figure", "single_bland_altman_figure",
+           "surface_figure", "dice_vs_eff_res_figure", "LEGEND", "COLOR"]

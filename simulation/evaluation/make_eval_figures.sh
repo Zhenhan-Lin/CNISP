@@ -11,9 +11,11 @@
 #   1. build_metrics.py          -> metrics_long.csv   (the shared interface)
 #   2. dice_quality_summary      -> Dice vs eff-res, 5-arm (replaces combined__thick)
 #   3. surface_quality_summary   -> ASSD / HD95 / NSD figures
-#   4. volume_agreement_summary  -> Bland-Altman (per --ba-structure)
+#   4. volume_agreement_summary  -> signed volume error across methods
+#                                   (BLAND_ALTMAN=1 adds the Bland-Altman figure)
 #   5. volume_stability_summary  -> volume CoV across steps
 #   6. plausibility_summary      -> anatomical-plausibility figures
+#   7. cross_resolution_summary  -> per-method cross-resolution Dice heatmaps
 #
 # RESUME by default: an existing metrics_long.csv (stage 1) and plausibility_long.csv
 # (stage 6) are reused instead of recomputed -- a re-run only re-renders figures.
@@ -67,9 +69,10 @@ echo "[figs] (3) surface quality (ASSD / HD95 / NSD)"
 python3 "$EVAL/surface_quality_summary.py"  --out "$OUT" --mode "$MODE" \
     --metrics-csv "$CSV" $COMMON $TAU
 
-echo "[figs] (4) volume agreement (Bland-Altman: $BA_STRUCTURE)"
+BA_FLAG=""; [[ "${BLAND_ALTMAN:-0}" == "1" ]] && BA_FLAG="--bland-altman"
+echo "[figs] (4) volume veracity (signed volume error${BA_FLAG:+ + Bland-Altman: $BA_STRUCTURE})"
 python3 "$EVAL/volume_agreement_summary.py" --out "$OUT" --mode "$MODE" \
-    --ba-structure "$BA_STRUCTURE" --metrics-csv "$CSV" $COMMON $TAU
+    --ba-structure "$BA_STRUCTURE" --metrics-csv "$CSV" $COMMON $TAU $BA_FLAG
 
 echo "[figs] (5) volume stability (CoV across steps)"
 python3 "$EVAL/volume_stability_summary.py" --out "$OUT" --mode "$MODE" \
@@ -81,6 +84,14 @@ echo "[figs] (6) plausibility (reuses plausibility_long.csv if present)"
 python3 "$EVAL/plausibility_summary.py" --mask-index "$IDX" \
     --out "$OUT/plausibility" ${PLAUS_ARGS:-}
 
+# (7) per-method cross-resolution Dice heatmaps (self-consistency across steps).
+# Reads the MASK_INDEX directly (per-arm masks); one heatmap bundle per method +
+# a by-method overview, under $OUT/cross_resolution/.
+echo "[figs] (7) cross-resolution Dice heatmaps (per method)"
+python3 "$EVAL/cross_resolution_summary.py" --mask-index "$IDX" --out "$OUT" \
+    ${XRES_ARGS:-}
+
 echo "================================================================"
-echo "[figs] DONE -> figures under $OUT  (+ plausibility in $OUT/plausibility)"
+echo "[figs] DONE -> figures under $OUT  (+ plausibility in $OUT/plausibility,"
+echo "[figs]         cross-resolution heatmaps in $OUT/cross_resolution)"
 echo "================================================================"
