@@ -66,7 +66,7 @@ VALID_LABEL_SOURCES = ("atlas_gt", "nnunet_pred", "real_pair")
 # Experiment dimension (simulation strategy). Inserted as a directory layer
 # under runs/ -- runs/<experiment>/<run_tag>/ -- so thin / thick / real
 # results coexist on disk instead of overwriting one another.
-VALID_EXPERIMENTS = ("thin", "thick", "real")
+VALID_EXPERIMENTS = ("thin", "thick", "real", "fov")
 
 
 def resolve_experiment(params: dict) -> str:

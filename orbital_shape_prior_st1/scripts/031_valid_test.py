@@ -219,7 +219,7 @@ def main() -> int:
     ap.add_argument("--test-label-source", default="atlas_gt",
                     choices=["atlas_gt", "nnunet_pred", "real_pair"])
     ap.add_argument("--run-tag", default="valid_tmp")
-    ap.add_argument("--experiment", default="thick", choices=["thin", "thick", "real"])
+    ap.add_argument("--experiment", default="thick", choices=["thin", "thick", "real", "fov"])
     args = ap.parse_args()
 
     paths_yaml = _resolve_cfg(args.paths)

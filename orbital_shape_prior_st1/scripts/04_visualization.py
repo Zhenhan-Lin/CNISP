@@ -56,7 +56,7 @@ def main():
               "Defaults to the value from the test yaml (atlas_gt if unset)."),
     )
     parser.add_argument(
-        "--experiment", default=None, choices=["thin", "thick", "real"],
+        "--experiment", default=None, choices=["thin", "thick", "real", "fov"],
         help=("Experiment (simulation-strategy) directory layer under runs/. "
               "Defaults: 'real' for real_pair, else sweep_mode (thin)."),
     )

@@ -65,10 +65,12 @@ def main():
               "Defaults to 'atlas_gt' which preserves the ceiling-curve layout."),
     )
     parser.add_argument(
-        "--experiment", default=None, choices=["thin", "thick", "real"],
+        "--experiment", default=None, choices=["thin", "thick", "real", "fov"],
         help=("Simulation-strategy directory layer under runs/. "
               "thin = idealised point-sampling; thick = physical partial-"
-              "volume degradation; real = Turella sim3 real paired data. "
+              "volume degradation; real = Turella sim3 real paired data; "
+              "fov = FOV-truncation (externally pre-degraded inputs, so it does "
+              "NOT drive sweep degradation -- use only with test_label_source=nnunet_pred). "
               "When set for thin/thick it also drives the sweep degradation "
               "(sweep_mode) so the applied degradation matches the folder. "
               "Defaults: 'real' for real_pair, else sweep_mode (thin)."),

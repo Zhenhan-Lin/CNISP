@@ -279,7 +279,7 @@ def main() -> int:
     ap.add_argument("--checkpoint", default="best", choices=["best", "latest"])
     ap.add_argument("--test-label-source", default="nnunet_pred",
                     choices=["atlas_gt", "nnunet_pred", "real_pair"])
-    ap.add_argument("--experiment", default="thick", choices=["thin", "thick", "real"])
+    ap.add_argument("--experiment", default="thick", choices=["thin", "thick", "real", "fov"])
     ap.add_argument("--test-casefile", default=None,
                     help="casefile under casefiles_dir (default: test yaml's value)")
     ap.add_argument("--out-dir", default=None,
