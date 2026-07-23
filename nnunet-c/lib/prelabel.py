@@ -71,18 +71,34 @@ def _cnisp_run_dir(cfg: Dict) -> Path:
     return base / cfg["cnisp_model_name"] / "runs" / cfg["experiment"] / cfg["run_tag"]
 
 
+def _corrector_data_root(cfg: Dict) -> Path:
+    """Resolve ``corrector_data.data_root`` the same way every other corrector-data
+    consumer does (``build_corrector_dataset.py:196`` / ``align_corrector_data.py:102``):
+    relative paths are anchored at the repo root. Default ``nnunet-c/data``.
+
+    Every corrector artifact "lives under data_root" (corrector.yaml), so the iso
+    prelabel roots must follow it too -- otherwise a config that moves data_root
+    (e.g. the FOV tree ``nnunet-c/data_fov_min_retain``) silently leaves its iso
+    prelabels behind in the default ``nnunet-c/data`` tree. For the default
+    ``nnunet-c/data`` this is byte-identical to the old ``nnunet_c_root / "data"``.
+    """
+    cd = cfg.get("corrector_data", {}) or {}
+    dr = Path(cd.get("data_root", "nnunet-c/data"))
+    return dr if dr.is_absolute() else (cfg["_resolved"]["repo_root"] / dr)
+
+
 def _cnisp_iso_root(cfg: Dict) -> Path:
     """Root of the iso-0.5 prelabels CNISP emitted for the corrector.
 
     These are written by ``03_infer.py --emit-iso-prelabel-dir`` (see
     ``run_corrector_predict.sh`` EMIT_ISO). Layout mirrors native_space:
         <root>/native_space_step_XX/<stem>_cnisp_iso_stepXX.nii.gz + manifest.json
-    Default: ``nnunet-c/data/cnisp_pred_test_iso``.
+    Default: ``nnunet-c/data/cnisp_pred_test_iso`` (follows corrector_data.data_root).
     """
     name = (cfg.get("corrector_data", {}) or {}).get(
         "cnisp_iso_pred_dirname", "cnisp_pred_test_iso"
     )
-    return cfg["_resolved"]["nnunet_c_root"] / "data" / name
+    return _corrector_data_root(cfg) / name
 
 
 def _cnisp_train_iso_root(cfg: Dict) -> Path:
@@ -91,12 +107,12 @@ def _cnisp_train_iso_root(cfg: Dict) -> Path:
     Written by ``032_cnisp_infer_corrector.py --emit-iso-prelabel-dir`` (via
     ``run_corrector_cnisp.sh`` EMIT_ISO). Same layout as the test iso root:
         <root>/native_space_step_XX/<stem>_cnisp_iso_stepXX.nii.gz + manifest.json
-    Default: ``nnunet-c/data/cnisp_pred_train_iso``.
+    Default: ``nnunet-c/data/cnisp_pred_train_iso`` (follows corrector_data.data_root).
     """
     name = (cfg.get("corrector_data", {}) or {}).get(
         "cnisp_train_iso_pred_dirname", "cnisp_pred_train_iso"
     )
-    return cfg["_resolved"]["nnunet_c_root"] / "data" / name
+    return _corrector_data_root(cfg) / name
 
 
 def _c_train_iso_prelabel_path(cfg: Dict, sid: str, step: int) -> Path:

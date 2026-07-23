@@ -715,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "before subsampling.")
     ap.add_argument("--modality", choices=["ct", "mri"], default="ct",
                     help="Imaging modality (determines kernel type for thick).")
-    ap.add_argument("--experiment", choices=["thin", "thick", "real"],
+    ap.add_argument("--experiment", choices=["thin", "thick", "real", "fov"],
                     default=None,
                     help="Experiment directory layer for the sparse inputs: "
                          "input/<experiment>/sparse_step_XX/. Defaults to "

@@ -54,7 +54,9 @@ labels:
 
 # ── Splits ───────────────────────────────────────────────────────────
 corrector_train_split: nnunet-c/splits/corrector_train.txt
-corrector_train_casefile: corrector_train_cases.txt
+corrector_train_casefile: corrector_train_cases_fov.txt   # FOV: was corrector_train_cases.txt
+# (distinct name so FOV align does not overwrite the thick run's casefile in the
+#  shared casefiles_dir -- keeps the FOV experiment fully isolated from thick.)
 
 # ── Corrector training data generation ───────────────────────────────
 corrector_data:

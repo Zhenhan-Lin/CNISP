@@ -44,15 +44,63 @@ TRAIN_YAML="${TRAIN_YAML:-configs/train_v6_5_gt.yaml}"
 TEST_YAML="${TEST_YAML:-configs/test_corrector.yaml}"
 CHECKPOINT="${CHECKPOINT:-latest}"
 LABEL_SOURCE="${LABEL_SOURCE:-nnunet_pred}"
-EXPERIMENT="${EXPERIMENT:-thick}"
-CASEFILE="${CASEFILE:-corrector_train_cases.txt}"
-STEPS="${STEPS:-3,6,9,12}"
+
+# ── corrector config -> experiment / steps / tree dirs ────────────────
+# CONFIG is the nnunet-c corrector config that pins which experiment tree this
+# run targets (thick default, or e.g. configs/corrector_fov.yaml for the FOV
+# tree). Derive EXPERIMENT, STEPS, and the data_root-anchored aligned/out/iso
+# dirs from it so the launcher no longer hardcodes the thick `data/` tree.
+# Explicit env vars still WIN over the config; if the parse fails (missing deps)
+# we fall back to the historical thick defaults, so old invocations are
+# unchanged. For configs/corrector.yaml the derived values ARE the old defaults.
+CONFIG="${CONFIG:-configs/corrector.yaml}"
+CFG_EXPERIMENT="thick"; CFG_STEPS="3,6,9,12"
+CFG_CASEFILE="corrector_train_cases.txt"
+CFG_ALIGNED_DIR=""; CFG_OUT_DIR=""
+CFG_ISO_OUT="$REPO_ROOT/nnunet-c/data/cnisp_pred_train_iso"
+_cfg_kv="$(python3 - "$HERE" "$CONFIG" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+here, cfgrel = sys.argv[1], sys.argv[2]
+sys.path.insert(0, here)
+from lib.config import load_corrector_config
+cfgpath = cfgrel if Path(cfgrel).is_absolute() else str(Path(here) / cfgrel)
+cfg = load_corrector_config(cfgpath, caller_file=str(Path(here) / "run_corrector_cnisp.sh"))
+cd = cfg.get("corrector_data", {}) or {}
+res = cfg["_resolved"]
+dr = Path(cd.get("data_root", "nnunet-c/data"))
+dr = dr if dr.is_absolute() else (res["repo_root"] / dr)
+steps = ",".join(str(int(s)) for s in (cd.get("steps") or []))
+print(f"CFG_EXPERIMENT={cfg.get('experiment', 'thick')}")
+print(f"CFG_STEPS={steps}")
+print(f"CFG_CASEFILE={cfg.get('corrector_train_casefile', 'corrector_train_cases.txt')}")
+print(f"CFG_ALIGNED_DIR={dr / cd.get('aligned_patch_dirname', 'aligned_patch')}")
+print(f"CFG_OUT_DIR={dr / cd.get('cnisp_pred_dirname', 'cnisp_pred')}")
+print(f"CFG_ISO_OUT={dr / cd.get('cnisp_train_iso_pred_dirname', 'cnisp_pred_train_iso')}")
+PY
+)"
+while IFS='=' read -r _k _v; do
+    [[ -z "${_v:-}" ]] && continue
+    case "$_k" in
+        CFG_EXPERIMENT)  CFG_EXPERIMENT="$_v" ;;
+        CFG_STEPS)       CFG_STEPS="$_v" ;;
+        CFG_CASEFILE)    CFG_CASEFILE="$_v" ;;
+        CFG_ALIGNED_DIR) CFG_ALIGNED_DIR="$_v" ;;
+        CFG_OUT_DIR)     CFG_OUT_DIR="$_v" ;;
+        CFG_ISO_OUT)     CFG_ISO_OUT="$_v" ;;
+    esac
+done <<< "$_cfg_kv"
+
+EXPERIMENT="${EXPERIMENT:-$CFG_EXPERIMENT}"
+CASEFILE="${CASEFILE:-$CFG_CASEFILE}"
+STEPS="${STEPS:-$CFG_STEPS}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"      # global cap on (source,step) samples (0=all)
 # Optional overrides so the SAME launcher can run on the TEST set, whose aligned
 # patches live in the CNISP aligned_dir (not data/aligned_patch) and whose CNISP
-# masks should go to a separate dir. Empty -> 032 defaults (the train setup).
-ALIGNED_DIR="${ALIGNED_DIR:-}"       # -> 032 --aligned-dir (e.g. the CNISP aligned_dir)
-OUT_DIR="${OUT_DIR:-}"               # -> 032 --out-dir   (e.g. data/cnisp_pred_test)
+# masks should go to a separate dir. Default to the config-derived (data_root)
+# dirs; for the thick default these equal 032's own defaults.
+ALIGNED_DIR="${ALIGNED_DIR:-$CFG_ALIGNED_DIR}"   # -> 032 --aligned-dir
+OUT_DIR="${OUT_DIR:-$CFG_OUT_DIR}"               # -> 032 --out-dir
 EXTRA_ARGS=""
 [[ -n "$ALIGNED_DIR" ]] && EXTRA_ARGS+=" --aligned-dir $ALIGNED_DIR"
 [[ -n "$OUT_DIR" ]] && EXTRA_ARGS+=" --out-dir $OUT_DIR"
@@ -79,14 +127,17 @@ fi
 # --prelabel-grid iso reads them. ISO_MM defaults to the 835 iso plan spacing.
 EMIT_ISO="${EMIT_ISO:-1}"
 if [[ "$EMIT_ISO" == "1" ]]; then
-    ISO_OUT="${ISO_OUT:-$REPO_ROOT/nnunet-c/data/cnisp_pred_train_iso}"
+    ISO_OUT="${ISO_OUT:-$CFG_ISO_OUT}"
     if [[ -z "${ISO_MM:-}" ]]; then
-        ISO_MM="$(python3 - <<PY 2>/dev/null || true
+        ISO_MM="$(python3 - "$HERE" "$CONFIG" <<'PY' 2>/dev/null || true
 import sys
-sys.path.insert(0, "$HERE")
+from pathlib import Path
+here, cfgrel = sys.argv[1], sys.argv[2]
+sys.path.insert(0, here)
 from lib.config import load_corrector_config
 from lib.resample import resolve_target_spacing
-cfg = load_corrector_config("$HERE/configs/corrector.yaml", caller_file="$HERE/run_corrector_cnisp.sh")
+cfgpath = cfgrel if Path(cfgrel).is_absolute() else str(Path(here) / cfgrel)
+cfg = load_corrector_config(cfgpath, caller_file=str(Path(here) / "run_corrector_cnisp.sh"))
 print(f"{float(resolve_target_spacing(cfg)[0]):.7f}")
 PY
 )"
@@ -100,7 +151,7 @@ fi
 # Avoids launching N workers that each crash with the same FileNotFoundError.
 CASEFILES_DIR="$(python3 "$HERE/scripts/corrector_env.py" --control C 2>/dev/null \
     | sed -n 's/^CASEFILES_DIR="\(.*\)"$/\1/p')"
-if [[ "$CASEFILE" == "corrector_train_cases.txt" && -n "$CASEFILES_DIR" && ! -f "$CASEFILES_DIR/$CASEFILE" ]]; then
+if [[ "$CASEFILE" == "$CFG_CASEFILE" && -n "$CASEFILES_DIR" && ! -f "$CASEFILES_DIR/$CASEFILE" ]]; then
     echo "[run_corrector_cnisp] ERROR: casefile not found:" >&2
     echo "    $CASEFILES_DIR/$CASEFILE" >&2
     echo "  Run alignment first AND let it finish:" >&2
@@ -165,8 +216,10 @@ worker_cmd() {  # $1=dev $2=ids -> the exact python command (for review/rerun)
 if [[ "$RERUN_FAILED" == "1" ]]; then build_workers_from_failed; else build_workers_fresh; fi
 
 echo "================================================================"
+echo "[run_corrector_cnisp] config=$CONFIG experiment=$EXPERIMENT"
 echo "[run_corrector_cnisp] devices='$DEVICES' num_shards=$NUM_SHARDS"
 echo "[run_corrector_cnisp] model=$MODEL steps=$STEPS casefile=$CASEFILE max_samples=$MAX_SAMPLES"
+echo "[run_corrector_cnisp] aligned_dir=${ALIGNED_DIR:-<032 default>} out_dir=${OUT_DIR:-<032 default>}"
 echo "[run_corrector_cnisp] logs -> $LOG_DIR/{gpu*,cpu}.log"
 echo "================================================================"
 
