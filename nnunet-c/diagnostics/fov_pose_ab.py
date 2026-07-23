@@ -400,11 +400,17 @@ def run_real(args) -> int:
                                      "dice_B_minus_baseline_truncated": round(
                                          rows["B_full"]["dice_truncated_mean"]
                                          - rows["baseline"]["dice_truncated_mean"], 5)})
-            b = rows["baseline"]["dice_whole_mean"]
-            bb = rows["B_full"]["dice_whole_mean"]
-            bt = rows["B_full"]["dice_truncated_mean"]
-            print(f"  [{cn} step{step:02d}] whole: baseline={b:.3f} B={bb:.3f} "
-                  f"| trunc B={bt:.3f} | tau_B={rows['B_full']['tau_mm']}")
+            def _g(cond, reg):
+                return rows.get(cond, {}).get(f"dice_{reg}_mean", float("nan"))
+            print(f"  [{cn} step{step:02d}]  (baseline=unmasked  A=masked,tau off  "
+                  f"B=masked+tau)")
+            for reg in ("whole", "visible", "truncated"):
+                print(f"      {reg:9s}  base={_g('baseline', reg):.3f}  "
+                      f"A_masked={_g('A_masked', reg):.3f}  "
+                      f"B_full={_g('B_full', reg):.3f}")
+            print(f"      tau_B_mm={rows.get('B_full', {}).get('tau_mm')}  "
+                  f"| mask-only gain (A-base, whole)="
+                  f"{_g('A_masked','whole') - _g('baseline','whole'):+.3f}")
 
     if csv_rows:
         _write_csv(out_root / "dice_ab.csv", csv_rows)
