@@ -94,13 +94,18 @@ def align_fov_pair(
     patch_size_mm: float = 80.0,
     visible_box: Optional[list] = None,
     search_size_mm: Optional[float] = None,
+    source_id: Optional[str] = None,
 ) -> List[dict]:
     """Return one co-framed dict per eye. See the module docstring for the steps.
 
     ``visible_box`` : per-source-axis ``[lo, hi)`` voxel window (the sidecar
     ``visible_box``) marking the acquired FOV in the OBS/GT source grid. When
     None the valid mask falls back to "within source bounds" only.
+    ``source_id`` : casename base (``{source_id}_{eye}``). Defaults to the obs
+    file stem; pass the case_id so the written casename matches the pipeline
+    convention (``{case_id}_OD`` -- no per-step token).
     """
+    stem = source_id if source_id is not None else _stem(obs_seg_path)
     if search_size_mm is None:
         search_size_mm = patch_size_mm * 1.5
 
@@ -185,7 +190,7 @@ def align_fov_pair(
 
         # (7) remap -> RAS -> OS->OD flip, applied identically to all three.
         eye_label = eye.get("eye", f"cc{i}")
-        casename = f"{_stem(obs_seg_path)}_{eye_label}"
+        casename = f"{stem}_{eye_label}"
         pa = affine.copy()
         pa[:3, 3] += affine[:3, :3] @ lo.astype(np.float64)
 

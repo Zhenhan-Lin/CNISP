@@ -143,16 +143,37 @@ def main() -> int:
         "labels_dataset835", "metadata_dataset835", 1
     )
 
-    # FOV truncation fragments the visible eye; keep every in-FOV piece and
-    # centre on the whole-eye centroid for the truncated per-step OBSERVATION
-    # only. The dense target frame is the undegraded pred (one CC) -> default.
-    fov_obs_keep_all = (str(experiment).lower() == "fov")
+    # FOV: crop obs (truncated pred) AND GT (full-res pred) at the SAME OBS
+    # whole-eye centroid so they share the frame (align_fov_pair). Per step this
+    # writes co-framed obs + GT + valid mask; the OBS centroid drives both, so
+    # obs and GT correspond voxel-for-voxel and the valid mask is the acquired
+    # region. Replaces the independently-aligned per-step obs for FOV.
+    fov_coframed = (str(experiment).lower() == "fov")
+    fov_sidecar = {}
+    gt_step_prefix = valid_step_prefix = None
+    if fov_coframed:
+        from data_prep.fov_pair import align_fov_pair  # noqa: F401  (used in closure)
+        sc = data_root / "fov_truncation_manifest.json"
+        if sc.is_file():
+            fov_sidecar = json.load(open(sc))
+        else:
+            print(f"[align] WARNING: {sc} missing -> valid mask = within-bounds only",
+                  file=sys.stderr)
+        gt_step_prefix = step_prefix.replace("labels_dataset835",
+                                             "gtframe_dataset835", 1)
+        valid_step_prefix = step_prefix.replace("labels_dataset835",
+                                                "validmask_dataset835", 1)
 
     print(f"[align] experiment={experiment} patch={patch_size_mm}mm"
-          f"{' | FOV: keep whole visible eye for truncated obs' if fov_obs_keep_all else ''}")
+          f"{' | FOV co-framed obs/GT (align_fov_pair)' if fov_coframed else ''}")
     print(f"[align] aligned_patch root -> {aligned_patch}")
     print(f"[align] dense target -> {dense_labels_dir} (+ {dense_meta_dir})")
-    print(f"[align] step obs     -> {aligned_patch}/{step_prefix}XX/")
+    if fov_coframed:
+        print(f"[align] FOV obs   -> {aligned_patch}/{step_prefix}XX/")
+        print(f"[align] FOV GT    -> {aligned_patch}/{gt_step_prefix}XX/  (co-framed)")
+        print(f"[align] FOV valid -> {aligned_patch}/{valid_step_prefix}XX/")
+    else:
+        print(f"[align] step obs     -> {aligned_patch}/{step_prefix}XX/")
 
     # Casefile (for 032 --test-casefile) is written INCREMENTALLY after each
     # case so a still-running / interrupted align already exposes ready cases.
@@ -170,6 +191,77 @@ def main() -> int:
     all_casenames: List[str] = []
     n_dense = n_step = n_fail = 0
     issues: List[str] = []
+
+    def _sidecar_vbox(case_id, gt_pred, step):
+        gt_stem = Path(gt_pred).name.replace(".nii.gz", "").replace(".nii", "")
+        for key in (case_id, gt_stem):
+            e = (fov_sidecar.get(str(key), {}) or {}).get(str(step))
+            if e and "visible_box" in e:
+                return e["visible_box"]
+        return None
+
+    def _fov_coframed_case(case_id, entry, gt_pred):
+        """Write co-framed (obs, GT, valid_mask) + meta per (kept step, eye) via
+        align_fov_pair. obs -> step_prefix, GT -> gt_step_prefix, valid ->
+        valid_step_prefix (all under aligned_patch). Returns steps written."""
+        wrote = 0
+        for step_s, sinfo in entry.get("steps", {}).items():
+            if not sinfo.get("kept"):
+                continue
+            step = int(step_s)
+            seg = nnunet_pred_dir / f"{case_id}_step{step:02d}.nii.gz"
+            if not seg.exists():
+                issues.append(f"{case_id} step={step:02d}: nnUNet pred missing "
+                              f"({seg}); run run_corrector_data.sh predict")
+                continue
+            vbox = _sidecar_vbox(case_id, gt_pred, step)
+            try:
+                pairs = align_fov_pair(str(seg), str(gt_pred), patch_size_mm,
+                                       visible_box=vbox, source_id=case_id)
+            except Exception as e:  # noqa: BLE001
+                issues.append(f"{case_id} step={step:02d}: align_fov_pair: "
+                              f"{type(e).__name__}: {e}")
+                continue
+            obs_dir = aligned_patch / f"{step_prefix}{step:02d}"
+            gt_dir = aligned_patch / f"{gt_step_prefix}{step:02d}"
+            valid_dir = aligned_patch / f"{valid_step_prefix}{step:02d}"
+            meta_dir = aligned_patch / f"{meta_step_prefix}{step:02d}"
+            for d in (obs_dir, gt_dir, valid_dir, meta_dir):
+                d.mkdir(parents=True, exist_ok=True)
+
+            def _w(path, arr, aff):
+                if path.exists() and not args.force:
+                    return
+                nib.save(nib.Nifti1Image(np.asarray(arr), aff), str(path))
+
+            for pr in pairs:
+                cn = pr["casename"]
+                aff = pr["affine"]
+                _w(obs_dir / f"{cn}.nii.gz", pr["obs_patch"].astype(np.uint8), aff)
+                _w(gt_dir / f"{cn}.nii.gz", pr["gt_patch"].astype(np.uint8), aff)
+                _w(valid_dir / f"{cn}.nii.gz",
+                   pr["valid_mask"].astype(np.uint8), aff)
+                mp = meta_dir / f"{cn}.json"
+                if not (mp.exists() and not args.force):
+                    json.dump({
+                        "casename": cn, "eye": pr["eye"], "source_id": case_id,
+                        "step": step, "coframed": True,
+                        "patch_affine": aff.tolist(),
+                        "patch_spacing": [float(x) for x in pr["spacing"]],
+                        "patch_voxel_shape": list(int(s) for s in pr["gt_patch"].shape),
+                        "was_flipped": pr["was_flipped"],
+                        "original_ornt": pr["original_ornt"],
+                        "obs_centroid_vox": pr["obs_centroid_vox"],
+                        "gt_captured_frac": pr["gt_captured_frac"],
+                        "valid_frac": pr["valid_frac"],
+                    }, open(mp, "w"), indent=2)
+                all_casenames.append(cn)
+                if pr["gt_captured_frac"] < 0.99:
+                    issues.append(f"{cn} step={step:02d}: gt_captured="
+                                  f"{pr['gt_captured_frac']} (<0.99: patch clips GT "
+                                  f"-> enlarge patch_size or check centroid)")
+            wrote += 1
+        return wrote
 
     for case_id, entry in sorted(manifest["cases"].items()):
         # (1) DENSE frame from the full-res 835 pred (gt_candidate_pred).
@@ -192,6 +284,16 @@ def main() -> int:
             continue
 
         # (2) PER-STEP observation from the degraded 835 preds.
+        if fov_coframed:
+            # obs AND GT co-framed at the OBS centroid (single align_fov_pair).
+            try:
+                n_step += _fov_coframed_case(case_id, entry, gt_pred)
+            except Exception as e:  # noqa: BLE001
+                n_fail += 1
+                issues.append(f"{case_id} fov: {type(e).__name__}: {e}")
+            _flush_casefile()
+            continue
+
         for step_s, sinfo in entry.get("steps", {}).items():
             if not sinfo.get("kept"):
                 continue
@@ -206,7 +308,7 @@ def main() -> int:
             try:
                 _align_and_write(seg, case_id, f"corrector_step_{step:02d}",
                                  patch_size_mm, step_dir, meta_dir=meta_step_dir,
-                                 force=args.force, fov_keep_all=fov_obs_keep_all)
+                                 force=args.force)
                 n_step += 1
             except Exception as e:  # noqa: BLE001
                 n_fail += 1
