@@ -102,7 +102,8 @@ def region_dices(pred: np.ndarray, gt: np.ndarray, fov_mask: np.ndarray,
 
 # ── one condition: fit z(+tau) then decode on the native grid ─────────────────
 def fit_and_decode(net, coords_fit, labels_fit, valid_mask, coords_dec, dec_shape,
-                   latent_dim, tau_max_mm, tau_sigma_mm, *, optimize_tau, steps, device):
+                   latent_dim, tau_max_mm, tau_sigma_mm, *, optimize_tau, steps,
+                   lr_z, lr_tau, device):
     """Run one condition and return (pred_labels [dec_shape], z, tau, best_loss)."""
     import torch
     res = optimize_latent_translation(
@@ -112,6 +113,7 @@ def fit_and_decode(net, coords_fit, labels_fit, valid_mask, coords_dec, dec_shap
         num_translation_steps=(steps["tau"] if optimize_tau else 0),
         num_joint_steps=steps["joint"],
         num_latent_refine_steps=steps["refine"],
+        lr_z=lr_z, lr_tau=lr_tau,
     )
     probs = decode_with_tau(net, coords_dec, res["z_star"], res["tau_star"])
     pred = probs.argmax(dim=-1).reshape(dec_shape).cpu().numpy().astype(np.int16)
@@ -120,38 +122,58 @@ def fit_and_decode(net, coords_fit, labels_fit, valid_mask, coords_dec, dec_shap
 
 
 # ── visualization ────────────────────────────────────────────────────────────
-def make_comparison_png(path, gt, obs, preds: dict, fov_mask):
-    """Mid-slice montage: rows = 3 orthogonal mid-planes; cols = GT / obs / preds,
-    with the FOV boundary (visible/truncated) drawn as a contour on every panel."""
+def make_comparison_png(path, gt, obs, preds: dict, fov_mask, spacing=None):
+    """Montage: rows = 3 orthogonal planes, cols = GT / obs / preds. All panels are
+    sliced at ONE common index per axis (the same physical plane), chosen at the
+    centroid of the union of every foreground so the plane actually cuts through the
+    anatomy (not an empty geometric mid-slice). Aspect is voxel-spacing-aware so
+    anisotropic patches are not squished. The FOV boundary is drawn on each panel."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     panels = [("GT", gt), ("obs", obs)] + [(k, v) for k, v in preds.items()]
+    shape = tuple(int(s) for s in np.asarray(gt).shape)
+    sp = np.asarray(spacing, float) if spacing is not None else np.ones(3)
+
+    # common slice index per axis = centroid of the union of all foreground voxels
+    union = np.zeros(shape, bool)
+    for _, v in panels:
+        union |= (np.asarray(v) > 0)
+    if union.any():
+        idx = np.argwhere(union)
+        center = [int(round(idx[:, a].mean())) for a in range(3)]
+    else:
+        center = [s // 2 for s in shape]
+
     ncol = len(panels)
     fig, axes = plt.subplots(3, ncol, figsize=(2.6 * ncol, 7.8))
     if ncol == 1:
         axes = axes[:, None]
-    mids = [s // 2 for s in gt.shape]
-    vmax = max(1, int(gt.max()))
+    vmax = max(1, int(np.asarray(gt).max()))
+    plane_names = ["axial (⊥ax0)", "coronal (⊥ax1)", "sagittal (⊥ax2)"]
     for r, ax_ax in enumerate(range(3)):
+        rem = [a for a in range(3) if a != ax_ax]        # the two in-plane axes
+        aspect = sp[rem[0]] / sp[rem[1]]                 # img is [rem1, rem0] after .T
         for c, (title, vol) in enumerate(panels):
             ax = axes[r, c]
             sl = [slice(None)] * 3
-            sl[ax_ax] = mids[ax_ax]
+            sl[ax_ax] = center[ax_ax]
             img = np.asarray(vol)[tuple(sl)].T
             m = np.asarray(fov_mask)[tuple(sl)].T.astype(float)
             ax.imshow(img, origin="lower", cmap="tab10", vmin=0, vmax=vmax,
-                      interpolation="nearest")
+                      interpolation="nearest", aspect=aspect)
             if m.any() and not m.all():
                 ax.contour(m, levels=[0.5], colors="w", linewidths=0.7)
             if r == 0:
                 ax.set_title(title, fontsize=9)
             if c == 0:
-                ax.set_ylabel(["axial", "coronal", "sagittal"][r], fontsize=8)
+                ax.set_ylabel(plane_names[r], fontsize=8)
             ax.set_xticks([])
             ax.set_yticks([])
-    fig.suptitle(Path(path).parent.name + "  (white contour = FOV boundary)", fontsize=10)
+    fig.suptitle(Path(path).parent.name + f"  slice@{tuple(center)}  "
+                 "(white contour = FOV boundary; all panels = same physical plane)",
+                 fontsize=9)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -174,7 +196,7 @@ def _conditions():
 
 def run_one_case(net, latent_dim, num_classes, coords_fit, labels_fit, coords_dec,
                  dec_shape, fov_mask_bool, gt_dec, tau_max_mm, tau_sigma_mm, *,
-                 steps, device):
+                 steps, lr_z=1e-2, lr_tau=5e-3, device):
     """Run baseline/A/B for one case; return (preds{name->arr}, rows{name->dice dict})."""
     import torch
     ones = torch.ones(coords_fit.shape[0], device=device)
@@ -185,7 +207,7 @@ def run_one_case(net, latent_dim, num_classes, coords_fit, labels_fit, coords_de
         pred, _z, tau, loss = fit_and_decode(
             net, coords_fit, labels_fit, vmask, coords_dec, dec_shape,
             latent_dim, tau_max_mm, tau_sigma_mm,
-            optimize_tau=opt_tau, steps=steps, device=device)
+            optimize_tau=opt_tau, steps=steps, lr_z=lr_z, lr_tau=lr_tau, device=device)
         preds[name] = pred
         taus[name] = tau
         d = region_dices(pred, gt_dec, fov_mask_bool, num_classes)
@@ -270,7 +292,17 @@ def run_real(args) -> int:
 
     tau_max_mm = [float(args.tau_max)] * 3
     tau_sigma_mm = [float(args.tau_sigma)] * 3
-    steps = _STEP_SCHED
+    # Latent fit must be as strong as the deployed CNISP fit, or z barely leaves 0 and
+    # the decode collapses toward the average shape (low Dice + "squished" look). Pull
+    # lr + iteration budget from the same test config the real optimize_latent uses.
+    lr_z = float(args.lr_z) if args.lr_z is not None else float(params.get("latent_lr", 1e-2))
+    lr_tau = float(args.lr_tau)
+    n_iters = int(args.iters) if args.iters is not None else int(params.get("latent_num_iters", 3000))
+    steps = {"tau": min(150, max(50, n_iters // 20)),
+             "joint": int(round(n_iters * 0.6)),
+             "refine": n_iters - int(round(n_iters * 0.6))}
+    print(f"[fov-ab] latent fit: lr_z={lr_z} lr_tau={lr_tau} iters={n_iters} "
+          f"(tau_warmup={steps['tau']} joint={steps['joint']} refine={steps['refine']})")
 
     casefiles_dir = Path(params["casefiles_dir"])
     casenames_all = load_casenames(casefiles_dir / params["test_casefile"])
@@ -342,7 +374,7 @@ def run_real(args) -> int:
             preds, rows, taus = run_one_case(
                 net, latent_dim, num_classes, coords_fit, labels_fit, coords_dec,
                 dec_shape, fov_mask, gt_dec, tau_max_mm, tau_sigma_mm,
-                steps=steps, device=device)
+                steps=steps, lr_z=lr_z, lr_tau=lr_tau, device=device)
 
             # ── save artifacts under data_fov_pereye_test/<case>_step<PP>/ ──
             cdir = out_root / f"{cn}_step{step:02d}"
@@ -355,7 +387,8 @@ def run_real(args) -> int:
             for name, pred in preds.items():
                 _save_nii(cdir / f"pred_{name}.nii.gz", pred, aff)
             make_comparison_png(cdir / "comparison.png", gt_dec,
-                                sub_obs.cpu().numpy(), preds, fov_mask)
+                                sub_obs.cpu().numpy(), preds, fov_mask,
+                                spacing=[float(x) for x in spacing_dense])
 
             for name, d in rows.items():
                 csv_rows.append({"case": cn, "step": step, "condition": name, **d})
@@ -534,6 +567,11 @@ def main() -> int:
                     help="per-axis tau bound (mm). Placeholder for pipeline check; replace "
                          "with 1.0-2.0x the 95th-pctile measured drift (plan §13).")
     ap.add_argument("--tau-sigma", type=float, default=3.0, help="per-axis tau penalty scale (mm).")
+    ap.add_argument("--lr-z", type=float, default=None,
+                    help="latent Adam lr (default: config latent_lr, ~1e-2).")
+    ap.add_argument("--lr-tau", type=float, default=5e-3, help="translation Adam lr.")
+    ap.add_argument("--iters", type=int, default=None,
+                    help="total latent iterations (default: config latent_num_iters, ~3000).")
     ap.add_argument("--out-root", default="nnunet-c/data_fov_pereye_test")
     args = ap.parse_args()
 

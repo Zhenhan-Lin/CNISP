@@ -77,16 +77,6 @@ do_predict() {
         [[ -e "$DATA_NNUNET_PRED/$b.nii.gz" ]] && n_pair=$((n_pair+1))
     done
     echo "[run_corrector_data] folder check: images=$n_img prelabels=$n_pre complete(image+prelabel)=$n_pair"
-
-    # FOV mode: the truncated region has no image evidence, so nnUNet must carry no
-    # prediction there. Zero every nnunet_pred voxel outside that scan's visible_box.
-    # Gated on the FOV sidecar existing, so the thick pipeline is untouched.
-    local sidecar; sidecar="$(dirname "$DATA_NNUNET_PRED")/fov_truncation_manifest.json"
-    if [[ -f "$sidecar" ]]; then
-        echo "[run_corrector_data] (3) FOV-mask nnunet_pred to visible_box (sidecar: $sidecar)"
-        python3 "$HERE/scripts/mask_nnunet_pred_fov.py" --config "$CONFIG" || \
-            echo "[run_corrector_data] WARNING: FOV masking failed; nnunet_pred left unmasked" >&2
-    fi
 }
 
 case "$WHICH" in
