@@ -49,6 +49,15 @@ class _SynthDecoder(torch.nn.Module):
         self.frozen = torch.nn.Parameter(torch.zeros(1))   # non-empty .parameters()
 
     def forward(self, latent, coords):
+        # Enforce the real MultiClassAutoDecoder contract: coords [B, *ST, 3], expand
+        # z to the spatial shape and cat -- so a flat [N, 3] (missing batch dim) raises
+        # the same size mismatch the real decoder does, instead of silently broadcasting.
+        spatial = coords.shape[1:-1]
+        z = latent
+        for _ in range(len(spatial)):
+            z = z.unsqueeze(1)
+        z = z.expand(*([-1] + list(spatial) + [-1]))
+        _ = torch.cat([z, coords], dim=-1)          # contract check (fails on [N,3]+[1,Z])
         d2 = ((coords - self.c0) ** 2).sum(-1)
         fg = (self.radius ** 2 - d2) * 0.5 + self.z_gain * latent.sum()
         return torch.stack([torch.zeros_like(fg), fg], dim=-1)     # [.., 2]

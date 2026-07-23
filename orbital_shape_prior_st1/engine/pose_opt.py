@@ -102,7 +102,9 @@ def optimize_latent_translation(
 
     def _loss():
         tau = tau_max * torch.tanh(tau_raw) if optimize_tau else torch.zeros_like(tau_raw)
-        logits = net(z, coords + tau)                 # net(latent, coords) convention
+        # Decoder wants coords as [B, *spatial, 3] (it derives the spatial shape from
+        # coords.shape[1:-1] and expands z to match); add the batch dim for [N, 3].
+        logits = net(z, (coords + tau).unsqueeze(0))  # net(latent, coords) convention
         logits = logits.reshape(-1, num_classes)
         probs = torch.softmax(logits, dim=-1)
         ce = masked_cross_entropy(logits, labels, m)
@@ -167,6 +169,7 @@ def decode_with_tau(net, coords: torch.Tensor, z_star: torch.Tensor,
     shifted = coords + tau_star
     out = []
     for s in range(0, shifted.shape[0], chunk):
-        logits = net(z_star, shifted[s:s + chunk]).reshape(-1, int(net.num_classes))
+        logits = net(z_star, shifted[s:s + chunk].unsqueeze(0))  # [B, N, 3] convention
+        logits = logits.reshape(-1, int(net.num_classes))
         out.append(torch.softmax(logits, dim=-1))
     return torch.cat(out, dim=0)

@@ -434,6 +434,14 @@ def self_test() -> int:
             self.p = torch.nn.Parameter(torch.zeros(1))
 
         def forward(self, latent, coords):
+            # Enforce the real decoder's [B, *ST, 3] contract (expand z + cat), so a
+            # flat [N, 3] would raise the same mismatch instead of broadcasting.
+            spatial = coords.shape[1:-1]
+            z = latent
+            for _ in range(len(spatial)):
+                z = z.unsqueeze(1)
+            z = z.expand(*([-1] + list(spatial) + [-1]))
+            _ = torch.cat([z, coords], dim=-1)
             fg = (self.r ** 2 - ((coords - self.c0) ** 2).sum(-1)) * 0.5 + 0.0 * latent.sum()
             return torch.stack([torch.zeros_like(fg), fg], dim=-1)
 
