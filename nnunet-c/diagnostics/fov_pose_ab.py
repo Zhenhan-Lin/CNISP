@@ -263,6 +263,8 @@ def run_real(args) -> int:
 
     # FOV sidecar (visible_box) -- resolved from the nnunet-c corrector config data_root
     trunc = None
+    cfg = None
+    dr = None
     if args.trunc_manifest:
         trunc = json.load(open(args.trunc_manifest))
     elif args.config:
@@ -291,12 +293,11 @@ def run_real(args) -> int:
     cdm = None
     nnunet_pred_dir = None
     if coframed:
-        if corrector_cfg is None:
+        if cfg is None or dr is None:
             print("[fov-ab] co-framed OFF: needs --config (corrector cfg)", file=sys.stderr)
             coframed = False
         else:
-            dr = _corrector_data_root()
-            cd = corrector_cfg.get("corrector_data", {}) or {}
+            cd = cfg.get("corrector_data", {}) or {}
             nnunet_pred_dir = dr / cd.get("nnunet_pred_dirname", "nnunet_pred")
             cdmp = dr / "corrector_data_manifest.json"
             if cdmp.is_file():
