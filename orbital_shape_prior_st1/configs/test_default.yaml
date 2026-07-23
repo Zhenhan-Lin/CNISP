@@ -167,20 +167,21 @@ evaluate_predictions: true
 # source's mask only saves disk -- all sources still appear in the
 # aggregate figures. The 12 listed here cover atlas01-06,17,19,28,33 and
 # chk_24344 / chk_14455 for qualitative inspection.
-save_mask_source_ids:
-  - atlas_orbit0001_ubMask_al2_fill
-  - atlas_orbit0002_ubMask_al2_fill
-  - atlas_orbit0003_ubMask_al2_fill
-  - atlas_orbit0004_ubMask_al2_fill
-  - atlas_orbit0005_ubMask_al2_fill
-  - atlas_orbit0006_ubMask_al2_fill
-  - atlas_orbit0017_ubMask_al2_fill
-  - atlas_orbit0019_ubMask_al2_fill
-  - atlas_orbit0028_ubMask_al2_fill
-  - atlas_orbit0033_ubMask_al2_fill
-  - chk_24344
-  - chk_14455
+# save_mask_source_ids:
+#   - atlas_orbit0001_ubMask_al2_fill
+#   - atlas_orbit0002_ubMask_al2_fill
+#   - atlas_orbit0003_ubMask_al2_fill
+#   - atlas_orbit0004_ubMask_al2_fill
+#   - atlas_orbit0005_ubMask_al2_fill
+#   - atlas_orbit0006_ubMask_al2_fill
+#   - atlas_orbit0017_ubMask_al2_fill
+#   - atlas_orbit0019_ubMask_al2_fill
+#   - atlas_orbit0028_ubMask_al2_fill
+#   - atlas_orbit0033_ubMask_al2_fill
+#   - chk_24344
+#   - chk_14455
 
+save_mask_source_ids: null 
 # ── Per-case incremental native remap ─────────────────────────────
 # true (default): write each case's native-grid masks
 # (native_space_step_XX[_oN]/) the moment that case finishes its sweep,
