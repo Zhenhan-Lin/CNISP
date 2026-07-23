@@ -57,8 +57,16 @@ _DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "corrector.y
 
 def _align_and_write(seg_path: Path, source_id: str, source: str,
                      patch_size_mm: float, labels_dir: Path,
-                     meta_dir: Path = None, force: bool = False) -> List[str]:
+                     meta_dir: Path = None, force: bool = False,
+                     fov_keep_all: bool = False) -> List[str]:
     """Align one seg into per-eye patches; write patches (+ metadata if meta_dir).
+
+    ``fov_keep_all`` is forwarded to ``align_single_case``: for the FOV
+    experiment's TRUNCATED per-step observation, keep the whole visible eye and
+    centre on its whole-eye centroid instead of collapsing to the largest
+    connected component (which under truncation drops in-FOV pieces and
+    re-centres onto a fragment). No-op for an intact eye, so the dense target
+    frame and all non-FOV builds pass False.
 
     Returns the list of casenames written/observed.
     """
@@ -67,7 +75,7 @@ def _align_and_write(seg_path: Path, source_id: str, source: str,
         meta_dir.mkdir(parents=True, exist_ok=True)
     results = align_single_case(
         seg_path=str(seg_path), source_id=source_id, source=source,
-        patch_size_mm=patch_size_mm,
+        patch_size_mm=patch_size_mm, fov_keep_all=fov_keep_all,
     )
     written = []
     for patch, pa, meta in results:
@@ -135,7 +143,13 @@ def main() -> int:
         "labels_dataset835", "metadata_dataset835", 1
     )
 
-    print(f"[align] experiment={experiment} patch={patch_size_mm}mm")
+    # FOV truncation fragments the visible eye; keep every in-FOV piece and
+    # centre on the whole-eye centroid for the truncated per-step OBSERVATION
+    # only. The dense target frame is the undegraded pred (one CC) -> default.
+    fov_obs_keep_all = (str(experiment).lower() == "fov")
+
+    print(f"[align] experiment={experiment} patch={patch_size_mm}mm"
+          f"{' | FOV: keep whole visible eye for truncated obs' if fov_obs_keep_all else ''}")
     print(f"[align] aligned_patch root -> {aligned_patch}")
     print(f"[align] dense target -> {dense_labels_dir} (+ {dense_meta_dir})")
     print(f"[align] step obs     -> {aligned_patch}/{step_prefix}XX/")
@@ -192,7 +206,7 @@ def main() -> int:
             try:
                 _align_and_write(seg, case_id, f"corrector_step_{step:02d}",
                                  patch_size_mm, step_dir, meta_dir=meta_step_dir,
-                                 force=args.force)
+                                 force=args.force, fov_keep_all=fov_obs_keep_all)
                 n_step += 1
             except Exception as e:  # noqa: BLE001
                 n_fail += 1

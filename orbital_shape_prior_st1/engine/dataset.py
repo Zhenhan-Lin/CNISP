@@ -153,6 +153,7 @@ def compute_visible_lcc_centroid_mm(
     volume_sparse: torch.Tensor,
     spacing_sparse: torch.Tensor,
     offset_sparse: torch.Tensor,
+    keep_all: bool = False,
 ) -> Tuple[Optional[torch.Tensor], int, int]:
     """Centroid of the sparsified volume's largest connected component.
 
@@ -160,17 +161,25 @@ def compute_visible_lcc_centroid_mm(
     no foreground is visible (returns ``None`` so the caller can centre on
     the disk patch's geometric centre instead).
 
+    ``keep_all`` (FOV-truncation mode): take the centroid over the WHOLE visible
+    foreground rather than its largest connected component. For an intact eye
+    (one CC) this is byte-identical; under truncation the visible eye can be
+    fragmented and the default centres the inner crop on the largest fragment
+    (dropping the rest out of the 64 mm window). Gated on the FOV experiment by
+    the caller; see ``data_prep.canonical_align.extract_single_eye_lcc``.
+
     Returns
     -------
     centroid_mm : torch.Tensor[3] or None
         Centroid in disk-patch-local mm: ``voxel_idx * spacing + offset``.
     lcc_voxel_count : int
-        Voxels in the LCC (for QC).
+        Voxels in the kept mask (== total_fg when keep_all=True) (for QC).
     total_fg_count : int
         Voxels in the full visible foreground (for QC).
     """
     fg_mask = (volume_sparse > 0).cpu().numpy()
-    _, lcc_centroid_voxel, lcc_count, total_fg = extract_single_eye_lcc(fg_mask)
+    _, lcc_centroid_voxel, lcc_count, total_fg = extract_single_eye_lcc(
+        fg_mask, keep_all=keep_all)
     if lcc_centroid_voxel is None:
         return None, 0, total_fg
     cv = torch.from_numpy(lcc_centroid_voxel.astype(np.float32))
@@ -213,8 +222,13 @@ def inner_crop_64mm(
     spacing_dense: torch.Tensor,
     offset_dense: torch.Tensor,
     inner_size_mm: float = INNER_PATCH_SIZE_MM,
+    keep_all: bool = False,
 ) -> Dict[str, object]:
     """Crop a ``inner_size_mm`` cubic sub-patch around the visible-LCC centroid.
+
+    ``keep_all`` (FOV-truncation mode): centre on the whole visible-eye centroid
+    instead of the largest connected component. No-op for an intact (one-CC)
+    eye; gated on the FOV experiment by the caller.
 
     Both ``volume_sparse`` and ``volume_dense`` live in the SAME disk-patch
     coordinate frame (they differ only in spacing along the through-plane
@@ -248,7 +262,7 @@ def inner_crop_64mm(
     of_d = offset_dense.numpy().astype(np.float32)
 
     centroid_mm, lcc_count, total_fg = compute_visible_lcc_centroid_mm(
-        volume_sparse, spacing_sparse, offset_sparse,
+        volume_sparse, spacing_sparse, offset_sparse, keep_all=keep_all,
     )
     if centroid_mm is None:
         # No visible foreground: fall back to the disk patch's geometric

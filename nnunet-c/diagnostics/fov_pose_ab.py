@@ -331,8 +331,11 @@ def run_real(args) -> int:
             label_obs, spacing_obs, offset_obs = ov
             spacing_dense = spacings_dense[ci]
             offset_dense = spacing_dense / 2.0
+            # FOV: centre the 64 mm crop on the whole visible-eye centroid, not
+            # the largest fragment (truncation can split the eye).
             inner = inner_crop_64mm(label_obs, spacing_obs, offset_obs,
-                                    labels_dense[ci], spacing_dense, offset_dense)
+                                    labels_dense[ci], spacing_dense, offset_dense,
+                                    keep_all=True)
             sub_obs = inner["sub_sparse"]
             sub_gt = inner["sub_dense"]
             if tuple(sub_obs.shape) != tuple(sub_gt.shape):

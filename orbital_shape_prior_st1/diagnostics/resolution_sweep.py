@@ -213,6 +213,10 @@ def eval_case_at_resolution(
         "grid explicitly instead of falling back to net.image_size envelope."
     )
     disk_patch_dense_shape = list(label_dense.shape)
+    # FOV truncation can fragment the visible eye; centre the 64 mm crop on the
+    # whole visible-eye centroid (not the largest fragment) so no in-FOV piece
+    # falls outside the window. No-op for intact (one-CC) inputs, so thin/thick
+    # (fov_visible_box is None) is unchanged.
     inner_info = inner_crop_64mm(
         volume_sparse=label_obs,
         spacing_sparse=spacing_obs,
@@ -220,6 +224,7 @@ def eval_case_at_resolution(
         volume_dense=label_dense,
         spacing_dense=spacing_dense,
         offset_dense=offset_dense,
+        keep_all=(fov_visible_box is not None),
     )
     # Re-bind the working volumes/offsets to the 64 mm sub-patch frame.
     # The original disk-patch tensors are now only used via inner_info

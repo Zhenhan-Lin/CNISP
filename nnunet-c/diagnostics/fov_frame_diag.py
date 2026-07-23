@@ -108,8 +108,10 @@ def run(args) -> int:
             offset_world = float(np.linalg.norm(C_obs - C_gt)) if np.isfinite(C_obs).all() \
                 and np.isfinite(C_gt).all() else float("nan")
 
+            # match the FOV production path: whole visible-eye centroid.
             inner = inner_crop_64mm(label_obs, spacing_obs, offset_obs,
-                                    labels_dense[ci], spacing_dense, offset_dense)
+                                    labels_dense[ci], spacing_dense, offset_dense,
+                                    keep_all=True)
             sub_obs = np.asarray(inner["sub_sparse"])
             sub_gt = np.asarray(inner["sub_dense"])
             obs_fg = int((np.asarray(label_obs) > 0).sum())

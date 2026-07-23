@@ -338,6 +338,7 @@ LCC_STRUCT_26 = ndimage.generate_binary_structure(3, 3)
 def extract_single_eye_lcc(
     fg_mask: np.ndarray,
     structure: Optional[np.ndarray] = None,
+    keep_all: bool = False,
 ) -> Tuple[np.ndarray, Optional[np.ndarray], int, int]:
     """Return the largest connected component of a single-eye foreground mask.
 
@@ -346,14 +347,32 @@ def extract_single_eye_lcc(
                     Fat / Recti for the eye we're looking at.
         structure:  3D structuring element. Defaults to 26-connectivity
                     (``LCC_STRUCT_26``).
+        keep_all:   FOV-truncation mode. When True, DO NOT reduce to the single
+                    largest component: keep every foreground voxel and take the
+                    centroid over ALL of it (the whole visible eye). For an
+                    intact eye — one connected blob — this is byte-identical to
+                    the default (whole-fg == LCC, centroid unchanged). It only
+                    differs once truncation fragments the eye, where the default
+                    "largest CC" collapses onto the biggest *fragment* (a
+                    posterior fat blob, a severed muscle) and both re-centres the
+                    crop off the globe AND zeros the other in-FOV pieces. The
+                    prior is trained on the whole-eye centroid, so under
+                    truncation the whole-visible-eye centroid is the one that
+                    matches; keep_all restores that convention. Callers gate this
+                    on the FOV experiment; the default (False) is unchanged for
+                    thin/thick. The midplane clip in ``_eye_lcc_in_search_bbox``
+                    still guarantees the mask is ipsilateral, so keep_all never
+                    reaches across to the contralateral orbit.
 
     Returns:
         (lcc_mask, lcc_centroid_voxel, lcc_voxel_count, total_fg_voxel_count)
 
-        * ``lcc_mask`` — 3D boolean, True only inside the largest component.
-        * ``lcc_centroid_voxel`` — [3] float, voxel-index mean over LCC, or
-          ``None`` when ``fg_mask`` has no True voxel.
-        * ``lcc_voxel_count`` — size of the LCC.
+        * ``lcc_mask`` — 3D boolean. Default: True only inside the largest
+          component. keep_all=True: True over the whole foreground.
+        * ``lcc_centroid_voxel`` — [3] float, voxel-index mean over the kept
+          mask, or ``None`` when ``fg_mask`` has no True voxel.
+        * ``lcc_voxel_count`` — size of the kept mask (== total_fg when
+          keep_all=True).
         * ``total_fg_voxel_count`` — sum of all True voxels in ``fg_mask``.
           Callers compare this to ``lcc_voxel_count`` to detect "extra"
           components (contralateral bleed, debris) and emit a WARNING.
@@ -364,6 +383,11 @@ def extract_single_eye_lcc(
     total_fg = int(fg_mask.sum())
     if total_fg == 0:
         return np.zeros_like(fg_mask, dtype=bool), None, 0, 0
+
+    if keep_all:
+        full = np.asarray(fg_mask, dtype=bool).copy()
+        centroid = np.array(ndimage.center_of_mass(full), dtype=float)
+        return full, centroid, total_fg, total_fg
 
     labeled, n_cc = ndimage.label(fg_mask, structure=structure)
     if n_cc == 0:
@@ -381,7 +405,8 @@ def extract_single_eye_lcc(
 
 
 def _eye_lcc_in_search_bbox(data, affine, this_globe_vox, other_globe_vox,
-                            search_size_mm, voxel_sizes, label_map):
+                            search_size_mm, voxel_sizes, label_map,
+                            keep_all=False):
     """Locate THIS eye's single foreground LCC in a midplane-clipped bbox.
 
     Replaces the older ``_whole_eye_centroid``: the centroid we want is no
@@ -441,7 +466,7 @@ def _eye_lcc_in_search_bbox(data, affine, this_globe_vox, other_globe_vox,
     fg_mask_bbox = np.isin(data[sl], fg_labels)
 
     lcc_mask_bbox, c_local, lcc_count, total_fg = extract_single_eye_lcc(
-        fg_mask_bbox
+        fg_mask_bbox, keep_all=keep_all
     )
     if c_local is None or lcc_count == 0:
         return None
@@ -504,9 +529,17 @@ def flip_os_to_od(data, affine):
 # ── Single-case ───────────────────────────────────────────────────
 
 def align_single_case(seg_path, source_id, source="checklist",
-                      patch_size_mm=80.0, search_size_mm=None):
+                      patch_size_mm=80.0, search_size_mm=None,
+                      fov_keep_all=False):
     """Crop one ``patch_size_mm`` cubic patch per eye, centred on the eye's
     single-eye LCC centroid.
+
+    ``fov_keep_all`` (FOV-truncation builds only): center the crop on the whole
+    visible-eye centroid and keep every ipsilateral foreground voxel instead of
+    reducing to the largest connected component. Byte-identical to the default
+    for an intact (one-CC) eye; only changes behaviour once truncation
+    fragments the eye, where the default drops in-FOV pieces and re-centres the
+    crop onto the largest fragment. See ``extract_single_eye_lcc``.
 
     For each detected eye we:
       1. Use ``_eye_lcc_in_search_bbox`` to compute (a) the voxel centroid of
@@ -576,6 +609,7 @@ def align_single_case(seg_path, source_id, source="checklist",
             data, affine,
             eye_info["centroid_voxel"], other_globe_vox,
             search_size_mm, voxel_sizes, label_map,
+            keep_all=fov_keep_all,
         )
         if eye_lcc is not None:
             (crop_centroid_vox, crop_centroid_world, lcc_mask_full,
