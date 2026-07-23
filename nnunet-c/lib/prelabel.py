@@ -78,7 +78,7 @@ def _corrector_data_root(cfg: Dict) -> Path:
 
     Every corrector artifact "lives under data_root" (corrector.yaml), so the iso
     prelabel roots must follow it too -- otherwise a config that moves data_root
-    (e.g. the FOV tree ``nnunet-c/data_fov_min_retain``) silently leaves its iso
+    (e.g. the FOV tree ``nnunet-c/data_fov_pereye_test``) silently leaves its iso
     prelabels behind in the default ``nnunet-c/data`` tree. For the default
     ``nnunet-c/data`` this is byte-identical to the old ``nnunet_c_root / "data"``.
     """

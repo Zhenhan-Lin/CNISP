@@ -32,7 +32,7 @@ A separate dataset id keeps the FOV model apart from the thickness one; below us
 
 ## 0. FOV config
 Copy `nnunet-c/configs/corrector.yaml` → `nnunet-c/configs/corrector_fov.yaml`; change:
-- `corrector_data.data_root` → the FOV root (default `nnunet-c/data_fov_min_retain`),
+- `corrector_data.data_root` → the FOV root (default `nnunet-c/data_fov_pereye_test`),
 - `corrector_data.steps` → `[50, 65, 80]`,
 - control **C** `dataset_id`/`dataset_name` → `847` / `PHOTON_CT_CORR_C_fov`.
 Pass `--config nnunet-c/configs/corrector_fov.yaml` (and `CONFIG=…` to wrappers) everywhere.
@@ -56,7 +56,7 @@ python nnunet-c/scripts/build_fov_truncated_data.py \
 python nnunet-c/scripts/build_fov_truncated_data.py \
     --min-retains 0.5,0.65,0.8 --corner SL --min-retain-on 0.5   # floors -> steps 50,65,80
 ```
-Writes `nnunet-c/data_fov_min_retain/images/{case}_step{PP}_0000.nii.gz`, a
+Writes `nnunet-c/data_fov_pereye_test/images/{case}_step{PP}_0000.nii.gz`, a
 `corrector_data_manifest.json` (→ build_corrector_dataset), and a
 `fov_truncation_manifest.json` sidecar (per (case,PP): `source_shape` + the visible
 window — **slab**: `trunc_axis` + `visible_range`; **box** / **box_min_retain**:
@@ -94,7 +94,7 @@ eval reads `visible_box` (single box) for both box variants.
 - `per_eye.{OD,OS}` in the sidecar reports each eye's achieved `ret_total`/`ret_ON`/per-structure
   and `binding_constraint`; check them (Stage 2) — all should be >= T.
 
-Check: `ls nnunet-c/data_fov_min_retain/images | head`; the sidecar has an entry per case/pseudo-step.
+Check: `ls nnunet-c/data_fov_pereye_test/images | head`; the sidecar has an entry per case/pseudo-step.
 
 ## 1b. Extreme-case scout test of the CNISP output (box mode)
 Before a full training run, sanity-check **how the CNISP-completed prior behaves under
@@ -155,11 +155,11 @@ Follow `RUNBOOK.md` §1 Stages 2–5 with the FOV config and pseudo-step strata.
 
 First emit the **train-side** CNISP iso prelabels (control-C cascade ch1..4 read
 them). `run_corrector_cnisp.sh` reads `CONFIG` to target the FOV tree — it derives
-`EXPERIMENT=fov`, `STEPS=50,65,80`, and the `data_fov_min_retain` aligned/out/iso
+`EXPERIMENT=fov`, `STEPS=50,65,80`, and the `data_fov_pereye_test` aligned/out/iso
 dirs from the config (env vars still override):
 ```bash
 CONFIG=nnunet-c/configs/corrector_fov.yaml EMIT_ISO=1 \
-    bash nnunet-c/run_corrector_cnisp.sh          # -> data_fov_min_retain/cnisp_pred_train_iso
+    bash nnunet-c/run_corrector_cnisp.sh          # -> data_fov_pereye_test/cnisp_pred_train_iso
 ```
 Then build the cascade dataset (reads those iso prelabels via `--prelabel-grid iso`):
 ```bash
@@ -180,7 +180,7 @@ CASCADE=1 CORRECTOR_TRAINER=nnUNetTrainer_OrbitalCascade \
 CONFIG=nnunet-c/configs/corrector_fov.yaml \
 bash nnunet-c/run_corrector_predict.sh C 0
 
-TM=nnunet-c/data_fov_min_retain/fov_truncation_manifest.json
+TM=nnunet-c/data_fov_pereye_test/fov_truncation_manifest.json
 MAP=nnunet-c/test_input/PHOTON_CT_CORR_C_fov/test_cases_map.json
 PRED=nnunet-c/predictions/PHOTON_CT_CORR_C_fov/fold_0
 python nnunet-c/diagnostics/eval_corrector.py --map $MAP --pred-dir $PRED --full-metrics                                  # whole volume
@@ -196,7 +196,7 @@ with `--region all`).
 
 ## 5. Cleanup / checks
 Same reset commands as `RUNBOOK.md` §4 with the FOV ids (`847`/`848`) and
-`data_root = nnunet-c/data_fov_min_retain`. To regenerate the truncated CTs: `rm -rf
-nnunet-c/data_fov_min_retain/images` (or `--force`). Verify the train log shows
+`data_root = nnunet-c/data_fov_pereye_test`. To regenerate the truncated CTs: `rm -rf
+nnunet-c/data_fov_pereye_test/images` (or `--force`). Verify the train log shows
 `num_input_channels: 5` and the `[StepStratified]` loader lists the pseudo-steps
 `{50,65,80}`.

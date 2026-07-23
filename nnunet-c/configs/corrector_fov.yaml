@@ -73,9 +73,11 @@ corrector_data:
   thick_threshold_mm: 10.0
   thick_threshold_steps: []        # FOV: was [9, 12] (thickness-only; N/A for FOV)
   modality: ct
-  # FOV: separate data root so the thickness experiment tree is untouched. Point
-  # this at the tree written by build_fov_truncated_data.py --min-retains.
-  data_root: nnunet-c/data_fov_min_retain   # FOV: was nnunet-c/data
+  # FOV: separate data root so the thickness experiment tree is untouched. This is
+  # the tree build_fov_truncated_data.py --out-data-root wrote to, and where every
+  # FOV artifact lives (images/, nnunet_pred/, aligned_patch/, cnisp_pred*/, iso).
+  # Everything downstream (predict, align, cnisp launcher, fov_pose_ab) follows it.
+  data_root: nnunet-c/data_fov_pereye_test   # FOV: was nnunet-c/data
   images_dirname: images
   nnunet_pred_dirname: nnunet_pred
   cnisp_pred_dirname: cnisp_pred
