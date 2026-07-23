@@ -25,17 +25,33 @@ do_build() {
 do_predict() {
     : "${nnUNet_results:?export nnUNet_results}"
     # Resume by default: --continue_prediction skips cases whose output mask
-    # already exists in $DATA_NNUNET_PRED. FORCE=1 re-predicts everything.
+    # already exists in the predict OUTPUT dir. FORCE=1 re-predicts everything.
     local resume_flag="--continue_prediction"
     [[ "${FORCE:-0}" == "1" ]] && resume_flag=""
     # Worker counts: lower these if nnUNet reports "Background workers died /
     # RAM was full" or a multiprocessing manager error. NPP=1 NPS=1 is safest.
     local npp="${NPP:-2}" nps="${NPS:-2}"
-    echo "[run_corrector_data] (2) nnUNetv2_predict (Dataset$REF_DATASET_ID) -> $DATA_NNUNET_PRED ${resume_flag:+(resume)} (npp=$npp nps=$nps)"
-    mkdir -p "$DATA_NNUNET_PRED"
+
+    # FOV mode (sidecar present): nnUNet must SEE the truncated image volume, not a
+    # full grid with the truncated part painted air (that lets it spill foreground
+    # into a no-evidence region). So CROP each image to its visible_box, predict on
+    # the cropped volumes, then MAP the labels back onto the full source grid (the
+    # truncated region ends up 0 -- no prediction). Gated so thick is untouched.
+    local sidecar in_dir="$DATA_IMAGES" out_dir="$DATA_NNUNET_PRED" fov=0
+    sidecar="$(dirname "$DATA_NNUNET_PRED")/fov_truncation_manifest.json"
+    if [[ -f "$sidecar" ]]; then
+        fov=1
+        in_dir="$(dirname "$DATA_IMAGES")/images_fov_crop"
+        out_dir="$(dirname "$DATA_NNUNET_PRED")/nnunet_pred_crop"
+        echo "[run_corrector_data] (2a) FOV crop images -> visible_box -> $in_dir"
+        python3 "$HERE/scripts/fov_crop_pred.py" --config "$CONFIG" --mode crop
+    fi
+
+    echo "[run_corrector_data] (2) nnUNetv2_predict (Dataset$REF_DATASET_ID) -> $out_dir ${resume_flag:+(resume)} (npp=$npp nps=$nps)"
+    mkdir -p "$out_dir"
     nnUNetv2_predict \
-        -i "$DATA_IMAGES" \
-        -o "$DATA_NNUNET_PRED" \
+        -i "$in_dir" \
+        -o "$out_dir" \
         -d "$REF_DATASET_ID" \
         -c "$CONFIGURATION" \
         -p "$REF_PLAN" \
@@ -43,6 +59,12 @@ do_predict() {
         -f "$REF_FOLD" \
         -npp "$npp" -nps "$nps" \
         $resume_flag
+
+    if [[ "$fov" == "1" ]]; then
+        echo "[run_corrector_data] (2b) FOV map cropped preds back to full grid -> $DATA_NNUNET_PRED"
+        python3 "$HERE/scripts/fov_crop_pred.py" --config "$CONFIG" --mode mapback || \
+            echo "[run_corrector_data] WARNING: FOV mapback failed; nnunet_pred not on full grid" >&2
+    fi
 
     # Folder check: how many samples have BOTH a degraded image and a prelabel.
     local n_img n_pre n_pair

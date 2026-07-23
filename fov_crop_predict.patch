@@ -1,0 +1,278 @@
+diff --git a/nnunet-c/run_corrector_data.sh b/nnunet-c/run_corrector_data.sh
+index c486271..b61ede1 100755
+--- a/nnunet-c/run_corrector_data.sh
++++ b/nnunet-c/run_corrector_data.sh
+@@ -25,17 +25,33 @@ do_build() {
+ do_predict() {
+     : "${nnUNet_results:?export nnUNet_results}"
+     # Resume by default: --continue_prediction skips cases whose output mask
+-    # already exists in $DATA_NNUNET_PRED. FORCE=1 re-predicts everything.
++    # already exists in the predict OUTPUT dir. FORCE=1 re-predicts everything.
+     local resume_flag="--continue_prediction"
+     [[ "${FORCE:-0}" == "1" ]] && resume_flag=""
+     # Worker counts: lower these if nnUNet reports "Background workers died /
+     # RAM was full" or a multiprocessing manager error. NPP=1 NPS=1 is safest.
+     local npp="${NPP:-2}" nps="${NPS:-2}"
+-    echo "[run_corrector_data] (2) nnUNetv2_predict (Dataset$REF_DATASET_ID) -> $DATA_NNUNET_PRED ${resume_flag:+(resume)} (npp=$npp nps=$nps)"
+-    mkdir -p "$DATA_NNUNET_PRED"
++
++    # FOV mode (sidecar present): nnUNet must SEE the truncated image volume, not a
++    # full grid with the truncated part painted air (that lets it spill foreground
++    # into a no-evidence region). So CROP each image to its visible_box, predict on
++    # the cropped volumes, then MAP the labels back onto the full source grid (the
++    # truncated region ends up 0 -- no prediction). Gated so thick is untouched.
++    local sidecar in_dir="$DATA_IMAGES" out_dir="$DATA_NNUNET_PRED" fov=0
++    sidecar="$(dirname "$DATA_NNUNET_PRED")/fov_truncation_manifest.json"
++    if [[ -f "$sidecar" ]]; then
++        fov=1
++        in_dir="$(dirname "$DATA_IMAGES")/images_fov_crop"
++        out_dir="$(dirname "$DATA_NNUNET_PRED")/nnunet_pred_crop"
++        echo "[run_corrector_data] (2a) FOV crop images -> visible_box -> $in_dir"
++        python3 "$HERE/scripts/fov_crop_pred.py" --config "$CONFIG" --mode crop
++    fi
++
++    echo "[run_corrector_data] (2) nnUNetv2_predict (Dataset$REF_DATASET_ID) -> $out_dir ${resume_flag:+(resume)} (npp=$npp nps=$nps)"
++    mkdir -p "$out_dir"
+     nnUNetv2_predict \
+-        -i "$DATA_IMAGES" \
+-        -o "$DATA_NNUNET_PRED" \
++        -i "$in_dir" \
++        -o "$out_dir" \
+         -d "$REF_DATASET_ID" \
+         -c "$CONFIGURATION" \
+         -p "$REF_PLAN" \
+@@ -44,6 +60,12 @@ do_predict() {
+         -npp "$npp" -nps "$nps" \
+         $resume_flag
+ 
++    if [[ "$fov" == "1" ]]; then
++        echo "[run_corrector_data] (2b) FOV map cropped preds back to full grid -> $DATA_NNUNET_PRED"
++        python3 "$HERE/scripts/fov_crop_pred.py" --config "$CONFIG" --mode mapback || \
++            echo "[run_corrector_data] WARNING: FOV mapback failed; nnunet_pred not on full grid" >&2
++    fi
++
+     # Folder check: how many samples have BOTH a degraded image and a prelabel.
+     local n_img n_pre n_pair
+     n_img=$(find "$DATA_IMAGES" -name '*_step*_0000.nii.gz' 2>/dev/null | wc -l | tr -d ' ')
+diff --git a/nnunet-c/scripts/fov_crop_pred.py b/nnunet-c/scripts/fov_crop_pred.py
+new file mode 100644
+index 0000000..6a483fc
+--- /dev/null
++++ b/nnunet-c/scripts/fov_crop_pred.py
+@@ -0,0 +1,216 @@
++#!/usr/bin/env python3
++"""FOV-truncation aware nnUNet I/O: crop the input to the acquired FOV, map back out.
++
++nnUNet stage-1 must SEE the truncated image volume -- not a full grid with the
++truncated part painted with air. Painting air and predicting on the full grid lets
++nnUNet spill foreground into a region that carries no image evidence. Instead:
++
++    crop     : images/<case>_step<PP>_0000.nii.gz  (full grid, air outside the box)
++               -> images_fov_crop/<same>            (cropped to visible_box; the
++               truncated region is GONE, so nnUNet has nothing to predict there)
++    <nnUNet predicts on images_fov_crop/ -> nnunet_pred_crop/>
++    mapback  : nnunet_pred_crop/<case>_step<PP>.nii.gz  (cropped-grid labels)
++               -> nnunet_pred/<same>                     (full source grid; the
++               cropped labels placed back at the box, truncated region = 0)
++
++So nnUNet runs on a genuinely truncated volume (re-run required -- that's the point),
++never sees the blanked region, and the full-grid output stays drop-in for align /
++eval. Truncation preserves the CT grid, so the sidecar ``visible_box`` (per-source-
++axis half-open ``[lo, hi)`` voxel windows, keyed ``[case_id][step]``) indexes voxels
++directly; ``source_shape`` guards the grid. Cropping only shifts the affine origin.
++
++Usage:
++    python nnunet-c/scripts/fov_crop_pred.py --config nnunet-c/configs/corrector_fov.yaml --mode crop
++    # <nnUNetv2_predict -i <data_root>/images_fov_crop -o <data_root>/nnunet_pred_crop ...>
++    python nnunet-c/scripts/fov_crop_pred.py --config nnunet-c/configs/corrector_fov.yaml --mode mapback
++    python nnunet-c/scripts/fov_crop_pred.py --self-test
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import re
++import sys
++from pathlib import Path
++
++import numpy as np
++
++REPO = Path(__file__).resolve().parents[2]
++_IMG_RE = re.compile(r"^(?P<case>.+)_step(?P<step>\d+)_0000\.nii\.gz$")
++_PRED_RE = re.compile(r"^(?P<case>.+)_step(?P<step>\d+)\.nii\.gz$")
++
++CROP_IMG_DIRNAME = "images_fov_crop"
++CROP_PRED_DIRNAME = "nnunet_pred_crop"
++
++
++def _box_slices(visible_box):
++    return tuple(slice(int(lo), int(hi)) for lo, hi in visible_box)
++
++
++def _crop_affine(affine: np.ndarray, visible_box) -> np.ndarray:
++    """Affine of the sub-volume ``arr[box]``: same direction/spacing, origin shifted
++    to the world position of the box's lower corner."""
++    lo = np.array([int(v[0]) for v in visible_box], dtype=np.float64)
++    out = np.asarray(affine, dtype=np.float64).copy()
++    out[:3, 3] = (out @ np.append(lo, 1.0))[:3]
++    return out
++
++
++def crop_to_fov(arr: np.ndarray, affine: np.ndarray, visible_box, source_shape=None):
++    """Return ``(cropped_arr, cropped_affine)`` = ``arr`` restricted to ``visible_box``."""
++    if source_shape is not None and tuple(int(s) for s in arr.shape) != \
++            tuple(int(s) for s in source_shape):
++        raise ValueError(f"array shape {arr.shape} != sidecar source_shape "
++                         f"{tuple(source_shape)}; refusing to crop (grid mismatch).")
++    sl = _box_slices(visible_box)
++    return arr[sl].copy(), _crop_affine(affine, visible_box)
++
++
++def mapback_from_fov(cropped: np.ndarray, visible_box, source_shape) -> np.ndarray:
++    """Place ``cropped`` (labels on the box grid) into a full ``source_shape`` volume
++    at ``visible_box``; everything outside is 0 (no prediction in the truncated region)."""
++    sl = _box_slices(visible_box)
++    expect = tuple(int(v[1]) - int(v[0]) for v in visible_box)
++    if tuple(int(s) for s in cropped.shape) != expect:
++        raise ValueError(f"cropped pred shape {cropped.shape} != box extent {expect}.")
++    full = np.zeros(tuple(int(s) for s in source_shape), dtype=cropped.dtype)
++    full[sl] = cropped
++    return full
++
++
++# ── config / dir resolution ───────────────────────────────────────────────────
++def _resolve_dirs(args):
++    sys.path.insert(0, str(REPO / "nnunet-c"))
++    from lib.config import load_corrector_config
++    cfgpath = args.config if Path(args.config).is_absolute() else str(REPO / args.config)
++    cfg = load_corrector_config(cfgpath, caller_file=str(Path(__file__)))
++    cd = cfg.get("corrector_data", {}) or {}
++    dr = Path(cd.get("data_root", "nnunet-c/data"))
++    dr = dr if dr.is_absolute() else (cfg["_resolved"]["repo_root"] / dr)
++    tm = Path(args.trunc_manifest) if args.trunc_manifest else (dr / "fov_truncation_manifest.json")
++    return {
++        "images": dr / cd.get("images_dirname", "images"),
++        "crop_images": dr / CROP_IMG_DIRNAME,
++        "pred_crop": dr / CROP_PRED_DIRNAME,
++        "nnunet_pred": dr / cd.get("nnunet_pred_dirname", "nnunet_pred"),
++        "sidecar": tm,
++    }
++
++
++def _lookup(trunc, case, step):
++    return (trunc.get(case, {}) or {}).get(str(int(step)))
++
++
++def run_crop(dirs) -> int:
++    import nibabel as nib
++    trunc = json.load(open(dirs["sidecar"]))
++    src, out = dirs["images"], dirs["crop_images"]
++    out.mkdir(parents=True, exist_ok=True)
++    n = skip = 0
++    for p in sorted(src.glob("*_0000.nii.gz")):
++        m = _IMG_RE.match(p.name)
++        if not m:
++            continue
++        info = _lookup(trunc, m.group("case"), m.group("step"))
++        if not info or "visible_box" not in info:
++            print(f"  {p.name}: no visible_box; SKIP"); skip += 1; continue
++        img = nib.load(str(p))
++        arr = np.asanyarray(img.dataobj)
++        try:
++            cr, aff = crop_to_fov(arr, img.affine, info["visible_box"], info.get("source_shape"))
++        except ValueError as e:
++            print(f"  {p.name}: {e}; SKIP"); skip += 1; continue
++        nib.save(nib.Nifti1Image(cr, aff, img.header), str(out / p.name))
++        print(f"  {p.name}: {tuple(arr.shape)} -> {tuple(cr.shape)}")
++        n += 1
++    print(f"[fov-crop] cropped {n} image(s) ({skip} skipped) -> {out}")
++    return 0 if n else 1
++
++
++def run_mapback(dirs) -> int:
++    import nibabel as nib
++    trunc = json.load(open(dirs["sidecar"]))
++    src, ref_dir, out = dirs["pred_crop"], dirs["images"], dirs["nnunet_pred"]
++    out.mkdir(parents=True, exist_ok=True)
++    n = skip = 0
++    for p in sorted(src.glob("*.nii.gz")):
++        m = _PRED_RE.match(p.name)
++        if not m:
++            continue
++        case, step = m.group("case"), m.group("step")
++        info = _lookup(trunc, case, step)
++        if not info or "visible_box" not in info or "source_shape" not in info:
++            print(f"  {p.name}: no visible_box/source_shape; SKIP"); skip += 1; continue
++        # full-grid affine from the original truncated CT (authoritative)
++        ref = ref_dir / f"{case}_step{int(step):02d}_0000.nii.gz"
++        if not ref.is_file():
++            print(f"  {p.name}: ref image {ref.name} missing; SKIP"); skip += 1; continue
++        pred = np.asanyarray(nib.load(str(p)).dataobj)
++        try:
++            full = mapback_from_fov(pred, info["visible_box"], info["source_shape"])
++        except ValueError as e:
++            print(f"  {p.name}: {e}; SKIP"); skip += 1; continue
++        refimg = nib.load(str(ref))
++        nib.save(nib.Nifti1Image(full.astype(pred.dtype), refimg.affine, refimg.header),
++                 str(out / p.name))
++        print(f"  {p.name}: {tuple(pred.shape)} -> full {tuple(full.shape)}")
++        n += 1
++    print(f"[fov-mapback] mapped {n} pred(s) ({skip} skipped) -> {out}")
++    return 0 if n else 1
++
++
++# ── self-test: crop -> (identity 'predict') -> mapback round-trip ──────────────
++def _self_test() -> int:
++    src_shape = (16, 18, 20)
++    visible_box = [[3, 11], [0, 18], [5, 14]]           # axes 0,2 clipped, axis 1 full
++    rng = np.arange(np.prod(src_shape)).reshape(src_shape).astype(np.int16) % 5
++    affine = np.diag([0.5, 0.6, 0.7, 1.0]); affine[:3, 3] = [-2.0, 1.0, 3.0]
++
++    cropped, caff = crop_to_fov(rng, affine, visible_box, src_shape)
++    assert cropped.shape == (8, 18, 9)
++    # cropped affine origin == world position of the box lower corner
++    expect_origin = (affine @ np.array([3, 0, 5, 1]))[:3]
++    assert np.allclose(caff[:3, 3], expect_origin), (caff[:3, 3], expect_origin)
++    assert np.allclose(caff[:3, :3], affine[:3, :3])
++
++    # "nnUNet" = identity on the crop -> mapback must restore the box, zero elsewhere
++    full = mapback_from_fov(cropped, visible_box, src_shape)
++    assert full.shape == src_shape
++    sl = _box_slices(visible_box)
++    assert np.array_equal(full[sl], rng[sl]), "in-FOV labels must round-trip exactly"
++    outside = np.ones(src_shape, bool); outside[sl] = False
++    assert (full[outside] == 0).all(), "truncated region must be 0 (no prediction)"
++
++    # grid-mismatch guard
++    try:
++        crop_to_fov(rng, affine, visible_box, source_shape=(9, 9, 9))
++        raise AssertionError("expected shape-mismatch ValueError")
++    except ValueError:
++        pass
++    print(f"crop {src_shape}->{cropped.shape}; mapback round-trips box, zeros truncated; guard OK")
++    print("\nALL FOV-CROP-PRED SELF-TESTS PASSED")
++    return 0
++
++
++def build_parser():
++    ap = argparse.ArgumentParser(description=__doc__,
++                                 formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--config", default="nnunet-c/configs/corrector_fov.yaml")
++    ap.add_argument("--trunc-manifest", default=None)
++    ap.add_argument("--mode", choices=["crop", "mapback"], default=None)
++    ap.add_argument("--self-test", action="store_true")
++    return ap
++
++
++if __name__ == "__main__":
++    a = build_parser().parse_args()
++    if a.self_test:
++        sys.exit(_self_test())
++    if a.mode is None:
++        build_parser().error("need --mode crop|mapback (or --self-test)")
++    d = _resolve_dirs(a)
++    if not d["sidecar"].is_file():
++        print(f"[fov-crop-pred] sidecar not found: {d['sidecar']}", file=sys.stderr)
++        sys.exit(2)
++    sys.exit(run_crop(d) if a.mode == "crop" else run_mapback(d))
