@@ -66,6 +66,34 @@ def _check_coverage(df: pd.DataFrame, what: str, strict: bool) -> None:
     warnings.warn("[fov-ckpt] " + msg, stacklevel=2)
 
 
+def _subject_unit(df: pd.DataFrame) -> pd.Series:
+    """The equal-weight statistical unit (revised-plan §10): subject_id if present,
+    else case_id, else a single unit (reduces to a flat cell mean for legacy tables)."""
+    if "subject_id" in df.columns:
+        return df["subject_id"].astype(str)
+    if "case_id" in df.columns:
+        return df["case_id"].astype(str)
+    return pd.Series(["_all"] * len(df), index=df.index)
+
+
+def _subject_major(df: pd.DataFrame, value_col: str, out_name: str) -> pd.DataFrame:
+    """Per (epoch, subject) mean over the subject's cells, then per epoch mean over
+    subjects. Equal weight per subject regardless of how many valid cells it has."""
+    d = df.assign(_subj=_subject_unit(df))
+    per_subj = d.groupby(["epoch", "_subj"], as_index=False).agg(_v=(value_col, "mean"))
+    return per_subj.groupby("epoch", as_index=False).agg(**{out_name: ("_v", "mean")})
+
+
+def _worst_condition(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """Worst (min) per-condition subject-major missing Dice per epoch (tie-break)."""
+    d = df.assign(_subj=_subject_unit(df))
+    per = (d.groupby(["epoch", "crop_type", "severity", "_subj"], as_index=False)
+           .agg(_v=(value_col, "mean")))
+    cond = (per.groupby(["epoch", "crop_type", "severity"], as_index=False)
+            .agg(_cv=("_v", "mean")))
+    return cond.groupby("epoch", as_index=False).agg(worst_condition=("_cv", "min"))
+
+
 def _check_absolute_coverage(metrics: pd.DataFrame, expected_structures: Sequence[str],
                              crop_types: Sequence[str], severities: Sequence[int],
                              full_crop_type: str, strict: bool) -> None:
@@ -107,6 +135,7 @@ class CheckpointScore:
     worst_condition: float
     full_fov_macro: Optional[float] = None
     smoothed_missing: Optional[float] = None
+    missing_precision_macro: Optional[float] = None   # hallucination guardrail metric
 
 
 @dataclass
@@ -116,6 +145,8 @@ class SelectionResult:
     full_fov_guardrail_relaxed: bool
     applied_visible_tolerance: float
     applied_full_tolerance: Optional[float]
+    hallucination_guardrail_relaxed: bool = False
+    applied_precision_tolerance: Optional[float] = None
 
 
 def build_checkpoint_scores(
@@ -161,32 +192,38 @@ def build_checkpoint_scores(
     _check_coverage(missing_valid, "missing-valid", require_consistent_coverage)
     _check_coverage(visible_valid, "visible-valid", require_consistent_coverage)
 
-    def _cond_struct(df, col):
-        return (df.groupby(["epoch", "crop_type", "severity", "structure"], as_index=False)
-                .agg(val=(col, "mean")))
-
-    miss_cs = _cond_struct(missing_valid, "missing_dice")
-    vis_cs = _cond_struct(visible_valid, "visible_dice")
-
-    epoch_missing = miss_cs.groupby("epoch", as_index=False).agg(missing_macro=("val", "mean"))
-    epoch_visible = vis_cs.groupby("epoch", as_index=False).agg(visible_macro=("val", "mean"))
-
-    # per-condition missing (mean over structures) -> worst condition per epoch
-    cond_macro = (miss_cs.groupby(["epoch", "crop_type", "severity"], as_index=False)
-                  .agg(cond_missing=("val", "mean")))
-    worst = cond_macro.groupby("epoch", as_index=False).agg(worst_condition=("cond_missing", "min"))
+    # revised-plan §10 / P1-8: the statistical unit is the SUBJECT, not the FOV case.
+    # macro = mean over subjects of (each subject's mean over its cells), so a subject
+    # with more valid cells does not get more weight.
+    epoch_missing = _subject_major(missing_valid, "missing_dice", "missing_macro")
+    epoch_visible = _subject_major(visible_valid, "visible_dice", "visible_macro")
+    worst = _worst_condition(missing_valid, "missing_dice")
 
     result = (epoch_missing.merge(epoch_visible, on="epoch", how="left")
               .merge(worst, on="epoch", how="left"))
 
-    # full-FOV macro (optional): mean full-FOV whole Dice over structures
+    # revised-plan §6.5 / P1-5: hallucination guardrail metric = subject-major
+    # missing-region PRECISION (finite only). Low precision == anatomy invented where
+    # the FOV did not acquire it; higher is better. Reported alongside mean FP volume.
+    if "missing_precision" in missing_valid.columns:
+        prec = missing_valid[np.isfinite(missing_valid["missing_precision"].astype(float))]
+        if not prec.empty:
+            result = result.merge(_subject_major(prec, "missing_precision",
+                                                 "missing_precision_macro"), on="epoch", how="left")
+    if "missing_precision_macro" not in result.columns:
+        result["missing_precision_macro"] = pd.NA
+    if "missing_fp_voxels" in missing_valid.columns:
+        fp = (missing_valid.groupby("epoch", as_index=False)
+              .agg(missing_fp_voxels_mean=("missing_fp_voxels", "mean")))
+        result = result.merge(fp, on="epoch", how="left")
+
+    # full-FOV macro (optional): subject-major full-FOV whole Dice
     full_valid = full[full["visible_gt_voxels"] > min_visible_volume_voxels]
     if not full_valid.empty:
         _check_finite(full_valid, "visible_dice", "full-FOV rows")
         _check_coverage(full_valid, "full-FOV", require_consistent_coverage)
-        full_cs = _cond_struct(full_valid, "visible_dice")
-        epoch_full = full_cs.groupby("epoch", as_index=False).agg(full_fov_macro=("val", "mean"))
-        result = result.merge(epoch_full, on="epoch", how="left")
+        result = result.merge(_subject_major(full_valid, "visible_dice", "full_fov_macro"),
+                              on="epoch", how="left")
     else:
         result["full_fov_macro"] = pd.NA
 
@@ -200,11 +237,13 @@ def scores_from_frame(result: pd.DataFrame) -> List[CheckpointScore]:
     out = []
     for r in result.itertuples(index=False):
         full = getattr(r, "full_fov_macro", None)
+        prec = getattr(r, "missing_precision_macro", None)
         out.append(CheckpointScore(
             int(r.epoch), float(r.missing_macro), float(r.visible_macro),
             float(r.worst_condition),
             None if (full is None or pd.isna(full)) else float(full),
-            None if pd.isna(r.smoothed_missing) else float(r.smoothed_missing)))
+            None if pd.isna(r.smoothed_missing) else float(r.smoothed_missing),
+            None if (prec is None or pd.isna(prec)) else float(prec)))
     return out
 
 
@@ -243,6 +282,19 @@ def select_fov_checkpoint(
     else:
         best_full = None
 
+    # hallucination guardrail (revised-plan §6.5): missing-region precision — must be
+    # COMPLETE if present (a None must not bypass it, same rule as full-FOV).
+    prec_present = any(s.missing_precision_macro is not None for s in scores)
+    if prec_present:
+        incomplete = sorted(s.epoch for s in scores if s.missing_precision_macro is None)
+        if incomplete:
+            raise ValueError(f"hallucination (missing-precision) guardrail is present but "
+                             f"epochs {incomplete} lack it; refuse to select on incomplete "
+                             f"metrics (a None must not bypass the hallucination guardrail).")
+        best_prec = max(s.missing_precision_macro for s in scores)  # type: ignore[arg-type]
+    else:
+        best_prec = None
+
     near_best = [s for s in scores if s.missing_macro >= best_missing - missing_tolerance]
     base = float(relaxation_steps[0])
 
@@ -259,20 +311,30 @@ def select_fov_checkpoint(
             full_margin = best_full - (chosen.full_fov_macro or 0.0)
             full_relaxed = full_margin > base + 1e-12
             full_tol = max(base, full_margin)
-        if (vis_relaxed or full_relaxed) and warn:
+        if best_prec is None:
+            prec_margin, prec_relaxed, prec_tol = None, False, None
+        else:
+            prec_margin = best_prec - (chosen.missing_precision_macro or 0.0)
+            prec_relaxed = prec_margin > base + 1e-12
+            prec_tol = max(base, prec_margin)
+        if (vis_relaxed or full_relaxed or prec_relaxed) and warn:
             warnings.warn(f"[fov-ckpt] guardrail relaxed for epoch {chosen.epoch} "
                           f"(visible margin {vis_margin:.4f}"
                           + ("" if full_margin is None else f", full margin {full_margin:.4f}")
+                          + ("" if prec_margin is None else f", precision margin {prec_margin:.4f}")
                           + ").", stacklevel=2)
         return SelectionResult(chosen, visible_guardrail_relaxed=vis_relaxed,
                                full_fov_guardrail_relaxed=full_relaxed,
                                applied_visible_tolerance=max(base, vis_margin),
-                               applied_full_tolerance=full_tol)
+                               applied_full_tolerance=full_tol,
+                               hallucination_guardrail_relaxed=prec_relaxed,
+                               applied_precision_tolerance=prec_tol)
 
     for tol in relaxation_steps:
         guarded = [s for s in near_best
                    if s.visible_macro >= best_visible - tol
-                   and (best_full is None or s.full_fov_macro >= best_full - tol)]
+                   and (best_full is None or s.full_fov_macro >= best_full - tol)
+                   and (best_prec is None or s.missing_precision_macro >= best_prec - tol)]
         if guarded:
             return _result(max(guarded, key=_ranking_key))
 
@@ -412,6 +474,45 @@ def _selftest() -> int:
     except ValueError:
         pass
     print("§12 guards OK: empty-visible / non-finite / coverage / strict-guardrail / absolute all raise")
+
+    # ── revised-plan §10: subject-major aggregation weights subjects EQUALLY ──
+    sub = pd.DataFrame([
+        dict(epoch=1, subject_id="A", crop_type="axial", severity=20, structure="ON",
+             missing_dice=0.9, visible_dice=0.9, missing_gt_voxels=500, visible_gt_voxels=500),
+        dict(epoch=1, subject_id="A", crop_type="axial", severity=35, structure="ON",
+             missing_dice=0.9, visible_dice=0.9, missing_gt_voxels=500, visible_gt_voxels=500),
+        dict(epoch=1, subject_id="B", crop_type="axial", severity=20, structure="ON",
+             missing_dice=0.5, visible_dice=0.9, missing_gt_voxels=500, visible_gt_voxels=500),
+    ])
+    rs = build_checkpoint_scores(sub, min_missing_volume_voxels=1, min_visible_volume_voxels=1,
+                                 require_consistent_coverage=False)
+    # subject-major = (A:0.9 + B:0.5)/2 = 0.70; a flat cell mean over 3 rows would be 0.767
+    assert abs(float(rs["missing_macro"].iloc[0]) - 0.70) < 1e-6, rs["missing_macro"].iloc[0]
+    print("subject-major macro:", round(float(rs["missing_macro"].iloc[0]), 4), "(flat would be 0.7667)")
+
+    # ── revised-plan §6.5: hallucination (missing-precision) guardrail ──
+    # epoch 1 has the best missing Dice but LOW missing precision (invents anatomy in
+    # the missing region) -> rejected for the high-precision epoch 2.
+    halluc = [
+        CheckpointScore(1, 0.700, 0.90, 0.6, full_fov_macro=0.93, smoothed_missing=0.700,
+                        missing_precision_macro=0.60),
+        CheckpointScore(2, 0.697, 0.90, 0.6, full_fov_macro=0.93, smoothed_missing=0.697,
+                        missing_precision_macro=0.92),
+    ]
+    resh = select_fov_checkpoint(halluc, missing_tolerance=0.005, warn=False)
+    assert resh.checkpoint.epoch == 2, resh.checkpoint.epoch
+    assert not resh.hallucination_guardrail_relaxed
+    # completeness: a None precision among present metrics must raise (no bypass)
+    mixp = [CheckpointScore(1, 0.70, 0.90, 0.6, full_fov_macro=0.93, smoothed_missing=0.70,
+                            missing_precision_macro=0.9),
+            CheckpointScore(2, 0.69, 0.90, 0.6, full_fov_macro=0.93, smoothed_missing=0.69,
+                            missing_precision_macro=None)]
+    try:
+        select_fov_checkpoint(mixp, warn=False)
+        raise AssertionError("incomplete precision guardrail should raise")
+    except ValueError:
+        pass
+    print("hallucination guardrail OK: low-precision best-Dice rejected; incomplete raises")
 
     print("FOV CHECKPOINT-SELECT SELF-TEST PASSED")
     return 0

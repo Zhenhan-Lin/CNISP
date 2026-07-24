@@ -99,14 +99,17 @@ def main() -> int:
     result, selection = select_from_table(
         metrics, args.min_missing_mm3, args.min_visible_mm3, args.plans_file,
         args.configuration, final=args.final, expected_structures=expect)
-    print(result[["epoch", "missing_macro", "visible_macro", "full_fov_macro",
-                  "worst_condition"]].round(4).to_string(index=False))
+    show = [c for c in ["epoch", "missing_macro", "visible_macro", "full_fov_macro",
+                        "missing_precision_macro", "worst_condition"] if c in result.columns]
+    print(result[show].round(4).to_string(index=False))
     c = selection.checkpoint
     print(f"\nCHOSEN epoch={c.epoch}  missing={c.missing_macro:.4f} visible={c.visible_macro:.4f} "
-          f"full={c.full_fov_macro} worst={c.worst_condition:.4f}")
+          f"full={c.full_fov_macro} precision={c.missing_precision_macro} worst={c.worst_condition:.4f}")
     print(f"  guardrail relaxed: visible={selection.visible_guardrail_relaxed} "
           f"full={selection.full_fov_guardrail_relaxed} "
-          f"(vis_tol={selection.applied_visible_tolerance}, full_tol={selection.applied_full_tolerance})")
+          f"hallucination={selection.hallucination_guardrail_relaxed} "
+          f"(vis_tol={selection.applied_visible_tolerance}, full_tol={selection.applied_full_tolerance}, "
+          f"prec_tol={selection.applied_precision_tolerance})")
     if args.out_scores_csv:
         result.to_csv(args.out_scores_csv, index=False)
         print(f"  wrote {args.out_scores_csv}")
