@@ -123,51 +123,69 @@ def select_fov_checkpoint(
     relaxation_steps: Sequence[float] = (0.005, 0.010, 0.020),
     warn: bool = True,
 ) -> SelectionResult:
-    """Select a checkpoint (review §5.3/5.4). Primary = missing macro Dice; near-best
-    set within ``missing_tolerance``; visible + full-FOV guardrails with an
-    escalating tolerance; explicit relaxed flags in the result."""
+    """Select a checkpoint (review §5.3/5.4 + re-audit §10.3). Primary = missing
+    macro Dice; near-best within ``missing_tolerance``; visible + full-FOV
+    guardrails with an escalating tolerance; INDEPENDENT per-guardrail relaxation
+    reported in the result. If full-FOV validation exists it must be COMPLETE —
+    a missing full_fov_macro is an error, never a silent guardrail bypass."""
     if not scores:
         raise ValueError("no checkpoint scores.")
     scores = list(scores)
 
     best_missing = max(s.missing_macro for s in scores)
     best_visible = max(s.visible_macro for s in scores)
-    full_vals = [s.full_fov_macro for s in scores if s.full_fov_macro is not None]
-    best_full = max(full_vals) if full_vals else None
+
+    # full-FOV completeness (re-audit §10.3 / P0-5): all-or-nothing, no bypass.
+    full_present = any(s.full_fov_macro is not None for s in scores)
+    if full_present:
+        incomplete = sorted(s.epoch for s in scores if s.full_fov_macro is None)
+        if incomplete:
+            raise ValueError(f"full-FOV validation is present but epochs {incomplete} "
+                             "lack full_fov_macro; refuse to select on incomplete "
+                             "metrics (a None must not bypass the full-FOV guardrail).")
+        best_full = max(s.full_fov_macro for s in scores)  # type: ignore[arg-type]
+    else:
+        best_full = None
 
     near_best = [s for s in scores if s.missing_macro >= best_missing - missing_tolerance]
+    base = float(relaxation_steps[0])
 
     def _ranking_key(s: CheckpointScore):
         smoothed = s.smoothed_missing if s.smoothed_missing is not None else s.missing_macro
         return (s.worst_condition, smoothed, s.missing_macro, -s.epoch)   # earlier epoch wins ties
 
-    steps = list(relaxation_steps)
-    for tol in steps:
+    def _result(chosen: CheckpointScore) -> SelectionResult:
+        vis_margin = best_visible - chosen.visible_macro
+        vis_relaxed = vis_margin > base + 1e-12
+        if best_full is None:
+            full_margin, full_relaxed, full_tol = None, False, None
+        else:
+            full_margin = best_full - (chosen.full_fov_macro or 0.0)
+            full_relaxed = full_margin > base + 1e-12
+            full_tol = max(base, full_margin)
+        if (vis_relaxed or full_relaxed) and warn:
+            warnings.warn(f"[fov-ckpt] guardrail relaxed for epoch {chosen.epoch} "
+                          f"(visible margin {vis_margin:.4f}"
+                          + ("" if full_margin is None else f", full margin {full_margin:.4f}")
+                          + ").", stacklevel=2)
+        return SelectionResult(chosen, visible_guardrail_relaxed=vis_relaxed,
+                               full_fov_guardrail_relaxed=full_relaxed,
+                               applied_visible_tolerance=max(base, vis_margin),
+                               applied_full_tolerance=full_tol)
+
+    for tol in relaxation_steps:
         guarded = [s for s in near_best
                    if s.visible_macro >= best_visible - tol
-                   and (best_full is None or s.full_fov_macro is None
-                        or s.full_fov_macro >= best_full - tol)]
+                   and (best_full is None or s.full_fov_macro >= best_full - tol)]
         if guarded:
-            chosen = max(guarded, key=_ranking_key)
-            relaxed = tol > steps[0]
-            if relaxed and warn:
-                warnings.warn(f"[fov-ckpt] guardrails relaxed to {tol:.3f} to admit a "
-                              f"candidate (epoch {chosen.epoch}).", stacklevel=2)
-            return SelectionResult(chosen, visible_guardrail_relaxed=relaxed,
-                                   full_fov_guardrail_relaxed=(relaxed and best_full is not None),
-                                   applied_visible_tolerance=tol,
-                                   applied_full_tolerance=(None if best_full is None else tol))
+            return _result(max(guarded, key=_ranking_key))
 
     # all guardrails empty even at the loosest tolerance -> explicit fallback
     if warn:
         warnings.warn("[fov-ckpt] visible/full guardrails removed EVERY near-best "
                       "candidate even at the loosest tolerance; falling back to raw "
                       "near-best missing Dice.", stacklevel=2)
-    chosen = max(near_best, key=_ranking_key)
-    return SelectionResult(chosen, visible_guardrail_relaxed=True,
-                           full_fov_guardrail_relaxed=(best_full is not None),
-                           applied_visible_tolerance=float("inf"),
-                           applied_full_tolerance=(None if best_full is None else float("inf")))
+    return _result(max(near_best, key=_ranking_key))
 
 
 # ── self-test ────────────────────────────────────────────────────────────────
@@ -230,9 +248,20 @@ def _selftest() -> int:
     ]
     res2 = select_fov_checkpoint(forced, missing_tolerance=0.005, warn=False)
     print(f"forced-relax chosen epoch {res2.checkpoint.epoch}  "
-          f"relaxed(vis={res2.visible_guardrail_relaxed}, tol={res2.applied_visible_tolerance})")
-    assert res2.visible_guardrail_relaxed, "guardrail should report it was relaxed"
-    assert res2.checkpoint.epoch == 1, "fallback keeps the best-missing near-best member"
+          f"relaxed(vis={res2.visible_guardrail_relaxed}, full={res2.full_fov_guardrail_relaxed}, "
+          f"vis_tol={res2.applied_visible_tolerance:.3f})")
+    assert res2.visible_guardrail_relaxed and not res2.full_fov_guardrail_relaxed, \
+        "only the visible guardrail should report relaxed here"
+    assert res2.checkpoint.epoch == 1
+
+    # full-FOV completeness (§10.3): a None among present full metrics must raise.
+    mixed = [CheckpointScore(1, 0.70, 0.90, 0.6, full_fov_macro=0.93, smoothed_missing=0.70),
+             CheckpointScore(2, 0.69, 0.90, 0.6, full_fov_macro=None, smoothed_missing=0.69)]
+    try:
+        select_fov_checkpoint(mixed, warn=False)
+        raise AssertionError("incomplete full-FOV validation should raise")
+    except ValueError:
+        pass
 
     print("FOV CHECKPOINT-SELECT SELF-TEST PASSED")
     return 0

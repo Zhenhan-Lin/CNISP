@@ -54,16 +54,22 @@ class FOVCaseIndex:
         self.by_condition: Dict[FOVCondition, List[str]] = {
             c: [] for c in self.REQUIRED_CONDITIONS}
         self.full_fov_cases: List[str] = []
+        self.full_fov_set: Set[str] = set()          # O(1) metadata-based anchor test
         self.subject_by_case: Dict[str, str] = {}
         for rec in manifest_records:
             case_id = rec["case_id"]
+            if case_id in self.subject_by_case:      # re-audit §10.2: no duplicates
+                raise ValueError(f"FOVCaseIndex: duplicate case_id {case_id!r}.")
             self.subject_by_case[case_id] = str(rec["subject_id"])
             if rec.get("is_full_fov"):
                 self.full_fov_cases.append(case_id)
+                self.full_fov_set.add(case_id)
                 continue
             cond = FOVCondition(rec["crop_type"], int(rec["severity"]))
-            if cond in self.by_condition:
-                self.by_condition[cond].append(case_id)
+            if cond not in self.by_condition:        # re-audit §10.2: reject, don't drop
+                raise ValueError(f"FOVCaseIndex: unsupported condition {cond} for case "
+                                 f"{case_id!r} (allowed: axial/corner x 20/35/50).")
+            self.by_condition[cond].append(case_id)
         self._validate()
 
     def _validate(self):
@@ -148,6 +154,9 @@ class FOVCompletionBatchPlanner:
     def __init__(self, case_index: FOVCaseIndex, full_fov_anchor_probability: float = 0.5,
                  base_seed: int = 12345, global_rank: int = 0, worker_id: int = 0):
         self.case_index = case_index
+        if not (0.0 <= float(full_fov_anchor_probability) <= 1.0):
+            raise ValueError(f"full_fov_anchor_probability must be in [0,1]; got "
+                             f"{full_fov_anchor_probability}")
         self.full_fov_anchor_probability = float(full_fov_anchor_probability)
         # rank/worker-aware seed (review §4.3); apply ONCE (loader must not re-offset)
         self.effective_seed = int(base_seed) + 100_003 * int(global_rank) + 1_009 * int(worker_id)
@@ -188,7 +197,7 @@ class FOVCompletionBatchPlanner:
     def _record(self, slots: List[BatchSlot]):
         st = self.stats
         st.n_plans += 1
-        if self._looks_full(slots[0].case_id):
+        if self._is_full(slots[0].case_id):
             st.anchor_full += 1
         st.unique_subjects_sum += len({s.subject_id for s in slots})
         st.subject_reuse_events += sum(1 for s in slots if s.subject_reused)
@@ -197,9 +206,9 @@ class FOVCompletionBatchPlanner:
             key = (s.condition.crop_type, s.condition.severity)
             st.condition_counts[key] = st.condition_counts.get(key, 0) + 1
 
-    @staticmethod
-    def _looks_full(case_id: str) -> bool:
-        return case_id.endswith("_full") or "_full" in case_id
+    def _is_full(self, case_id: str) -> bool:
+        # re-audit §10.2: decide anchor-full from index metadata, not the filename.
+        return case_id in self.case_index.full_fov_set
 
     # ── resume (review §4.4) ──────────────────────────────────────────────────
     def get_state(self) -> dict:
@@ -229,6 +238,21 @@ def _synthetic_records(n_subjects: int = 8) -> List[dict]:
 
 def _selftest() -> int:
     idx = FOVCaseIndex(_synthetic_records(8))
+
+    # guards (re-audit §10.2): duplicate case_id, unsupported condition, bad prob
+    for bad in (
+        lambda: FOVCaseIndex(_synthetic_records(2)
+                             + [{"case_id": "corr_000_full", "subject_id": "000", "is_full_fov": True}]),
+        lambda: FOVCaseIndex([{"case_id": "x", "subject_id": "0", "crop_type": "axial",
+                               "severity": 99, "is_full_fov": False}] + _synthetic_records(1)),
+        lambda: FOVCompletionBatchPlanner(idx, 1.5),
+    ):
+        try:
+            bad()
+            raise AssertionError("guard should have raised")
+        except ValueError:
+            pass
+
     planner = FOVCompletionBatchPlanner(idx, 0.5, base_seed=0)
 
     N = 3000
