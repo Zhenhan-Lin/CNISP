@@ -23,9 +23,47 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
+import numpy as np
 import pandas as pd
+
+
+def _epoch_coverage(df: pd.DataFrame) -> Dict[int, frozenset]:
+    """epoch -> the set of (crop_type, severity, structure) cells present (validity-
+    filtered). Used to prove every epoch is averaged over the SAME cells."""
+    cov: Dict[int, frozenset] = {}
+    for ep, g in df.groupby("epoch"):
+        cov[int(ep)] = frozenset(
+            (str(ct), int(sv), str(st))
+            for ct, sv, st in g[["crop_type", "severity", "structure"]].to_numpy().tolist())
+    return cov
+
+
+def _check_finite(df: pd.DataFrame, col: str, what: str) -> None:
+    v = df[col].to_numpy(dtype=float)
+    if v.size and not np.isfinite(v).all():
+        bad = sorted(set(df.loc[~np.isfinite(df[col].to_numpy(dtype=float)), "epoch"].tolist()))
+        raise ValueError(f"{what}: non-finite '{col}' at epoch(s) {bad}.")
+
+
+def _check_coverage(df: pd.DataFrame, what: str, strict: bool) -> None:
+    """Every epoch must cover the same cells, else a macro average silently spans a
+    different denominator per epoch (review §12). Raise (strict) or warn."""
+    cov = _epoch_coverage(df)
+    if len(cov) <= 1:
+        return
+    union = frozenset().union(*cov.values())
+    incomplete = {ep: sorted(union - cells) for ep, cells in cov.items() if cells != union}
+    if not incomplete:
+        return
+    ex_ep = next(iter(incomplete))
+    msg = (f"{what}: inconsistent per-epoch coverage — e.g. epoch {ex_ep} is missing "
+           f"{len(incomplete[ex_ep])} cell(s) like {incomplete[ex_ep][:3]}. A missing row "
+           f"must not silently change an epoch's macro denominator.")
+    if strict:
+        raise ValueError(msg)
+    warnings.warn("[fov-ckpt] " + msg, stacklevel=2)
 
 
 @dataclass
@@ -53,6 +91,7 @@ def build_checkpoint_scores(
     min_visible_volume_voxels: int = 32,
     smooth_window: int = 3,
     full_crop_type: str = "full",
+    require_consistent_coverage: bool = True,
 ) -> pd.DataFrame:
     """Aggregate a long metrics table into per-epoch scores (review §5.2/5.3, §18).
 
@@ -71,6 +110,14 @@ def build_checkpoint_scores(
     visible_valid = trunc[trunc["visible_gt_voxels"] > min_visible_volume_voxels]
     if missing_valid.empty:
         raise ValueError("no truncated rows exceed the missing-volume floor.")
+    if visible_valid.empty:                                   # review §12
+        raise ValueError("no truncated rows exceed the visible-volume floor.")
+    # finite-metric + per-epoch coverage guards (review §12): a NaN Dice or a
+    # dropped cell must not silently inflate/deflate an epoch's macro average.
+    _check_finite(missing_valid, "missing_dice", "missing-valid rows")
+    _check_finite(visible_valid, "visible_dice", "visible-valid rows")
+    _check_coverage(missing_valid, "missing-valid", require_consistent_coverage)
+    _check_coverage(visible_valid, "visible-valid", require_consistent_coverage)
 
     def _cond_struct(df, col):
         return (df.groupby(["epoch", "crop_type", "severity", "structure"], as_index=False)
@@ -93,6 +140,8 @@ def build_checkpoint_scores(
     # full-FOV macro (optional): mean full-FOV whole Dice over structures
     full_valid = full[full["visible_gt_voxels"] > min_visible_volume_voxels]
     if not full_valid.empty:
+        _check_finite(full_valid, "visible_dice", "full-FOV rows")
+        _check_coverage(full_valid, "full-FOV", require_consistent_coverage)
         full_cs = _cond_struct(full_valid, "visible_dice")
         epoch_full = full_cs.groupby("epoch", as_index=False).agg(full_fov_macro=("val", "mean"))
         result = result.merge(epoch_full, on="epoch", how="left")
@@ -122,12 +171,17 @@ def select_fov_checkpoint(
     missing_tolerance: float = 0.005,
     relaxation_steps: Sequence[float] = (0.005, 0.010, 0.020),
     warn: bool = True,
+    strict_guardrail: bool = False,
 ) -> SelectionResult:
     """Select a checkpoint (review §5.3/5.4 + re-audit §10.3). Primary = missing
     macro Dice; near-best within ``missing_tolerance``; visible + full-FOV
     guardrails with an escalating tolerance; INDEPENDENT per-guardrail relaxation
     reported in the result. If full-FOV validation exists it must be COMPLETE —
-    a missing full_fov_macro is an error, never a silent guardrail bypass."""
+    a missing full_fov_macro is an error, never a silent guardrail bypass.
+
+    ``strict_guardrail`` (review §12, for the FINAL paper selection): if even the
+    loosest tolerance removes every near-best candidate, RAISE instead of silently
+    falling back to raw near-best missing Dice."""
     if not scores:
         raise ValueError("no checkpoint scores.")
     scores = list(scores)
@@ -180,7 +234,12 @@ def select_fov_checkpoint(
         if guarded:
             return _result(max(guarded, key=_ranking_key))
 
-    # all guardrails empty even at the loosest tolerance -> explicit fallback
+    # all guardrails empty even at the loosest tolerance
+    if strict_guardrail:                                       # review §12 (final)
+        raise ValueError(
+            "[fov-ckpt] visible/full guardrails removed EVERY near-best candidate even "
+            "at the loosest tolerance, and strict_guardrail=True: refusing to fall back "
+            "to raw near-best missing Dice. Inspect the metrics or relax explicitly.")
     if warn:
         warnings.warn("[fov-ckpt] visible/full guardrails removed EVERY near-best "
                       "candidate even at the loosest tolerance; falling back to raw "
@@ -262,6 +321,44 @@ def _selftest() -> int:
         raise AssertionError("incomplete full-FOV validation should raise")
     except ValueError:
         pass
+
+    # ── §12 new guards ──────────────────────────────────────────────────────
+    def _row(ep, st, mdice=0.5, vdice=0.9, mvox=500, vvox=800, ct="axial", sev=20):
+        return dict(epoch=ep, crop_type=ct, severity=sev, structure=st, missing_dice=mdice,
+                    visible_dice=vdice, missing_gt_voxels=mvox, visible_gt_voxels=vvox)
+
+    # (a) empty visible-valid -> raise
+    try:
+        build_checkpoint_scores(pd.DataFrame([_row(1, "ON", vvox=0)]),
+                                min_missing_volume_voxels=1, min_visible_volume_voxels=1)
+        raise AssertionError("empty visible-valid should raise")
+    except ValueError:
+        pass
+    # (b) non-finite missing dice -> raise
+    try:
+        build_checkpoint_scores(pd.DataFrame([_row(1, "ON", mdice=float("nan")), _row(1, "Globe")]),
+                                min_missing_volume_voxels=1, min_visible_volume_voxels=1)
+        raise AssertionError("non-finite missing dice should raise")
+    except ValueError:
+        pass
+    # (c) inconsistent per-epoch coverage: strict raises, non-strict only warns
+    cov = pd.DataFrame([_row(1, "ON"), _row(1, "Globe"), _row(2, "ON")])
+    try:
+        build_checkpoint_scores(cov, min_missing_volume_voxels=1, min_visible_volume_voxels=1)
+        raise AssertionError("inconsistent coverage should raise (strict)")
+    except ValueError:
+        pass
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        build_checkpoint_scores(cov, min_missing_volume_voxels=1, min_visible_volume_voxels=1,
+                                require_consistent_coverage=False)
+    # (d) strict_guardrail: every near-best fails the guardrail -> raise (no raw fallback)
+    try:
+        select_fov_checkpoint(forced, missing_tolerance=0.005, warn=False, strict_guardrail=True)
+        raise AssertionError("strict_guardrail should raise when all near-best fail")
+    except ValueError:
+        pass
+    print("§12 guards OK: empty-visible / non-finite / coverage / strict-guardrail all raise")
 
     print("FOV CHECKPOINT-SELECT SELF-TEST PASSED")
     return 0

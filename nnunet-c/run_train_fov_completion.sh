@@ -95,21 +95,26 @@ python3 "$HERE/scripts/adapt_checkpoint.py" --in "$REF_CKPT" --out "$ADAPTED" \
     --channels "$N_CHANNELS" --mask-init "$MASK_INIT"
 
 # (6b) install corrector + FOV runtime modules into nnunetv2 (import siblings).
+# §11: FAIL FAST — the FOV trainer cannot import its planner/loader/trainer siblings
+# if any is absent, so a missing REQUIRED module aborts here rather than surfacing as
+# an obscure ImportError mid-train (or silently skipping the FOV sampler).
 echo "[fov-train] (6b) install corrector + FOV modules into nnunetv2"
 python3 - "$HERE/engine" <<'PY'
 import sys, shutil, os
 import nnunetv2.training.nnUNetTrainer.nnUNetTrainer as m
 pkg = os.path.dirname(m.__file__); eng = sys.argv[1]
-mods = ["nnUNetTrainer_corrector.py", "nnUNetTrainer_OrbitalCascade.py",
-        "corrector_augment.py", "corrector_stratified_loader.py",
-        "fov_completion_planner.py", "fov_completion_loader.py",
-        "nnUNetTrainer_OrbitalFOVCompletion.py"]
-for name in mods:
-    src = os.path.join(eng, name)
-    if os.path.isfile(src):
-        shutil.copyfile(src, os.path.join(pkg, name)); print(f"[fov-train] installed {name}")
-    else:
-        print(f"[fov-train] (skip) {name} not present")
+# REQUIRED: absence is a hard error. OPTIONAL: installed if present, else noted.
+required = ["nnUNetTrainer_corrector.py", "nnUNetTrainer_OrbitalCascade.py",
+            "corrector_augment.py", "corrector_stratified_loader.py",
+            "fov_completion_planner.py", "fov_completion_loader.py",
+            "nnUNetTrainer_OrbitalFOVCompletion.py"]
+missing = [n for n in required if not os.path.isfile(os.path.join(eng, n))]
+if missing:
+    raise FileNotFoundError(f"[fov-train] required FOV runtime modules missing from "
+                            f"{eng}: {missing}. The FOV trainer cannot run without them.")
+for name in required:
+    shutil.copyfile(os.path.join(eng, name), os.path.join(pkg, name))
+    print(f"[fov-train] installed {name}")
 PY
 
 export CORRECTOR_EPOCHS CORRECTOR_LR

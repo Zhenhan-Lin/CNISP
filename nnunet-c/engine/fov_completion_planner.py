@@ -158,12 +158,40 @@ class FOVCompletionBatchPlanner:
             raise ValueError(f"full_fov_anchor_probability must be in [0,1]; got "
                              f"{full_fov_anchor_probability}")
         self.full_fov_anchor_probability = float(full_fov_anchor_probability)
-        # rank/worker-aware seed (review §4.3); apply ONCE (loader must not re-offset)
-        self.effective_seed = int(base_seed) + 100_003 * int(global_rank) + 1_009 * int(worker_id)
+        # keep the seed COMPONENTS so a forked data-loader worker can re-seed itself
+        # with a worker-specific id (review §6 / §4.3) without losing rank/base.
+        self.base_seed = int(base_seed)
+        self.global_rank = int(global_rank)
+        self.worker_id = int(worker_id)
+        self.stats = PlannerStats()
+        self._reset_streams(reset_iteration=True)
+
+    @staticmethod
+    def _mix_seed(base_seed: int, global_rank: int, worker_id: int) -> int:
+        # rank/worker-aware seed (review §4.3); apply ONCE (loader must not re-offset).
+        return int(base_seed) + 100_003 * int(global_rank) + 1_009 * int(worker_id)
+
+    def _reset_streams(self, *, reset_iteration: bool) -> None:
+        self.effective_seed = self._mix_seed(self.base_seed, self.global_rank, self.worker_id)
         self.rng = np.random.default_rng(self.effective_seed)
         self.region_scheduler = RegionQuotaScheduler(self.rng)
-        self.iteration = 0
-        self.stats = PlannerStats()
+        if reset_iteration:
+            self.iteration = 0
+
+    def reseed(self, *, base_seed: Optional[int] = None, global_rank: Optional[int] = None,
+               worker_id: Optional[int] = None, reset_iteration: bool = True) -> int:
+        """Re-derive the RNG stream from (possibly updated) seed components and return
+        the new effective_seed. Only the components passed are changed; the rest are
+        kept. Used by the loader's per-process reseed so forked workers each get a
+        DISTINCT stream instead of replaying the parent's (review §6)."""
+        if base_seed is not None:
+            self.base_seed = int(base_seed)
+        if global_rank is not None:
+            self.global_rank = int(global_rank)
+        if worker_id is not None:
+            self.worker_id = int(worker_id)
+        self._reset_streams(reset_iteration=reset_iteration)
+        return self.effective_seed
 
     def make_plan(self) -> List[BatchSlot]:
         cond_pattern = self.CONDITION_PATTERNS[self.iteration % len(self.CONDITION_PATTERNS)]

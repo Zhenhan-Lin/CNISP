@@ -51,7 +51,18 @@ def resolve_target_spacing_from_plan(
     spacing = cfgs[configuration].get("spacing")
     if not spacing or len(spacing) != 3:
         raise ValueError(f"{plans_file}[{configuration}].spacing missing/!=3: {spacing}")
-    return tuple(float(v) for v in spacing)  # type: ignore[return-value]
+    return _validate_spacing(spacing, plans_file, configuration)
+
+
+def _validate_spacing(spacing, plans_file="<spacing>", configuration="") -> Tuple[float, float, float]:
+    """Every spacing that leaves this module is 3 positive finite floats (review §13.1):
+    downstream physical->voxel conversions divide by these, so a 0/NaN/negative
+    entry must fail here rather than silently produce inf/0 voxel counts."""
+    s = tuple(float(v) for v in spacing)
+    if len(s) != 3 or any((not math.isfinite(v)) or v <= 0 for v in s):
+        raise ValueError(f"{plans_file}[{configuration}] spacing must be 3 positive "
+                         f"finite values (z,y,x); got {spacing}.")
+    return s  # type: ignore[return-value]
 
 
 def resolve_from_corrector_config(
@@ -82,11 +93,15 @@ def voxel_volume_mm3(spacing_zyx: Tuple[float, float, float]) -> float:
 
 def mm3_to_voxels(volume_mm3: float, spacing_zyx: Tuple[float, float, float]) -> int:
     """Ceil-convert a physical volume floor to a voxel count (review §5.5/12.6)."""
-    return int(math.ceil(float(volume_mm3) / voxel_volume_mm3(spacing_zyx)))
+    return int(math.ceil(float(volume_mm3) / voxel_volume_mm3(_validate_spacing(spacing_zyx))))
 
 
 def mm_to_voxels(width_mm: float, spacing_zyx: Tuple[float, float, float]) -> Tuple[int, int, int]:
-    return tuple(int(round(float(width_mm) / s)) for s in spacing_zyx)  # type: ignore[return-value]
+    """Per-axis voxel width for a physical width. Ceil (review §13.1): the seam/band
+    semantics are "cover AT LEAST this physical width", so round-up is the safe
+    direction (a half-voxel short would under-cover the band)."""
+    s = _validate_spacing(spacing_zyx)
+    return tuple(int(math.ceil(float(width_mm) / v)) for v in s)  # type: ignore[return-value]
 
 
 def _selftest() -> int:

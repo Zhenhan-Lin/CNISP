@@ -37,9 +37,17 @@ from lib.plan_spacing import mm3_to_voxels, resolve_target_spacing_from_plan  # 
 
 def select_from_table(metrics: pd.DataFrame, min_missing_mm3: float = 0.0,
                       min_visible_mm3: float = 0.0, plans_file: str = None,
-                      configuration: str = "3d_fullres"):
+                      configuration: str = "3d_fullres", final: bool = False):
     """Build per-epoch scores and select. Physical-volume floors are converted to
-    voxels with the exact plan spacing (review §5.5) when a plan is given."""
+    voxels with the exact plan spacing (review §5.5) when a plan is given.
+
+    ``final`` (the paper selection, review §12): a plan file + BOTH physical floors
+    are REQUIRED (no silent 32-voxel fallback), and the guardrail is strict — if
+    every near-best candidate fails the visible/full guardrail the selector RAISES
+    rather than falling back to raw missing Dice."""
+    if final and not (plans_file and min_missing_mm3 > 0 and min_visible_mm3 > 0):
+        raise SystemExit("--final requires --plans-file, --min-missing-mm3 and "
+                         "--min-visible-mm3 (no silent 32-voxel floor for the paper run).")
     if plans_file and (min_missing_mm3 > 0 or min_visible_mm3 > 0):
         sp = resolve_target_spacing_from_plan(plans_file, configuration)
         min_missing_vox = mm3_to_voxels(min_missing_mm3, sp) if min_missing_mm3 > 0 else 32
@@ -48,7 +56,7 @@ def select_from_table(metrics: pd.DataFrame, min_missing_mm3: float = 0.0,
         min_missing_vox = min_visible_vox = 32
     result = build_checkpoint_scores(metrics, min_missing_volume_voxels=min_missing_vox,
                                      min_visible_volume_voxels=min_visible_vox)
-    selection = select_fov_checkpoint(scores_from_frame(result))
+    selection = select_fov_checkpoint(scores_from_frame(result), strict_guardrail=final)
     return result, selection
 
 
@@ -61,6 +69,9 @@ def main() -> int:
     ap.add_argument("--configuration", default="3d_fullres")
     ap.add_argument("--min-missing-mm3", type=float, default=0.0)
     ap.add_argument("--min-visible-mm3", type=float, default=0.0)
+    ap.add_argument("--final", action="store_true",
+                    help="paper selection: require plan + both physical floors and a "
+                         "strict guardrail (review §12); no silent 32-voxel fallback.")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
@@ -71,7 +82,8 @@ def main() -> int:
 
     metrics = pd.read_csv(args.metrics_csv)
     result, selection = select_from_table(
-        metrics, args.min_missing_mm3, args.min_visible_mm3, args.plans_file, args.configuration)
+        metrics, args.min_missing_mm3, args.min_visible_mm3, args.plans_file,
+        args.configuration, final=args.final)
     print(result[["epoch", "missing_macro", "visible_macro", "full_fov_macro",
                   "worst_condition"]].round(4).to_string(index=False))
     c = selection.checkpoint
