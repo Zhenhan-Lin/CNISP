@@ -27,6 +27,7 @@ results_when_model_learned_both_eyes
 nnUNet-master
 ECLARE-main
 docs
+orbital_shape_prior_st1/casename_files/*
 nnunet-c/__pycache__
 nnunet-c/lib/__pycache__
 nnunet-c/engine/__pycache__
@@ -45,3 +46,5 @@ simulation/__pycache__
 # nnUNet-C runtime logs/status (keep dir, ignore contents)
 nnunet-c/logs/*
 !nnunet-c/logs/.gitkeep
+# Statistics output (generated, not tracked)
+statistics/*.txt
