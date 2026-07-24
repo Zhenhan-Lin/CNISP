@@ -37,17 +37,21 @@ from lib.plan_spacing import mm3_to_voxels, resolve_target_spacing_from_plan  # 
 
 def select_from_table(metrics: pd.DataFrame, min_missing_mm3: float = 0.0,
                       min_visible_mm3: float = 0.0, plans_file: str = None,
-                      configuration: str = "3d_fullres", final: bool = False):
+                      configuration: str = "3d_fullres", final: bool = False,
+                      expected_structures=None):
     """Build per-epoch scores and select. Physical-volume floors are converted to
     voxels with the exact plan spacing (review §5.5) when a plan is given.
 
-    ``final`` (the paper selection, review §12): a plan file + BOTH physical floors
-    are REQUIRED (no silent 32-voxel fallback), and the guardrail is strict — if
-    every near-best candidate fails the visible/full guardrail the selector RAISES
-    rather than falling back to raw missing Dice."""
-    if final and not (plans_file and min_missing_mm3 > 0 and min_visible_mm3 > 0):
-        raise SystemExit("--final requires --plans-file, --min-missing-mm3 and "
-                         "--min-visible-mm3 (no silent 32-voxel floor for the paper run).")
+    ``final`` (the paper selection, review §12 + brief-recs items 5/6): a plan file,
+    BOTH physical floors AND the expected structure list are REQUIRED (no silent
+    32-voxel floor, absolute coverage enforced). The guardrail is FIXED at a single
+    0.005 step and strict — visible/full Dice may drop at most 0.5pp below their best,
+    else the selector RAISES rather than falling back to raw missing Dice."""
+    if final and not (plans_file and min_missing_mm3 > 0 and min_visible_mm3 > 0
+                      and expected_structures):
+        raise SystemExit("--final requires --plans-file, --min-missing-mm3, "
+                         "--min-visible-mm3 and --expect-structures (no silent 32-voxel "
+                         "floor and no unverified coverage for the paper run).")
     if plans_file and (min_missing_mm3 > 0 or min_visible_mm3 > 0):
         sp = resolve_target_spacing_from_plan(plans_file, configuration)
         min_missing_vox = mm3_to_voxels(min_missing_mm3, sp) if min_missing_mm3 > 0 else 32
@@ -55,8 +59,12 @@ def select_from_table(metrics: pd.DataFrame, min_missing_mm3: float = 0.0,
     else:
         min_missing_vox = min_visible_vox = 32
     result = build_checkpoint_scores(metrics, min_missing_volume_voxels=min_missing_vox,
-                                     min_visible_volume_voxels=min_visible_vox)
-    selection = select_fov_checkpoint(scores_from_frame(result), strict_guardrail=final)
+                                     min_visible_volume_voxels=min_visible_vox,
+                                     expected_structures=expected_structures)
+    # brief-recs item 5: final selection pins the guardrail to a single 0.005 step.
+    steps = (0.005,) if final else (0.005, 0.010, 0.020)
+    selection = select_fov_checkpoint(scores_from_frame(result), relaxation_steps=steps,
+                                      strict_guardrail=final)
     return result, selection
 
 
@@ -69,21 +77,28 @@ def main() -> int:
     ap.add_argument("--configuration", default="3d_fullres")
     ap.add_argument("--min-missing-mm3", type=float, default=0.0)
     ap.add_argument("--min-visible-mm3", type=float, default=0.0)
+    ap.add_argument("--expect-structures", default=None,
+                    help="comma-separated structure names the eval MUST cover every epoch "
+                         "(brief-recs item 6), e.g. ON,Recti,Globe,Fat. Required with --final.")
     ap.add_argument("--final", action="store_true",
-                    help="paper selection: require plan + both physical floors and a "
-                         "strict guardrail (review §12); no silent 32-voxel fallback.")
+                    help="paper selection: require plan + both physical floors + "
+                         "--expect-structures; fixed 0.005 strict guardrail (review §12, "
+                         "brief-recs 5/6); no silent fallback.")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
         return _selftest()
     if not args.metrics_csv:
-        ap.error("--metrics-csv is required (the sweep that builds it runs on masi-55; "
-                 "see the module docstring). Use --self-test to exercise the selector.")
+        ap.error("--metrics-csv is required (the sweep that builds it is "
+                 "run_fov_completion_sweep.sh; see the module docstring). Use --self-test "
+                 "to exercise the selector.")
 
+    expect = ([s.strip() for s in args.expect_structures.split(",") if s.strip()]
+              if args.expect_structures else None)
     metrics = pd.read_csv(args.metrics_csv)
     result, selection = select_from_table(
         metrics, args.min_missing_mm3, args.min_visible_mm3, args.plans_file,
-        args.configuration, final=args.final)
+        args.configuration, final=args.final, expected_structures=expect)
     print(result[["epoch", "missing_macro", "visible_macro", "full_fov_macro",
                   "worst_condition"]].round(4).to_string(index=False))
     c = selection.checkpoint

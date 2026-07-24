@@ -61,6 +61,16 @@ def _load_completion_records(path: str):
 class nnUNetTrainer_OrbitalFOVCompletion(nnUNetTrainer_OrbitalCascade):
 
     def initialize(self):
+        # brief-recs item 3: single-GPU only for the first version. DDP currently only
+        # separates per-rank seeds; the cross-GPU GLOBAL batch composition (anchor+20+
+        # 35+50 must hold GLOBALLY, not per-rank) is undefined, so multi-GPU would
+        # silently change the effective global batch. Fail fast rather than mislead.
+        if getattr(self, "is_ddp", False):
+            raise RuntimeError(
+                "nnUNetTrainer_OrbitalFOVCompletion supports SINGLE-GPU training only. "
+                "The FOV batch composition (anchor + severity 20/35/50) is defined per "
+                "batch; a global multi-GPU composition is not yet implemented. Run on one "
+                "GPU (CUDA_VISIBLE_DEVICES=<one>).")
         # §8: FOV-safe prior-aug defaults MUST be set BEFORE super().initialize().
         # The parent OrbitalCascade.initialize() reads CORRECTOR_DROP_ALL/DROP_EACH
         # into self._drop_all/_drop_each during its own initialize(); setting them
@@ -71,6 +81,13 @@ class nnUNetTrainer_OrbitalFOVCompletion(nnUNetTrainer_OrbitalCascade):
         os.environ.setdefault("CORRECTOR_DROP_EACH", "0.10")
         os.environ.setdefault("CORRECTOR_SAVE_EVERY", "25")
         super().initialize()
+        # brief-recs item 4: set the FOV batch composition EXPLICITLY. The parent
+        # derives batch_size/oversample from the thickness strata {3,6,9} (which
+        # happens to give 4 / 0.75); pin them here so FOV never depends on thickness
+        # config. Layout: position 0 = anchor (random/background), positions 1..3 =
+        # severity 20/35/50 forced foreground under oversample 0.75.
+        self.batch_size = 4
+        self.oversample_foreground_percent = 0.75
         self._fov_prior_note = (f"FOV prior aug: drop_all={self._drop_all} "
                                 f"drop_each={self._drop_each} (jitter kept)")
         # snapshot cadence (§16.1): default 25 for the noisier completion landscape.
@@ -82,35 +99,55 @@ class nnUNetTrainer_OrbitalFOVCompletion(nnUNetTrainer_OrbitalCascade):
         self.print_to_log_file(f"[fov] {self._fov_prior_note}; save_every={self.save_every}; "
                                f"manifest={self._fov_manifest_path}")
 
-    def _build_planner(self, dataset_tr) -> FOVCompletionBatchPlanner:
-        records = _load_completion_records(self._fov_manifest_path)
-        # §9: obtain THIS fold's train identifiers and FAIL CLOSED if we can't. The
-        # previous "if train_keys is not None" guard fell through to using ALL
-        # manifest records when no accessor matched — that silently leaks validation
-        # cases into the training sampler. dataset_tr's accessor name varies by
-        # nnU-Net version; add yours here rather than letting it fail open.
-        train_keys = None
+    @staticmethod
+    def _dataset_keys(dataset, what: str) -> set:
+        # §9: obtain a split's case identifiers and FAIL CLOSED if we can't (the old
+        # "if not None" guard fell through to using ALL manifest records — a silent
+        # validation leak). The accessor name varies by nnU-Net version; add yours.
         for attr in ("identifiers", "keys", "case_identifiers"):
-            v = getattr(dataset_tr, attr, None)
+            v = getattr(dataset, attr, None)
             if callable(v):
                 v = v()
             if v is not None:
-                train_keys = set(v)
-                break
-        if train_keys is None:
-            raise RuntimeError(
-                "[fov] cannot obtain this fold's training identifiers from dataset_tr "
-                "(tried identifiers/keys/case_identifiers). Refusing to fall back to all "
-                "manifest records (that would leak validation cases). Add the correct "
-                "accessor for your installed nnU-Net version.")
+                return set(v)
+        raise RuntimeError(
+            f"[fov] cannot obtain the {what} identifiers from the dataset object "
+            f"(tried identifiers/keys/case_identifiers). Refusing to proceed without a "
+            f"verified split. Add the correct accessor for your installed nnU-Net version.")
+
+    def _build_planner(self, dataset_tr, dataset_val) -> FOVCompletionBatchPlanner:
+        records = _load_completion_records(self._fov_manifest_path)
+        train_keys = self._dataset_keys(dataset_tr, "training")
+        val_keys = self._dataset_keys(dataset_val, "validation")
         manifest_keys = {r["case_id"] for r in records}
-        missing = train_keys - manifest_keys
-        if missing:
+        case_to_subject = {r["case_id"]: str(r["subject_id"]) for r in records}
+
+        # every split case must be resolvable in the manifest (need its subject id).
+        for split_name, keys in (("train", train_keys), ("val", val_keys)):
+            unknown = keys - manifest_keys
+            if unknown:
+                raise RuntimeError(
+                    f"[fov] {len(unknown)} {split_name} case(s) are absent from the "
+                    f"completion manifest (e.g. {sorted(unknown)[:5]}). The manifest "
+                    f"case_id must equal the nnU-Net dataset case id — supply a "
+                    f"--case-map in the post-pass if the dataset renamed them (report §6).")
+
+        # brief-recs item 2: HARD patient-level (subject) leakage check. A case-id
+        # filter is not enough — the seven FOV variants of one patient (full + axial/
+        # corner × 20/35/50) must all land in the SAME split, else a corner-truncated
+        # view of a "held-out" patient trains while its axial view validates.
+        train_subjects = {case_to_subject[k] for k in train_keys}
+        val_subjects = {case_to_subject[k] for k in val_keys}
+        overlap = sorted(train_subjects & val_subjects)
+        if overlap:
             raise RuntimeError(
-                f"[fov] {len(missing)} fold-train case(s) are absent from the completion "
-                f"manifest (e.g. {sorted(missing)[:5]}). The manifest case_id must equal "
-                f"the nnU-Net dataset case id — supply a --case-map in the post-pass if the "
-                f"dataset renamed them (report §6 item 3).")
+                f"[fov] PATIENT-LEVEL LEAKAGE: {len(overlap)} subject(s) appear in BOTH "
+                f"train and val (e.g. {overlap[:10]}). splits_final.json must be generated "
+                f"by SUBJECT, not by independently random-folding the 7 FOV cases.")
+        self.print_to_log_file(
+            f"[fov] split OK: {len(train_subjects)} train / {len(val_subjects)} val subjects, "
+            f"no patient-level overlap.")
+
         records = [r for r in records if r["case_id"] in train_keys]
         if not records:
             raise RuntimeError("[fov] no completion records match this fold's train keys.")
@@ -171,7 +208,7 @@ class nnUNetTrainer_OrbitalFOVCompletion(nnUNetTrainer_OrbitalCascade):
             ignore_label=self.label_manager.ignore_label)
 
         dataset_tr, dataset_val = self.get_tr_and_val_datasets()
-        planner = self._build_planner(dataset_tr)
+        planner = self._build_planner(dataset_tr, dataset_val)   # incl. patient-level leak check
 
         # TRAIN loader -> FOV subclass (planner + region-aware center); VAL -> stock.
         dl_tr = FOVCompletionStratifiedDataLoader(

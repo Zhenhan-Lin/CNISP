@@ -66,6 +66,39 @@ def _check_coverage(df: pd.DataFrame, what: str, strict: bool) -> None:
     warnings.warn("[fov-ckpt] " + msg, stacklevel=2)
 
 
+def _check_absolute_coverage(metrics: pd.DataFrame, expected_structures: Sequence[str],
+                             crop_types: Sequence[str], severities: Sequence[int],
+                             full_crop_type: str, strict: bool) -> None:
+    """brief-recs item 6: check the RAW table against the FIXED expected grid, so a
+    condition×structure that is absent in EVERY epoch (which the per-epoch consistency
+    check cannot see — it only compares epochs to each other) is still caught.
+
+    Expected per epoch: crop_types × severities × structures (truncated) PLUS
+    (full_crop_type, structure) for each structure. Runs on the raw metrics BEFORE
+    validity filtering — the sweep must EMIT a row for every cell (Dice may be NaN /
+    empty region); validity filtering happens afterwards."""
+    structs = [str(s) for s in expected_structures]
+    expected = {(str(ct), int(sv), st) for ct in crop_types for sv in severities for st in structs}
+    expected |= {(str(full_crop_type), 0, st) for st in structs}  # full-FOV severity encoded 0
+    present_by_epoch: Dict[int, set] = {}
+    for ep, g in metrics.groupby("epoch"):
+        present_by_epoch[int(ep)] = {
+            (str(ct), int(sv), str(st))
+            for ct, sv, st in g[["crop_type", "severity", "structure"]].to_numpy().tolist()}
+    problems = {ep: sorted(expected - present) for ep, present in present_by_epoch.items()
+                if expected - present}
+    if not problems:
+        return
+    ex_ep = next(iter(problems))
+    msg = (f"absolute coverage: epoch {ex_ep} is missing {len(problems[ex_ep])} expected "
+           f"cell(s) like {problems[ex_ep][:3]} (expected {len(expected)} = "
+           f"{len(crop_types)}crop×{len(severities)}sev×{len(structs)}struct + full×{len(structs)}). "
+           f"The eval sweep must emit a row for every condition×structure.")
+    if strict:
+        raise ValueError(msg)
+    warnings.warn("[fov-ckpt] " + msg, stacklevel=2)
+
+
 @dataclass
 class CheckpointScore:
     epoch: int
@@ -92,6 +125,9 @@ def build_checkpoint_scores(
     smooth_window: int = 3,
     full_crop_type: str = "full",
     require_consistent_coverage: bool = True,
+    expected_structures: Optional[Sequence[str]] = None,
+    expected_crop_types: Sequence[str] = ("axial", "corner"),
+    expected_severities: Sequence[int] = (20, 35, 50),
 ) -> pd.DataFrame:
     """Aggregate a long metrics table into per-epoch scores (review §5.2/5.3, §18).
 
@@ -102,6 +138,12 @@ def build_checkpoint_scores(
     Returns one row per epoch: missing_macro, visible_macro, full_fov_macro,
     worst_condition, smoothed_missing.
     """
+    # brief-recs item 6: absolute coverage against the fixed grid, on the RAW table.
+    if expected_structures is not None:
+        _check_absolute_coverage(metrics, expected_structures, expected_crop_types,
+                                 expected_severities, full_crop_type,
+                                 strict=require_consistent_coverage)
+
     trunc = metrics[metrics["crop_type"] != full_crop_type]
     full = metrics[metrics["crop_type"] == full_crop_type]
 
@@ -358,7 +400,18 @@ def _selftest() -> int:
         raise AssertionError("strict_guardrail should raise when all near-best fail")
     except ValueError:
         pass
-    print("§12 guards OK: empty-visible / non-finite / coverage / strict-guardrail all raise")
+    # (e) brief-recs item 6: absolute coverage. The full synthetic df covers the whole
+    # 2x3x4 + full x4 grid -> passes; dropping a structure from EVERY epoch -> raises.
+    build_checkpoint_scores(df, min_missing_volume_voxels=nvox, min_visible_volume_voxels=nvox,
+                            expected_structures=structs)
+    df_gap = df[df["structure"] != "Fat"]        # Fat absent in ALL epochs
+    try:
+        build_checkpoint_scores(df_gap, min_missing_volume_voxels=nvox,
+                                min_visible_volume_voxels=nvox, expected_structures=structs)
+        raise AssertionError("absolute coverage should raise when a structure is never present")
+    except ValueError:
+        pass
+    print("§12 guards OK: empty-visible / non-finite / coverage / strict-guardrail / absolute all raise")
 
     print("FOV CHECKPOINT-SELECT SELF-TEST PASSED")
     return 0

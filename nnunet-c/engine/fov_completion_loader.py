@@ -1,16 +1,22 @@
 """
-FOV-completion data loader — a THIN extension of the proven corrector loader
-(re-audit §7-8). It changes only:
+FOV-completion data loader — a THIN extension of the STOCK nnU-Net loader
+(re-audit §7-8; brief-recs item 1). It changes only:
 
   1. which cases are selected      -> get_indices() delegates to FOVCompletionBatchPlanner
   2. where each patch is centered   -> region + structure aware center, from
                                        properties['class_locations_fov']
 
+It inherits ``nnunetv2 nnUNetDataLoader`` DIRECTLY — NOT the thickness
+``StepStratifiednnUNetDataLoader``. The step loader's __init__ requires every
+identifier to end in ``_step{XX}`` and asserts ``batch_size == 1 + len(strata)``;
+FOV case ids (``fov_{subject}_{cond}``) satisfy neither and would crash at loader
+construction. FOV stratification is condition×region, driven entirely by the
+planner + class_locations_fov, so none of the step machinery is needed.
+
 Everything else — case/seg/seg_prev loading, cropping, seg_prev concatenation,
 MoveSegAsOneHotToDataTransform (one-hot prior into channels 1-4), target
-extraction, deep supervision — is INHERITED unchanged from
-StepStratifiednnUNetDataLoader / the stock nnU-Net loader. The FOV loader never
-touches channel assembly or label handling.
+extraction, deep supervision — is INHERITED unchanged from the stock nnU-Net
+loader. The FOV loader never touches channel assembly or label handling.
 
 Center injection reuses the stock ``get_bbox`` clamp: for a region slot we hand
 ``super().get_bbox`` a class_locations dict containing only the chosen structure's
@@ -64,23 +70,23 @@ def select_region_structure(
 
 
 # ── the loader class (needs the installed nnU-Net) ────────────────────────────
-try:                                            # installed into nnunetv2.training.nnUNetTrainer.*
-    from corrector_stratified_loader import StepStratifiednnUNetDataLoader as _Base
+# brief-recs item 1: inherit the STOCK loader, not the thickness step loader.
+try:                                            # the real base on the GPU box
+    from nnunetv2.training.dataloading.data_loader import nnUNetDataLoader as _Base
 except Exception:                               # noqa: BLE001
-    try:
-        from engine.corrector_stratified_loader import StepStratifiednnUNetDataLoader as _Base
-    except Exception:                           # noqa: BLE001
-        _Base = object                          # allows import for the pure self-test
+    _Base = object                              # allows import for the pure self-test
 
 
 class FOVCompletionStratifiedDataLoader(_Base):  # type: ignore[misc,valid-type]
-    """Thin FOV subclass. Requires: ``planner`` (FOVCompletionBatchPlanner) and
-    ``preprocessed_folder`` (to read each case's class_locations_fov). All other
-    args are forwarded to the corrector/stock loader unchanged."""
+    """Thin FOV subclass of the STOCK nnU-Net loader. "Stratified" now refers to the
+    planner's condition×region stratification, NOT the thickness step strata. Requires
+    ``planner`` (FOVCompletionBatchPlanner) and ``preprocessed_folder`` (to read each
+    case's class_locations_fov). All other args are forwarded to the stock loader
+    unchanged."""
 
     def __init__(self, *args, planner, preprocessed_folder, require_clf: bool = True,
                  log_every: int = 200, **kwargs):
-        # NOTE: do not pass ``strata`` — FOV strata come from the planner, not steps.
+        # defensive: the stock loader takes no ``strata`` kwarg (the step loader did).
         kwargs.pop("strata", None)
         super().__init__(*args, **kwargs)        # type: ignore[misc]
         self.planner = planner
